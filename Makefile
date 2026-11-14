@@ -19,12 +19,12 @@ format: .venv
 	.venv/bin/ruff format .
 
 test: .venv
-	.venv/bin/mypy src tests
+	.venv/bin/mypy src
 	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
 	.venv/bin/python3 src/generate_badge.py
 
 test-windows: ## Run safe real-Windows integration tests locally (or in local Windows Docker container)
-	WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py -v
+	WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py -v
 
 pre-commit: hooks
 	./.githooks/pre-commit

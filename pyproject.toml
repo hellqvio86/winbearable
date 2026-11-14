@@ -76,6 +76,7 @@ ignore = []
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["src/tests"]
 markers = [
   "windows_integration: safe real-Windows integration tests (requires WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 on win32)",
 ]

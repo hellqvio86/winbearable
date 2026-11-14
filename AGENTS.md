@@ -16,7 +16,7 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
    ```
    This hook runs:
    - `ruff check .` and `ruff format --check .`
-   - `mypy src tests` (strict mode)
+   - `mypy src` (strict mode)
    - `pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80`
    - `trufflehog` verified secret scan
    - `trivy fs --severity HIGH,CRITICAL` vulnerability scan
@@ -25,7 +25,7 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
    - Never add `windows-latest` runners to GitHub Actions (they burn 2x billing minutes, waste cloud credits, and send money to Microsoft). CI runs exclusively on free Linux (`ubuntu-latest`).
    - Run as much as possible **locally**:
      - Unit tests & Linux dev flow: inside the Linux **Dev Container** (`.devcontainer/devcontainer.json`, using free open-source `ghcr.io/astral-sh/uv:python3.13-bookworm-slim`) or WSL2.
-     - Real Windows integration tests (`tests/test_windows_integration.py`): run locally on Windows (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py`) or in a local Windows Docker container (`Dockerfile.windows` when Docker Desktop is in Windows-container mode).
+     - Real Windows integration tests (`src/tests/test_windows_integration.py`): run locally on Windows (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py`) or in a local Windows Docker container (`Dockerfile.windows` when Docker Desktop is in Windows-container mode).
 
 ---
 

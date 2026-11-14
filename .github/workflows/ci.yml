@@ -60,7 +60,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Run mypy strict type check
-        run: uv run mypy src tests
+        run: uv run mypy src
 
   test:
     name: Test (Python ${{ matrix.python-version }})
