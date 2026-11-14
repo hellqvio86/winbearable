@@ -83,6 +83,8 @@ def _normalize_key_path(key_path: str) -> str:
 class InMemoryRegistryBackend:
     """Deterministic in-memory registry backend for Linux CI, unit tests, and dry-runs."""
 
+    is_simulated: bool = True
+
     def __init__(
         self,
         initial_values: dict[tuple[str, str, str], tuple[RegistryValueData, str]] | None = None,
@@ -233,6 +235,8 @@ class InMemoryRegistryBackend:
 
 class WinregBackend:
     """Native Windows registry backend powered by stdlib winreg (zero PowerShell)."""
+
+    is_simulated: bool = False
 
     def __init__(self, winreg_module: Any | None = None) -> None:
         if winreg_module is None:
@@ -458,6 +462,8 @@ def find_wsl_reg_exe() -> str | None:
 
 class WslInteropRegistryBackend:
     """Read-only Windows registry backend for WSL2 via reg.exe interop."""
+
+    is_simulated: bool = False
 
     def __init__(self, reg_exe_path: str = "reg.exe") -> None:
         self._reg_exe = reg_exe_path

@@ -254,6 +254,18 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 | `hardening.disable_guest_and_blank_passwords` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` | `LimitBlankPasswordUse` / `EnableGuestAccount` | `REG_DWORD` | `1` / `0` |
 | `hardening.browser_privacy_baseline` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Edge` & `Google\Chrome` | `PasswordManagerEnabled` / `TrackingPrevention` | `REG_DWORD` | `0` / `2` |
 
+### Journal Recovery (`wb recover`)
+
+If an apply or rollback is interrupted (power loss, crash, or failed step), `wb` preserves the pre-change snapshots in `%LOCALAPPDATA%\winbearable\state.json` (`PLANNED` / `APPLYING` / `ROLLING_BACK` / `FAILED`) and blocks new mutating applies until recovered:
+
+```cmd
+wb doctor               # Surfaces incomplete transactions
+wb recover              # Dry-run preview of incomplete runs to recover
+wb recover --apply      # Idempotently compensate and mark ROLLED_BACK
+```
+
+(`wb rollback --incomplete --apply` is an equivalent alias.)
+
 ---
 
 ## Built-in TOML Profiles

@@ -31,7 +31,7 @@ from .models import (
     UnsupportedPlatformError,
 )
 from .operations import format_registry_op, inspect_non_registry_operations
-from .state import StateStore
+from .state import StateStore, StateStoreError
 from .tweaks import get_all_tweaks, get_tweak
 from .wsl import plan_or_apply_wsl
 
@@ -459,19 +459,30 @@ def _execute_tweak_mutations(
     for svc_spec in tweak.service_specs:
         if not system.set_service_start_type(registry, svc_spec.service_name, svc_spec.start_type):
             raise RuntimeError(
-                f"Failed to configure service '{svc_spec.service_name}' start_type={svc_spec.start_type}."
+                _format_op_failure(
+                    system,
+                    f"Failed to configure service '{svc_spec.service_name}' start_type={svc_spec.start_type}.",
+                )
             )
         _ckpt(f"{tweak.tweak_id}:service:{svc_spec.service_name}")
 
     for task_spec in tweak.task_specs:
         if not system.set_scheduled_task_enabled(task_spec.task_path, task_spec.enabled):
-            raise RuntimeError(f"Failed to set scheduled task '{task_spec.task_path}' enabled={task_spec.enabled}.")
+            raise RuntimeError(
+                _format_op_failure(
+                    system,
+                    f"Failed to set scheduled task '{task_spec.task_path}' enabled={task_spec.enabled}.",
+                )
+            )
         _ckpt(f"{tweak.tweak_id}:task:{task_spec.task_path}")
 
     for feat_spec in tweak.feature_specs:
         if not system.set_optional_feature_enabled(feat_spec.feature_name, feat_spec.enabled):
             raise RuntimeError(
-                f"Failed to set optional feature '{feat_spec.feature_name}' enabled={feat_spec.enabled}."
+                _format_op_failure(
+                    system,
+                    f"Failed to set optional feature '{feat_spec.feature_name}' enabled={feat_spec.enabled}.",
+                )
             )
         _ckpt(f"{tweak.tweak_id}:feature:{feat_spec.feature_name}")
 
@@ -482,19 +493,26 @@ def _execute_tweak_mutations(
                 scope=winget_spec.scope,
                 vscode_extensions=(),
             ):
-                raise RuntimeError(f"Failed to install winget package '{winget_spec.package_id}'.")
+                raise RuntimeError(
+                    _format_op_failure(system, f"Failed to install winget package '{winget_spec.package_id}'.")
+                )
             newly_installed_winget.append(winget_spec.package_id)
             _ckpt(f"{tweak.tweak_id}:winget:{winget_spec.package_id}")
         for ext in winget_spec.vscode_extensions:
             if not system.is_vscode_extension_installed(ext):
                 if not system.install_vscode_extension(ext):
-                    raise RuntimeError(f"Failed to install VS Code extension '{ext}' for '{winget_spec.package_id}'.")
+                    raise RuntimeError(
+                        _format_op_failure(
+                            system,
+                            f"Failed to install VS Code extension '{ext}' for '{winget_spec.package_id}'.",
+                        )
+                    )
                 newly_installed_extensions.append(ext)
                 _ckpt(f"{tweak.tweak_id}:vscode_ext:{ext}")
 
     if tweak.uninstall_onedrive:
         if not system.uninstall_onedrive_client():
-            raise RuntimeError("Failed to uninstall OneDrive client.")
+            raise RuntimeError(_format_op_failure(system, "Failed to uninstall OneDrive client."))
         _ckpt(f"{tweak.tweak_id}:onedrive_uninstall")
 
     post_check = detect_tweak(tweak, env, registry, system)
@@ -502,6 +520,32 @@ def _execute_tweak_mutations(
         raise RuntimeError(
             f"Post-apply verification failed for '{tweak.tweak_id}': {post_check.status} ({post_check.detail})"
         )
+
+
+def _require_native_backends(
+    registry: RegistryBackend,
+    system: SystemBackend,
+    allow_simulated: bool,
+) -> None:
+    if allow_simulated:
+        return
+    if getattr(registry, "is_simulated", False) or getattr(system, "is_simulated", False):
+        raise UnsupportedPlatformError(
+            "Refusing mutating operation against simulated/in-memory backend. "
+            "Use native Windows backends for real changes."
+        )
+
+
+def _format_op_failure(system: SystemBackend, fallback_msg: str) -> str:
+    outcome = getattr(system, "last_outcome", None)
+    if outcome is not None and not outcome.ok:
+        detail = outcome.message.strip() if outcome.message else fallback_msg
+        return (
+            f"[{outcome.status}] {fallback_msg}: {detail}"
+            if detail != fallback_msg
+            else f"[{outcome.status}] {fallback_msg}"
+        )
+    return fallback_msg
 
 
 def apply_profile(
@@ -515,10 +559,20 @@ def apply_profile(
     allow_irreversible: bool = False,
     force_kill_processes: bool = False,
     wslconfig_path: Path | None = None,
+    allow_simulated: bool = False,
 ) -> ApplySummary:
     """Plan or apply a profile with a write-ahead transaction journal and rollback on failure."""
-    if not dry_run and not env.is_windows:
-        raise UnsupportedPlatformError(f"Applying tweaks is only supported on Windows (current OS: {env.os_name}).")
+    if not dry_run:
+        if not env.is_windows:
+            raise UnsupportedPlatformError(f"Applying tweaks is only supported on Windows (current OS: {env.os_name}).")
+        _require_native_backends(registry, system, allow_simulated)
+        incomplete = state_store.get_incomplete_runs()
+        if incomplete:
+            run_ids = ", ".join(rec.run_id for rec in incomplete)
+            raise StateStoreError(
+                f"Incomplete transaction(s) detected ({run_ids}). "
+                "Run `wb recover --apply` (or `wb rollback --incomplete --apply`) before applying new changes."
+            )
     evaluations = evaluate_profile(profile, env, registry, system)
 
     drifted_high_risk = [
@@ -529,12 +583,15 @@ def apply_profile(
             f"Refusing to apply high-risk tweak(s) ({', '.join(drifted_high_risk)}) without --i-know-what-im-doing."
         )
 
-    drifted_irreversible = [
-        res.tweak_id for res in evaluations if res.status == TweakStatus.DRIFTED and res.irreversible
+    drifted_irreversible_details = [
+        f"{res.tweak_id} ({', '.join(op.target for op in res.operations if not op.reversible) or res.tweak_id})"
+        for res in evaluations
+        if res.status == TweakStatus.DRIFTED and res.irreversible
     ]
-    if not dry_run and drifted_irreversible and not allow_irreversible:
+    if not dry_run and drifted_irreversible_details and not allow_irreversible:
         raise IrreversibleActionError(
-            f"Refusing to apply irreversible tweak(s) ({', '.join(drifted_irreversible)}) without --allow-irreversible."
+            f"Refusing to apply irreversible action(s): {'; '.join(drifted_irreversible_details)} "
+            "without --allow-irreversible."
         )
 
     applied_ids: list[str] = []
@@ -718,9 +775,13 @@ def rollback_runs(
     system: SystemBackend,
     to_run_id: str | None = None,
     dry_run: bool = True,
+    allow_simulated: bool = False,
 ) -> list[RunRecord]:
     """Revert the latest run (or all runs back to to_run_id inclusive)."""
     from contextlib import nullcontext
+
+    if not dry_run:
+        _require_native_backends(registry, system, allow_simulated)
 
     lock_ctx = state_store.transaction_lock() if not dry_run else nullcontext()
     with lock_ctx:
@@ -731,6 +792,86 @@ def rollback_runs(
             to_run_id=to_run_id,
             dry_run=dry_run,
         )
+
+
+def recover_incomplete_runs(
+    state_store: StateStore,
+    registry: RegistryBackend,
+    system: SystemBackend,
+    dry_run: bool = True,
+    allow_simulated: bool = False,
+) -> list[RunRecord]:
+    """Idempotently inspect and recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) runs."""
+    from contextlib import nullcontext
+
+    if not dry_run:
+        _require_native_backends(registry, system, allow_simulated)
+
+    lock_ctx = state_store.transaction_lock() if not dry_run else nullcontext()
+    with lock_ctx:
+        incomplete = state_store.get_incomplete_runs()
+        if dry_run or not incomplete:
+            return list(reversed(incomplete))
+
+        recovered: list[RunRecord] = []
+        for rec in reversed(incomplete):
+            if rec.state == TransactionState.PLANNED and not rec.completed_operations:
+                done = RunRecord(
+                    run_id=rec.run_id,
+                    timestamp=rec.timestamp,
+                    profile_name=rec.profile_name,
+                    applied_tweaks=rec.applied_tweaks,
+                    registry_snapshots=rec.registry_snapshots,
+                    service_snapshots=rec.service_snapshots,
+                    task_snapshots=rec.task_snapshots,
+                    feature_snapshots=rec.feature_snapshots,
+                    installed_winget_packages=rec.installed_winget_packages,
+                    installed_vscode_extensions=rec.installed_vscode_extensions,
+                    completed_operations=rec.completed_operations,
+                    state=TransactionState.ROLLED_BACK,
+                    error=rec.error,
+                )
+                state_store.upsert_run(done)
+                recovered.append(done)
+                continue
+
+            rolling_back = RunRecord(
+                run_id=rec.run_id,
+                timestamp=rec.timestamp,
+                profile_name=rec.profile_name,
+                applied_tweaks=rec.applied_tweaks,
+                registry_snapshots=rec.registry_snapshots,
+                service_snapshots=rec.service_snapshots,
+                task_snapshots=rec.task_snapshots,
+                feature_snapshots=rec.feature_snapshots,
+                installed_winget_packages=rec.installed_winget_packages,
+                installed_vscode_extensions=rec.installed_vscode_extensions,
+                completed_operations=rec.completed_operations,
+                state=TransactionState.ROLLING_BACK,
+                error=rec.error,
+            )
+            state_store.upsert_run(rolling_back)
+            comp_errors = _compensate_run_record(rec, registry, system)
+            final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+            final_error = "; ".join(comp_errors) if comp_errors else rec.error
+            final_rec = RunRecord(
+                run_id=rec.run_id,
+                timestamp=rec.timestamp,
+                profile_name=rec.profile_name,
+                applied_tweaks=rec.applied_tweaks,
+                registry_snapshots=rec.registry_snapshots,
+                service_snapshots=rec.service_snapshots,
+                task_snapshots=rec.task_snapshots,
+                feature_snapshots=rec.feature_snapshots,
+                installed_winget_packages=rec.installed_winget_packages,
+                installed_vscode_extensions=rec.installed_vscode_extensions,
+                completed_operations=rec.completed_operations,
+                state=final_state,
+                error=final_error,
+            )
+            state_store.upsert_run(final_rec)
+            recovered.append(final_rec)
+        return recovered
 
 
 def _rollback_runs_impl(

@@ -1,681 +1,380 @@
-# winbearable — Critical Review TODO
+# winbearable — Critical Review TODO (Agent-Consumable)
 
-> **Review target:** `winbearable-main.zip`  
-> **Review type:** Harsh architecture, security, correctness, reliability, Python quality, and testability review  
-> **Audience:** Humans and implementation agents  
-> **Status:** Findings are based on static inspection of the supplied snapshot plus the test run described below.  
->
-> ## Executive assessment
->
-> The project has a useful declarative direction, typed domain models, a native Windows backend, profiles, and a dry-run-first CLI. However, its central promise — safely applying Windows/WSL configuration with trustworthy rollback — is not currently met.
->
-> **Do not treat the current apply/rollback implementation as production-safe.** The highest-risk problems are:
->
-> 1. Changes are not journaled before mutation. A crash or exception can leave the machine modified with no rollback record.
-> 2. Many native operation failures are ignored, while the engine still reports the tweak as applied.
-> 3. Several destructive side effects have no rollback implementation.
-> 4. The CLI can run mutating commands on non-Windows hosts using an in-memory registry backend, creating misleading success reports.
-> 5. Registry snapshots cannot faithfully preserve all registry value types, and compliance checks ignore registry type.
-> 6. WSL configuration is not integrated with profile application, and several WSL operations ignore command failures.
->
-> These are correctness and trust-boundary problems, not polish. Fix them before adding more tweaks.
->
-> ## Validation performed
->
-> - `pytest -q` from the repository root failed collection because `winbearable` was not importable from the `src/` layout without installation or `PYTHONPATH`.
-> - `PYTHONPATH=src pytest -q` passed: **22 tests passed**.
-> - The test suite uses fakes/mocks for Windows APIs. The supplied CI workflow runs tests on Ubuntu, not on Windows.
-> - No real Windows 11 host, real registry, SCM, Task Scheduler, DISM, winget, or WSL integration test was available in this review environment.
-> - Ruff/mypy were not independently executed in this environment. Do not interpret the passing pytest result as evidence that Windows operations work.
->
-> ---
->
-> # P0 — Blockers: fix before calling apply/rollback safe
->
-> ## [x] P0.1 — Implement a write-ahead transaction journal and crash recovery
->
-> **Where:** `src/winbearable/engine.py:256-396`, `src/winbearable/state.py`
->
-> **Problem**
->
-> `apply_profile()` mutates the host inside the loop, but only writes the `RunRecord` after every tweak has completed (`state_store.append_run()` at the end). If Python crashes, the process is killed, the machine reboots, or a backend raises after one or more mutations, the changes already made have no durable rollback record.
->
-> The current JSON state file is therefore an after-the-fact history, not a transaction journal. A successful `os.replace()` at the end cannot protect mutations that happened before it.
->
-> **Required implementation**
->
-> - Introduce explicit transaction states, at minimum `planned`, `applying`, `committed`, `rolling_back`, `rolled_back`, and `failed`.
-> - Before the first mutation, persist the complete set of snapshots and intended operations.
-> - Persist progress after each operation (or use a durable operation log) so recovery can identify exactly what may have run.
-> - On an operation failure, attempt compensating rollback and record both the original failure and any rollback failures.
-> - On startup/`doctor`, detect incomplete transactions and present a safe recovery action; never silently discard them.
-> - Make recovery idempotent. Re-running recovery must not make state worse.
-> - Do not report a transaction as committed until all operations and post-apply verification succeed.
->
-> **Acceptance criteria**
->
-> - Inject a failure after each mutation boundary in a multi-operation profile; assert the journal is sufficient to restore the original state.
-> - Simulate process interruption between mutation and progress update; recovery must handle the uncertain operation safely.
-> - A failed transaction remains visible in state and is never reported as a successful apply.
->
-> ## [x] P0.2 — Refuse real mutating commands on non-Windows hosts
->
-> **Where:** `src/winbearable/cli.py:183-200`, `src/winbearable/backends/registry.py:325-330`, `src/winbearable/backends/system.py:328-395`
->
-> **Problem**
->
-> On non-Windows systems, the default registry backend is `InMemoryRegistryBackend`, while the native system backend returns non-Windows fallbacks. `NativeSystemBackend.detect_environment()` also assigns a Windows 11 build fallback on non-Windows hosts. The CLI does not reject `apply --apply`.
->
-> Consequently, a Linux user can run a Windows apply command that mutates only an in-memory registry, fails or no-ops on native operations, and can still receive a misleading “APPLIED” result and persisted run record.
->
-> **Required implementation**
->
-> - Make the production CLI fail closed for Windows-only mutation commands unless `env.is_windows` is true.
-> - Keep fake backends available for tests through explicit dependency injection, not through an apparently valid production execution path.
-> - Represent unsupported host/build detection as `unknown`/unsupported rather than pretending a non-Windows host is build 26100.
-> - Apply the same platform gate to WSL operations that require `wsl.exe`.
-> - Ensure `doctor` clearly reports “not running on Windows” and does not calculate a fake Windows compliance score.
->
-> **Acceptance criteria**
->
-> - On Linux/macOS, `wb apply --apply`, `wb rollback --apply`, and WSL mutation commands exit non-zero before any state or filesystem mutation.
-> - Tests using explicitly injected in-memory backends continue to work.
-> - Non-Windows `doctor` does not report a Windows 11 build or Windows baseline score.
->
-> ## [x] P0.3 — Treat every failed native operation as a failed apply
->
-> **Where:** `src/winbearable/engine.py:306-380`, `src/winbearable/backends/system.py:397-529`
->
-> **Problem**
->
-> The engine ignores return values from `stop_process()`, `set_scheduled_task_enabled()`, `set_optional_feature_enabled()`, `install_winget_package()`, `uninstall_onedrive_client()`, and registry backup export. `set_service_start_type()` also ignores the result of `sc.exe config`.
->
-> `applied_ids` is appended before the operations execute. There is no post-apply verification. A failed `winget`, `schtasks`, DISM, `sc.exe`, or OneDrive operation can therefore be reported as successful.
->
-> **Required implementation**
->
-> - Replace ambiguous `bool`/`None` results with structured operation results containing success, command, exit code, stdout/stderr (redacted where necessary), and a typed failure reason.
-> - Raise or return a typed failure when a required operation fails.
-> - Check every command result, including `sc.exe config`, VS Code extension installation, and backup export.
-> - Do not append a tweak to `applied_ids` until all of its operations have succeeded and its desired state has been verified.
-> - Add a real `ERROR` result path and meaningful non-zero CLI exit codes for partial or failed runs.
-> - Preserve enough diagnostic detail for agents/users without dumping secrets or unbounded command output.
->
-> **Acceptance criteria**
->
-> - Mock every native command to return non-zero and verify the CLI never prints a successful apply.
-> - Verify a failed VS Code extension install is not silently counted as a complete VS Code tweak.
-> - Verify backup export failure is surfaced before a destructive operation proceeds when backup is required.
->
-> ## [x] P0.4 — Make rollback cover every side effect, or explicitly declare it irreversible
->
-> **Where:** `src/winbearable/engine.py:306-380`, `src/winbearable/engine.py:411-453`, `src/winbearable/models.py:242-408`
->
-> **Problem**
->
-> Rollback only restores registry values, service start types, scheduled-task enabled state, optional-feature enabled state, and uninstalls packages newly installed by the run.
->
-> It does not restore:
->
-> - Processes killed by `taskkill /F`.
-> - OneDrive uninstallation.
-> - VS Code extensions installed by the package tweak.
-> - Other non-registry side effects that may be added later.
-> - The original existence/non-existence of registry keys (`key_existed` is stored but never used).
->
-> The rollback order also groups resource types instead of reversing the actual operation sequence. That is not a reliable compensation model when operations depend on each other.
->
-> **Required implementation**
->
-> - Model each side effect as an explicit operation with a corresponding compensation strategy.
-> - Snapshot whether each process was running; do not promise restoration if a process cannot safely be restarted. Prefer graceful shutdown before force termination.
-> - Do not label OneDrive uninstall as rollback-capable unless a supported reinstall/restore path exists. Mark it irreversible and require a separate explicit confirmation, or remove it from transactional profiles.
-> - Track which VS Code extensions were present before apply and only remove extensions introduced by this run.
-> - Persist a single ordered operation log and compensate in reverse order.
-> - Restore registry key existence where safe, or remove the unused `key_existed` promise and document that rollback restores values only.
-> - Show irreversible actions in the plan before execution.
->
-> **Acceptance criteria**
->
-> - For every operation type in the catalog, there is a tested rollback/compensation contract or an explicit irreversible classification.
-> - A rollback test covers a profile containing registry, service, task, feature, process, winget, and OneDrive actions.
-> - Rollback reports partial failure and retains recoverable state instead of silently deleting history.
->
-> ## [x] P0.5 — Do not force-kill user processes as an unqualified low-risk action
->
-> **Where:** `src/winbearable/backends/system.py:451-461`, `src/winbearable/engine.py:306-310`, `src/winbearable/tweaks/catalog.py` (`stop_processes`)
->
-> **Problem**
->
-> `stop_process()` always uses `taskkill.exe /F /IM`. This forcibly terminates every process with that image name, potentially interrupting active OneDrive sync or losing unsaved state. The operation is classified and presented as a simple tweak, without a graceful attempt or a clear irreversible warning.
->
-> **Required implementation**
->
-> - Prefer a documented graceful close/request mechanism where one exists.
-> - Use force termination only after an explicit policy/confirmation and timeout.
-> - Scope termination to the intended user/session/process rather than blindly killing every matching image.
-> - Verify process exit and report failure if it remains running.
-> - Treat process termination as a separately visible operation in plans and transaction records.
->
-> **Acceptance criteria**
->
-> - A process that refuses graceful close is not force-killed without the configured explicit policy.
-> - Tests verify matching, timeout, and failure behaviour.
->
-> ---
->
-> # P1 — High priority: correctness, state integrity, and WSL reliability
->
-> ## [x] P1.1 — Preserve registry values exactly, including type and unsupported data
->
-> **Where:** `src/winbearable/backends/registry.py:238-262`, `src/winbearable/models.py:38-47, 243-287`, `src/winbearable/engine.py:62-96`
->
-> **Problem**
->
-> `WinregBackend.get_value()` only preserves `int` and `str`. For `REG_BINARY`, `REG_MULTI_SZ`, and other data shapes it returns `None` as the value and silently maps unknown registry types to `REG_SZ`. `set_value()` silently falls back to `REG_DWORD` for unknown type names.
->
-> A snapshot of an existing unsupported value can therefore lose its data/type and rollback can write `None` with the wrong type. Separately, `_inspect_registry_specs()` compares only the value data and ignores the current registry type. A value with the right-looking data but wrong type is incorrectly reported compliant.
->
-> **Required implementation**
->
-> - Use a typed registry value representation that can preserve all Windows registry types supported by `winreg`, including bytes and string lists.
-> - Preserve the exact raw type and value in snapshots and serialization.
-> - Reject unsupported types explicitly; never silently coerce them.
-> - Include current type in `RegistryChangeDetail` and compare both type and data during compliance checks.
-> - Ensure JSON serialization/deserialization is lossless for binary values.
->
-> **Acceptance criteria**
->
-> - Round-trip tests cover `REG_SZ`, `REG_EXPAND_SZ`, `REG_DWORD`, `REG_QWORD`, `REG_BINARY`, and `REG_MULTI_SZ`.
-> - A mismatched registry type is reported as drift.
-> - Snapshot → mutate → restore produces byte-for-byte/type-for-type equivalent registry data.
->
-> ## [x] P1.2 — Distinguish missing, inaccessible, unsupported, and failed observations
->
-> **Where:** `src/winbearable/backends/registry.py:212-248`, `src/winbearable/backends/system.py:412-433`, `src/winbearable/engine.py:152-178`
->
-> **Problem**
->
-> Several methods collapse materially different outcomes into `False` or `None`. For example, scheduled-task and optional-feature detection return `None` on command failure, while `detect_tweak()` treats `None` as “do not add drift”; the tweak can then be reported compliant even though the setting was never inspected. Registry reads also convert all `OSError` cases (including access denied) into “missing”.
->
-> Security audits must never convert “could not verify” into “compliant”.
->
-> **Required implementation**
->
-> - Introduce explicit observation states such as `present`, `absent`, `inaccessible`, `unsupported`, and `error`.
-> - Treat unknown/unreadable state as `ERROR` or `UNKNOWN`, never as compliant.
-> - Keep `missing` distinct from `access denied` and command failure.
-> - Include observation source and diagnostic reason in JSON output.
->
-> **Acceptance criteria**
->
-> - Tests simulate missing tasks/features, access-denied registry keys, command failures, and unsupported APIs.
-> - Every unverified security-relevant setting is excluded from the pass count and visibly reported as unknown/error.
->
-> ## [x] P1.3 — Verify actual Windows service state and lifecycle
->
-> **Where:** `src/winbearable/backends/system.py:195-204, 397-410`, `src/winbearable/engine.py:152-157`, `src/winbearable/tweaks/catalog.py` (`search.disable_wsearch_service`)
->
-> **Problem**
->
-> Service inspection reads the `Start` registry value, and apply writes the registry before calling `sc.exe config`. The `sc.exe` result is ignored. The engine does not inspect the service's runtime state or stop it.
->
-> For example, disabling WSearch's startup type does not necessarily stop a currently running WSearch service. The current implementation can therefore say the tweak is applied while the service is still running.
->
-> **Required implementation**
->
-> - Use Service Control Manager APIs or parse `sc.exe qc`/`query` output with explicit error handling for startup and runtime state.
-> - Do not directly write service registry configuration as the sole source of truth.
-> - Define whether each service tweak changes startup type, current running state, or both.
-> - Stop/start services only where the catalog explicitly requires it, with dependency checks and a safe timeout.
-> - Verify the resulting startup and runtime state after apply and rollback.
->
-> **Acceptance criteria**
->
-> - Tests cover nonexistent services, access denied, disabled-but-running, and command failure.
-> - The WSearch tweak's description and reported state match its actual behaviour.
->
-> ## [x] P1.4 — Integrate profile WSL settings into plan/apply, or remove the misleading profile contract
->
-> **Where:** `src/winbearable/profiles.py:130-141`, `src/winbearable/models.py:411-420`, `src/winbearable/engine.py:240-265`, `src/winbearable/cli.py:247-257, 404-416`
->
-> **Problem**
->
-> Profiles parse and retain a `[wsl]` section, but `apply_profile()` never consumes `profile.wsl`. `wb apply --profile paranoid` therefore does not apply the profile's strict WSL settings, despite the README/profile description saying the paranoid profile switches WSL to strict isolation. WSL configuration is exposed through separate CLI flags with independent defaults.
->
-> `WslConfigSpec.enabled` is also not used by `plan_or_apply_wsl()`.
->
-> **Required implementation**
->
-> - Make `wb plan --profile` show both Windows and WSL changes.
-> - Make `wb apply --profile --apply` apply enabled WSL settings, with the same transaction, backup, error, and rollback semantics as Windows changes.
-> - Honour `wsl.enabled`; if WSL is absent, report a clear skipped/unsupported result rather than silently writing host configuration.
-> - Alternatively, if WSL is intentionally independent, remove the WSL profile fields and correct all docs and profile claims.
->
-> **Acceptance criteria**
->
-> - A test proves `paranoid` plans strict WSL settings and applies them when enabled.
-> - A test proves `wsl.enabled = false` causes no WSL mutation.
-> - Profile plan output includes exact `.wslconfig` and `/etc/wsl.conf` changes.
->
-> ## [x] P1.5 — Make WSL command execution fail closed and report exit status
->
-> **Where:** `src/winbearable/wsl.py:163-212, 241-340`, `src/winbearable/cli.py:350-434`
->
-> **Problem**
->
-> `plan_or_apply_wsl()` ignores the result of the `tee /etc/wsl.conf` operation. `apply_wsl_linux_baseline()` ignores all command results. The CLI prints `APPLIED` regardless of failures. Install/export/import return a code in JSON but the CLI still exits successfully. This makes WSL operations look successful when they failed.
->
-> **Required implementation**
->
-> - Check and propagate every WSL command's exit code and stderr.
-> - Return structured per-step results and fail the command if any required step fails.
-> - Do not print `APPLIED` unless the operation and read-back verification succeed.
-> - Make multi-step WSL operations transactional: back up prior config, apply one step at a time, and restore on failure where possible.
-> - Verify `wsl.conf` contents after writing.
-> - Ensure `wb wsl baseline` runs `sysctl --system` (or an equivalent supported reload) after writing the sysctl file, and verifies the effective settings.
-> - Treat optional `chezmoi init --apply` as executing third-party dotfiles code; show this clearly in the plan and require a separate explicit opt-in.
->
-> **Acceptance criteria**
->
-> - Inject failure at every WSL command and verify non-zero CLI exit status and accurate partial-state reporting.
-> - Verify sysctl settings are active, not merely present in a file.
->
-> ## [x] P1.6 — Validate profile schema strictly; remove unsafe Python coercions
->
-> **Where:** `src/winbearable/profiles.py:50-72, 75-97, 115-141`
->
-> **Problem**
->
-> The profile validator checks top-level keys and tweak booleans, but does not strictly validate WSL keys/types/ranges. `bool(raw_value)` means a TOML string such as `"false"` becomes `True`. `int()` accepts booleans and can silently truncate floats. Arbitrary networking modes and invalid memory/processor values can be written into `.wslconfig`. Unknown keys inside `[wsl]` are silently ignored.
->
-> **Required implementation**
->
-> - Define a versioned, explicit profile schema.
-> - Reject unknown `[wsl]` keys and invalid value types.
-> - Require actual TOML booleans for boolean fields; do not coerce strings or integers.
-> - Validate `memory_gb` and `processors` as positive bounded integers with sensible host limits.
-> - Validate `networking_mode` against supported WSL values and validate mode-specific combinations.
-> - Validate `extends` resolution and produce useful cycle/chain diagnostics.
-> - Validate the entire profile before any environment probing or mutation.
->
-> **Acceptance criteria**
->
-> - Add negative tests for `"false"`, `1`, `1.5`, negative memory, zero processors, unknown networking mode, unknown WSL key, and malformed inheritance.
-> - Invalid profiles fail before any file/registry/WSL command is touched.
->
-> ## [x] P1.7 — Harden the state store against corruption, races, and unsafe permissions
->
-> **Where:** `src/winbearable/state.py:13-72`, `src/winbearable/models.py:362-408`
->
-> **Problem**
->
-> The state store performs unlocked read-modify-write operations. Two concurrent apply/rollback processes can overwrite each other's history. The `version` field is written but never validated or migrated. Malformed JSON/schema data raises raw exceptions. The state file's security properties are not checked, and the store has no recovery/backup strategy.
->
-> **Required implementation**
->
-> - Add cross-process locking around load/append/save/rollback transactions.
-> - Validate the top-level schema and version; add explicit migrations.
-> - Validate all deserialized fields and reject malformed/tampered records with actionable errors.
-> - Protect state and backup directories with restrictive Windows ACLs and appropriate POSIX permissions where applicable.
-> - Defend against symlink/reparse-point surprises and unsafe state paths.
-> - Keep a recoverable previous state/journal copy; do not overwrite the only recovery metadata.
-> - Flush durable writes before considering a journal update committed.
->
-> **Acceptance criteria**
->
-> - Concurrent writer tests cannot lose records.
-> - Corrupt, truncated, unknown-version, and malformed state files fail safely with recovery guidance.
-> - Permission tests verify the state/backup directory is not readable by unintended principals where the platform supports such checks.
->
-> ## [x] P1.8 — Preserve user config file metadata and make WSL writes recoverable
->
-> **Where:** `src/winbearable/wsl.py:37-86, 142-160, 171-198`
->
-> **Problem**
->
-> `.wslconfig` is replaced with a temporary file via `os.replace()`. This can replace existing file metadata/ACLs with the temporary file's metadata. The distro `/etc/wsl.conf` is written directly through `tee`, without an atomic write or backup. Neither file is restored if the second operation fails.
->
-> The INI merge routine also has no robust handling for duplicate sections/keys, UTF-8 BOMs, or parser-level validation. `audit_wsl()` uses substring checks, so comments or keys in the wrong section can be counted as enabled settings.
->
-> **Required implementation**
->
-> - Preserve existing file ACLs/permissions and relevant metadata when replacing `.wslconfig`.
-> - Back up the original file before mutation and expose the backup path in the plan/result.
-> - Use an atomic write inside the distro for `/etc/wsl.conf` (temporary file + rename with correct ownership/mode).
-> - Parse and validate INI sections/keys structurally rather than substring matching.
-> - Define deterministic behaviour for duplicate sections and duplicate keys; reject ambiguous files instead of guessing.
-> - Handle BOM/encoding explicitly and preserve unrelated comments/custom keys.
-> - Read back both files and verify the requested values after writing.
->
-> **Acceptance criteria**
->
-> - Tests cover duplicate sections/keys, comments, BOM, CRLF, whitespace, unknown keys, and malformed INI.
-> - Tests prove existing permissions/ACLs are retained where supported.
-> - Audit ignores commented-out settings and values in unrelated sections.
->
-> ## [x] P1.9 — Use command-specific timeouts and handle timeout exceptions
->
-> **Where:** `src/winbearable/backends/system.py:299-326`
->
-> **Problem**
->
-> Every native command has a fixed 60-second timeout. WSL installation/import/export, DISM feature changes, winget installs, and OneDrive uninstall can legitimately take longer. `subprocess.TimeoutExpired` is not caught or converted into a structured result. A timeout may interrupt a long-running operation and leave the engine with partially changed state.
->
-> **Required implementation**
->
-> - Define operation-specific timeout policies, with longer limits for install/import/export/DISM operations.
-> - Catch `TimeoutExpired` and retain partial stdout/stderr where available.
-> - On timeout, mark the operation as outcome-unknown until state is re-inspected.
-> - Integrate timeout outcomes with transaction recovery; never assume timeout means no mutation occurred.
-> - Make timeouts configurable only within safe bounds.
->
-> **Acceptance criteria**
->
-> - Tests cover timeout before execution, during execution, and after a command may have changed state.
-> - CLI output identifies the operation and says whether its final state is known.
->
-> ## [x] P1.10 — Make service/task/feature detection locale-independent
->
-> **Where:** `src/winbearable/backends/system.py:412-433`
->
-> **Problem**
->
-> Task and optional-feature state are parsed from English command output (`"disabled"` and `"state : enabled"`). Windows command output is localized. The task parser also treats any occurrence of the word `disabled` as task state.
->
-> **Required implementation**
->
-> - Prefer structured Windows APIs or machine-readable output where available.
-> - If command output must be parsed, force a supported invariant locale or parse a stable structured format.
-> - Parse the exact state field, not arbitrary substrings.
-> - Keep missing task, access denied, and parse failure distinct.
->
-> **Acceptance criteria**
->
-> - Tests use English and non-English fixtures, unexpected output, and ambiguous strings.
-> - Unknown output returns an explicit unknown/error state, not a guessed boolean.
->
-> ## [x] P1.11 — Check package identity, scope, and extension outcomes correctly
->
-> **Where:** `src/winbearable/backends/system.py:472-529`, `src/winbearable/engine.py:173-178, 370-377`
->
-> **Problem**
->
-> Winget installed-state detection uses a substring search over human-readable output and does not verify package scope. Extension install return codes are ignored. The engine records the package as newly installed even if extension installation fails. Rollback uninstalls the package but does not restore extension state.
->
-> **Required implementation**
->
-> - Use a structured winget output format where supported and match exact package ID and scope.
-> - Distinguish “not installed” from winget missing, source failure, and command error.
-> - Verify package installation after install.
-> - Check each extension install result and verify extension presence.
-> - Snapshot pre-existing extension state and compensate only extensions introduced by the run.
-> - Define safe behaviour when the same package exists in user and machine scopes.
->
-> **Acceptance criteria**
->
-> - Tests cover similarly named package IDs, both scopes, winget unavailable, source errors, package install failure, and extension failure.
-> - A failed extension install is not reported as a fully successful tweak.
->
-> ## [x] P1.12 — Do not claim a setting is compliant based on registry data alone when runtime state matters
->
-> **Where:** `src/winbearable/engine.py:99-237`, `src/winbearable/tweaks/catalog.py`
->
-> **Problem**
->
-> The engine treats registry configuration as proof of effective system behaviour for many settings. Some changes require a service restart, logoff, Explorer restart, reboot, policy refresh, or feature-state verification. `tested_builds` and `max_build` metadata are present but not used to qualify applicability.
->
-> **Required implementation**
->
-> - Add metadata for `requires_reboot`, `requires_logoff`, `requires_explorer_restart`, `requires_policy_refresh`, and verification strategy.
-> - Separate configured state from effective runtime state.
-> - Report `pending_reboot`/`pending_refresh` rather than claiming full compliance prematurely.
-> - Enforce tested-build metadata or remove it if it is informational only.
-> - Verify every tweak's effective behaviour on each supported Windows release before marking it supported.
->
-> **Acceptance criteria**
->
-> - A setting that is configured but not yet effective is not reported as fully applied.
-> - Build applicability tests cover all declared minimum/maximum/tested builds.
->
-> ---
->
-> # P2 — Important: audit trustworthiness, architecture, tests, and maintainability
->
-> ## [x] P2.1 — Separate a real security baseline score from convenience tweaks
->
-> **Where:** `src/winbearable/engine.py:456-479`, `src/winbearable/tweaks/catalog.py`, `README.md` (doctor/audit claims)
->
-> **Problem**
->
-> `calculate_hardening_score()` counts every applicable catalog item, including cosmetic preferences and app installation, in the overall baseline score. Only a subset has `cis_id`. A single percentage therefore mixes security controls, privacy preferences, UI customizations, and developer tooling. This is not a defensible security posture score.
->
-> **Required implementation**
->
-> - Remove the generic “hardening score” or split it into clearly named dimensions (security controls, privacy, usability, developer setup).
-> - Define the benchmark/version, level, section, and exact control mapping for every CIS claim.
-> - Do not claim CIS compliance from a partial set of registry writes.
-> - Distinguish not applicable, unknown, unsupported, blocked by policy, failed, and passed.
-> - Include control evidence and verification method in output.
->
-> **Acceptance criteria**
->
-> - A profile that only changes UI settings cannot increase the security baseline score.
-> - Every displayed CIS control has a traceable benchmark mapping and a test/evidence method.
->
-> ## [x] P2.2 — Make environment detection evidence-based and represent unknown values
->
-> **Where:** `src/winbearable/backends/system.py:328-395`, `src/winbearable/models.py:168-208`
->
-> **Problem**
->
-> Several security posture booleans are inferred from a single registry value or the presence of subkeys. For example, Defender is considered enabled unless one `DisableAntiSpyware` value equals `1`; absent or inaccessible data is treated as enabled. Secure Boot, BitLocker, AppLocker, Entra join, and MDM state are also simplified into booleans. These are not reliable enough to present as authoritative posture.
->
-> **Required implementation**
->
-> - Represent posture checks as typed observations with evidence, source, and confidence.
-> - Use supported Windows APIs/commands for Defender, BitLocker, Secure Boot, AppLocker/WDAC, Entra join, and MDM state.
-> - Distinguish absent, disabled, unsupported, inaccessible, and unknown.
-> - Document exactly what each doctor field does and does not prove.
-> - Avoid using these observations to select a more privileged profile until they are trustworthy.
->
-> **Acceptance criteria**
->
-> - Tests cover missing values, access denied, conflicting indicators, and unsupported editions.
-> - Doctor output never presents an unverified default as a confirmed security state.
->
-> ## [x] P2.3 — Add a real Windows CI and integration-test matrix (local Windows / local Windows Docker)
->
-> **Where:** `.github/workflows/ci.yml`, `tests/`
->
-> **Problem**
->
-> CI runs on Ubuntu and mocks Win32 APIs. This is useful for fast unit tests, but it does not validate real `winreg`, registry view behaviour, `sc.exe`, `schtasks.exe`, DISM, winget, tasklist/taskkill, or WSL. The project targets Windows 11 specifically, yet no Windows runner is present.
->
-> **Required implementation**
->
-> - Add Windows Server/Windows 11-compatible CI jobs for supported Python versions.
-> - Add safe integration tests against disposable HKCU keys and temporary files.
-> - Add command contract tests on Windows for output, exit codes, and path handling.
-> - Keep destructive integration tests behind explicit opt-in and use disposable VMs for service/task/feature/WSL tests.
-> - Add a release gate requiring Windows integration results.
-> - Test Python 3.14 if it remains in the supported classifiers.
->
-> **Acceptance criteria**
->
-> - CI has at least one real Windows job and reports its results separately from Linux unit tests.
-> - The release workflow cannot publish if required Windows checks are skipped or fail.
->
-> ## [x] P2.4 — Add catalog-level safety and provenance validation
->
-> **Where:** `src/winbearable/tweaks/catalog.py`, `src/winbearable/models.py:145-165`
->
-> **Problem**
->
-> The catalog is the product's policy engine, but its schema does not enforce strong safety metadata. Each tweak has a source URL, risk, admin requirement, and tested builds, but there is no structured rationale, exact source citation, expected side effect, reboot requirement, reversibility classification, conflict coverage, or validation status. Risk distribution is heavily weighted to `LOW`, including broad policy changes.
->
-> **Required implementation**
->
-> - Add mandatory fields: rationale, exact authoritative source, supported editions/builds, risk rationale, reversibility, impact, required privilege, reboot/refresh requirement, policy conflicts, and verification method.
-> - Require review evidence for every registry/service/task/feature/package operation.
-> - Validate that every operation has an observation method and compensation or irreversible declaration.
-> - Add catalog tests for duplicate IDs, duplicate conflicting operations, invalid registry types/actions, invalid service start values, malformed task paths, and missing provenance.
-> - Reassess risk levels based on operational impact, not just whether a registry write is simple.
->
-> **Acceptance criteria**
->
-> - Catalog validation fails CI when required safety metadata is missing.
-> - No tweak can be added without an explicit verification and rollback/irreversibility strategy.
->
-> ## [x] P2.5 — Improve CLI error boundaries and machine-readable contracts
->
-> **Where:** `src/winbearable/cli.py:183-200, 436-443`
->
-> **Problem**
->
-> Environment detection happens before the `try` block. The CLI only catches `ProfileValidationError`, `HighRiskConfirmationError`, and `KeyError`. Filesystem errors, malformed state JSON, subprocess timeouts, registry permission failures, and unexpected backend errors can produce tracebacks. Several commands return exit code zero even when the underlying WSL command failed.
->
-> **Required implementation**
->
-> - Put environment detection and command execution inside a deliberate error boundary.
-> - Define typed application exceptions and stable exit codes.
-> - Keep tracebacks for `--debug` only; otherwise show concise actionable errors.
-> - Ensure JSON mode always emits valid JSON on stdout and diagnostics go to stderr.
-> - Version the JSON output schema and test it as a public interface.
-> - Return non-zero on partial failure, unknown outcome, and failed verification.
->
-> **Acceptance criteria**
->
-> - Tests cover permission errors, malformed files, timeout, backend exception, and partial apply.
-> - Every CLI subcommand has documented exit-code semantics.
->
-> ## [x] P2.6 — Fix dry-run output so it describes all operations and consequences
->
-> **Where:** `src/winbearable/cli.py:47-70`, `src/winbearable/engine.py:62-96, 256-408`
->
-> **Problem**
->
-> The summary table is registry-oriented and places arbitrary detail strings directly into Markdown table cells. It does not clearly enumerate process termination, package installs/extensions, service/task/feature changes, reboot requirements, backups, or irreversible actions. The plan can therefore understate what a profile actually does.
->
-> **Required implementation**
->
-> - Produce a typed operation plan before execution.
-> - Render every operation, target, before/after state, privilege, risk, reboot/refresh requirement, backup, and rollback capability.
-> - Escape Markdown table delimiters/newlines in user-controlled values.
-> - Ensure JSON and Markdown plans are generated from the same operation model.
-> - Add a plan acknowledgement/hash if the user is expected to review a plan before applying it.
->
-> **Acceptance criteria**
->
-> - Golden tests cover all operation types and special characters.
-> - No destructive/non-registry action is hidden behind a registry-only summary.
->
-> ## [x] P2.7 — Make source-layout developer commands reproducible
->
-> **Where:** `pyproject.toml`, `Makefile`, developer documentation
->
-> **Problem**
->
-> Plain `pytest -q` from the repository root fails unless the package has been installed or `PYTHONPATH=src` is set. The project already uses `uv`, but the expected local test invocation is not obvious from the test layout.
->
-> **Required implementation**
->
-> - Document `uv run pytest` / `make test` as the canonical invocation, or configure pytest's `pythonpath = ["src"]`.
-> - Ensure CI, Makefile, and contributor docs use the same canonical workflow.
-> - Keep tests runnable from a clean checkout without relying on an accidentally pre-installed package.
->
-> **Acceptance criteria**
->
-> - A clean checkout can run the documented test command successfully without manual environment variables.
->
-> ## [x] P2.8 — Reduce coupling between domain engine and concrete side effects
->
-> **Where:** `src/winbearable/engine.py`, `src/winbearable/backends/system.py`, `src/winbearable/models.py`
->
-> **Problem**
->
-> The engine coordinates multiple unrelated side-effect types directly and relies on a growing set of parallel snapshot lists and `seen_*` sets. This makes ordering, rollback, partial failure, and future operation types increasingly fragile.
->
-> **Required implementation**
->
-> - Introduce a common operation abstraction with `inspect`, `plan`, `apply`, `verify`, and `compensate` contracts.
-> - Keep platform-specific execution in backends/adapters.
-> - Keep catalog definitions declarative and avoid adding another special-case branch to `apply_profile()` for each new operation kind.
-> - Model dependencies/order explicitly where required.
-> - Keep pure planning separate from mutation.
->
-> **Acceptance criteria**
->
-> - The engine can execute and compensate a mixed operation plan without type-specific parallel bookkeeping.
-> - Adding a new operation type does not require editing multiple unrelated engine loops.
->
-> ## [x] P2.9 — Make registry access view and privilege behaviour explicit
->
-> **Where:** `src/winbearable/backends/registry.py:184-262`
->
-> **Problem**
->
-> Registry opens use the process-default registry view and collapse access errors into missing values. The project has explicit 32-bit/64-bit OneDrive CLSID paths, but there is no first-class registry view model. Behaviour can differ depending on Python process architecture and Windows registry redirection.
->
-> **Required implementation**
->
-> - Add explicit registry view selection (`KEY_WOW64_64KEY` / `KEY_WOW64_32KEY`) where relevant.
-> - Define whether each catalog entry targets the 32-bit view, 64-bit view, or both.
-> - Preserve access-denied and not-found as different results.
-> - Test on 64-bit Windows and document any architecture limitations.
->
-> **Acceptance criteria**
->
-> - Registry view behaviour is deterministic across 32-bit and 64-bit Python processes.
-> - Tests verify the intended view for each catalog operation that is view-sensitive.
->
-> ## [x] P2.10 — Improve package and release supply-chain controls
->
-> **Where:** `.github/workflows/ci.yml`, `.github/workflows/security.yml`, `pyproject.toml`, `renovate.json`
->
-> **Problem**
->
-> The workflows pin many actions by commit SHA, which is good, and use PyPI trusted publishing. However, there is no real Windows release validation, no explicit artifact provenance/attestation, and the release flow creates/pushes a tag before the draft release is created. The security workflow's TruffleHog scan uses `--only-verified`, which can miss unverified secret patterns worth reviewing.
->
-> **Required implementation**
->
-> - Add artifact provenance/attestation and verify built artifacts correspond to the reviewed commit/tag.
-> - Ensure release tags are created only after all release validation/build steps succeed.
-> - Review whether secret scanning should include unverified findings as report-only rather than suppressing them entirely.
-> - Keep least-privilege workflow permissions per job and add explicit concurrency controls for release/tag operations.
-> - Ensure the SBOM describes the exact published wheel/sdist, not just a source-tree scan.
->
-> **Acceptance criteria**
->
-> - Published artifacts have verifiable provenance and a matching SBOM.
-> - Failed release validation cannot leave a pushed release tag behind.
->
-> ---
->
-> # Suggested implementation order
->
-> Agents should work in this order. Do not start by adding more tweak catalog entries.
->
-> 1. **P0.2 platform safety gate** — prevent misleading/unsafe non-Windows execution.
-> 2. **P0.3 operation result/error model** — make failures visible before building transaction semantics.
-> 3. **P0.1 transaction journal and recovery** — persist intended changes before mutation.
-> 4. **P0.4 rollback/irreversibility model** — make compensation honest and complete.
-> 5. **P1.1 + P1.2 registry fidelity and unknown-state model** — stop false compliance and lossy rollback.
-> 6. **P1.3 service state correctness** — fix the first non-registry system-control adapter.
-> 7. **P1.4 + P1.5 WSL integration and error handling** — profiles and WSL must share the same safety contract.
-> 8. **P1.6 + P1.7 profile/state validation** — validate all input and persisted recovery data.
-> 9. **P1.8–P1.11 WSL durability, timeout, localization, and package correctness.**
-> 10. **P2 audit score, detection evidence, Windows CI, catalog governance, CLI UX, and architecture cleanup.**
->
-> ## Definition of done for this review
->
-> - [x] No apply path can claim success when an operation failed or could not be verified.
-> - [x] No production mutation runs against a fake/in-memory backend.
-> - [x] Every mutation is journaled before it happens.
-> - [x] Every operation has tested compensation or is explicitly irreversible and separately confirmed.
-> - [x] Registry snapshots preserve exact type and data.
-> - [x] Unknown observations never count as compliant.
-> - [x] WSL profile settings are either actually applied by profile workflows or removed from the profile contract/docs.
-> - [x] Real Windows CI validates the supported platform.
-> - [x] Security/audit scores are evidence-based and do not mix convenience settings with security controls.
-> - [x] Documentation accurately describes what is applied, what requires reboot/refresh, and what cannot be rolled back.
+> **Target:** current `winbearable-main` snapshot (v0.6.0)  
+> **Review type:** Architecture, correctness, reliability, security, testability, operability  
+> **Audience:** Implementation agents and maintainers  
+> **Status:** Independent static + test inspection of the supplied tree.  
+> **Tests observed:** `PYTHONPATH=src pytest -q` → **39 passed, 2 skipped**. CI is Linux-only.
+
+---
+
+## Executive assessment
+
+`winbearable` (`wb`) is a focused, opinionated tool for making locked-down Windows 11 + WSL2 tolerable for Linux users. Strengths:
+
+- Clear scope (Windows 11 24H2/25H2+ only).
+- 100% native Python (no PowerShell wrappers) — important under AppLocker/WDAC Constrained Language Mode.
+- Dry-run by default; write-ahead journal with `TransactionState` lifecycle.
+- Typed domain models, profile system, CIS provenance hooks, hardening score separation by dimension.
+- Solid local quality gate (ruff, mypy strict, coverage ≥80%, pre-commit hooks, TruffleHog/Trivy).
+
+**Central promise is still only partially met.** Apply/rollback is much improved over a naïve “mutate then log” design, but several trust and recovery gaps remain. Treat real-machine apply as **beta** until the P0/P1 items below are closed and validated on real Windows 11 hosts.
+
+**Do not expand the tweak catalog significantly until the safety and observability foundation is solid.**
+
+---
+
+## Validation performed for this review
+
+- Full tree extraction and static inspection of `src/winbearable/`, `tests/`, CI, profiles, docs.
+- `PYTHONPATH=src pytest -q` → 39 passed, 2 skipped (Windows integration tests).
+- Catalog enumeration: 37 tweaks across ai/apps/bloat/explorer/hardening/onedrive/privacy/search/start/taskbar/telemetry.
+- Confirmed presence of write-ahead journal (`TransactionState`, `upsert_run`, pre-mutation snapshots, checkpoint callbacks).
+- Confirmed non-Windows mutation gate (`UnsupportedPlatformError` in `apply_profile` and CLI).
+- No real Windows 11 host, real SCM/DISM/winget/WSL mutation, or elevated registry test was available.
+
+---
+
+# P0 — Correctness / Safety blockers
+
+These must be closed before claiming production-safe apply/rollback.
+
+## [x] P0.1 — Make journal recovery first-class and automatic
+
+> Resolved: Added `recover_incomplete_runs()`, `wb recover` / `wb rollback --incomplete`, `wb doctor` incomplete-run warnings, mutating `apply_profile()` incomplete-run guard, and crash-injection/idempotency unit tests.
+
+**Where:** `src/winbearable/engine.py` (apply/rollback paths), `src/winbearable/state.py`, CLI `doctor` / `status`
+
+**Problem**  
+Write-ahead journaling exists (`PLANNED` → `APPLYING` → `COMMITTED` / `FAILED` / `ROLLING_BACK`). Incomplete transactions are persisted, but there is no robust, user-facing recovery path that:
+
+1. Detects incomplete (`PLANNED`/`APPLYING`/`ROLLING_BACK`/`FAILED`) runs on startup or `wb doctor`.
+2. Offers a deterministic recovery action (`wb recover` / `wb rollback --incomplete`).
+3. Is idempotent under partial compensation and process kill between checkpoint and next op.
+
+Checkpointing after every micro-op is good for progress visibility but increases write amplification and still leaves a window where the last completed op is known but the next has unknown outcome.
+
+**Required**
+
+- On `doctor` / CLI entry for mutating commands, surface incomplete transactions with clear status and recommended action.
+- Implement `wb recover` (or fold into `rollback`) that:
+  - loads the incomplete `RunRecord`,
+  - attempts compensation for completed operations only,
+  - records final state (`ROLLED_BACK` or `FAILED` with residual errors),
+  - never silently discards an incomplete run.
+- Document the recovery model in README and AGENTS.md.
+- Add crash-injection tests: kill after N checkpoints; assert recovery restores original observed state for registry/service/task/feature ops that support it.
+
+**Acceptance**
+
+- Incomplete run is never reported as successful.
+- `doctor --json` includes incomplete-run details.
+- Recovery is idempotent; second recovery does not worsen state.
+- Unit tests cover at least: crash after first mutation, crash during compensation, empty completed_ops list.
+
+## [x] P0.2 — Honest failure model for all native operations
+
+> Resolved: Added `OperationStatus` & `OperationOutcome` taxonomy (`OK`, `ALREADY`, `BLOCKED_BY_POLICY`, `ACCESS_DENIED`, `TIMEOUT`, `TOOL_MISSING`, `PARSE_ERROR`, `UNKNOWN`) in `models.py`, classified `_run_native_cmd` failures in `system.py`, and surfaced structured categories in `_format_op_failure`.
+
+**Where:** `src/winbearable/backends/system.py`, `engine._execute_tweak_mutations`, WSL helpers
+
+**Problem**  
+Many system backend methods return `bool` (success/fail). Engine raises on `False` for core paths, which is good. Residual risks:
+
+- Some code paths still swallow or under-report failures (especially WSL command runners, optional feature / DISM, winget, process stop when process already gone vs access denied).
+- No structured error taxonomy (policy block vs permission vs timeout vs tool missing vs unexpected).
+- Localization: parsing English-only `sc.exe` / `schtasks` / `dism` output will break on non-en-US Windows.
+
+**Required**
+
+- Introduce a small `OperationResult` / error enum (or exception hierarchy) with categories: `OK`, `ALREADY`, `BLOCKED_BY_POLICY`, `ACCESS_DENIED`, `TIMEOUT`, `TOOL_MISSING`, `PARSE_ERROR`, `UNKNOWN`.
+- Propagate structured results into `TweakCheckResult` / run record so JSON output and doctor are actionable.
+- Prefer exit-code + structured flags over string scraping where possible; when scraping is unavoidable, document locale assumptions and add fallbacks or explicit “unverified” status.
+- Ensure every mutating path in `_execute_tweak_mutations` and WSL apply either succeeds, raises, or records a structured failure that prevents `COMMITTED`.
+
+**Acceptance**
+
+- No path can mark a tweak `APPLIED` / transaction `COMMITTED` when any required mutation failed or was unverified.
+- Tests inject tool-missing, non-zero exit, and parse-failure cases.
+
+## [x] P0.3 — Irreversible and side-effect honesty
+
+> Resolved: Listed irreversible/best-effort side effects explicitly in `plan`/`apply` output (`_format_summary_markdown`) and named exact irreversible action targets in `IrreversibleActionError`.
+
+**Where:** `onedrive.uninstall`, process stops, winget install/uninstall, VS Code extension install, catalog flags
+
+**Problem**  
+Only `onedrive.uninstall` is marked `irreversible=True`. Compensation exists for winget packages and VS Code extensions, but:
+
+- Process termination is not reversible.
+- Uninstall of OneDrive / packages may leave residual state (user data, Start menu pins, leftover services).
+- There is no explicit “side effects that cannot be rolled back” list surfaced in plan output beyond the irreversible flag.
+
+**Required**
+
+- Audit every non-registry mutation for true reversibility.
+- Expand plan/apply output to list irreversible or best-effort side effects per tweak.
+- For irreversible tweaks, require `--allow-irreversible` (already present) and make the confirmation message name the exact irreversible actions.
+- Prefer “disable + hide” over uninstall where the product goal allows (already the pattern for several OneDrive tweaks).
+
+**Acceptance**
+
+- Plan output clearly distinguishes reversible registry/service changes from irreversible or best-effort actions.
+- Tests assert that irreversible tweaks without the flag raise `IrreversibleActionError`.
+
+## [x] P0.4 — Platform and backend integrity gate
+
+> Resolved: Added `is_simulated` flags on registry & system backends and fail-closed `_require_native_backends()` gate in mutating `apply_profile`, `rollback_runs`, and `recover_incomplete_runs` (`allow_simulated=False` by default).
+
+**Where:** CLI, `create_default_*_backend`, `apply_profile`
+
+**Problem**  
+Non-Windows mutation is gated (good). Remaining risks:
+
+- In-memory / interop backends can still be used in ways that produce optimistic “applied” results in tests or misconfigured environments.
+- WSL interop registry backend and host-auditable modes increase surface area; ensure mutating paths never silently fall back to in-memory on Windows.
+
+**Required**
+
+- Assert at the start of any non-dry-run apply/rollback that the registry and system backends are the real native ones (or explicitly documented interop mode with reduced guarantees).
+- Fail closed if backend capability flags indicate simulation.
+- Keep dry-run fully functional on Linux for CI and developer workflows.
+
+**Acceptance**
+
+- Real `--apply` on a misconfigured backend raises a clear error, never produces a `COMMITTED` run against a fake store.
+
+---
+
+# P1 — High-priority reliability and correctness
+
+## [ ] P1.1 — Registry fidelity and type-aware compliance
+
+**Where:** `backends/registry.py`, detection in `engine.detect_tweak`, models
+
+**Problem**  
+Snapshots store type and data (including base64 for binary). Compliance checks must never treat “value exists with wrong type” as compliant, and must never coerce types silently on restore.
+
+**Required**
+
+- Compliance: compare both data *and* type; mismatch → `DRIFTED` or `ERROR`.
+- Restore: restore exact type; reject or hard-fail on unsupported types rather than best-effort coerce.
+- Cover `REG_MULTI_SZ`, `REG_BINARY`, `REG_QWORD`, default-value (`(Default)`) edge cases in tests.
+- Document any intentional type narrowing.
+
+**Acceptance**
+
+- Round-trip snapshot → mutate → restore preserves type and data for all supported types.
+- Wrong-type existing value is never reported as `APPLIED`.
+
+## [ ] P1.2 — Service / task / feature observation correctness
+
+**Where:** `backends/system.py` service start type, scheduled tasks, optional features
+
+**Problem**  
+Service start type is often read via registry; runtime state (running/stopped) is separate. Scheduled task and DISM feature detection can return unknown/inaccessible; those must never count as compliant.
+
+**Required**
+
+- Use `ObservationState` / confidence consistently for non-registry checks.
+- `UNKNOWN` / `INACCESSIBLE` → do not count toward applied; surface in doctor and plan.
+- Prefer native APIs (`QueryServiceConfig`, etc.) via ctypes where scraping is brittle; if keeping CLI tools, pin expected output shapes and handle non-English.
+
+**Acceptance**
+
+- Tests for unknown/inaccessible service/task/feature never produce false `APPLIED`.
+
+## [ ] P1.3 — WSL integration with profile contract
+
+**Where:** `wsl.py`, profiles (`*.toml`), `engine.apply_profile`, docs
+
+**Problem**  
+WSL memory sizing, networkingMode, dnsTunneling, etc. are a major product claim. Profile application and WSL config application are only partially unified. Failure handling in WSL command paths is weaker than the main engine journal.
+
+**Required**
+
+- Decide and document: are WSL settings part of profile apply, a separate `wb wsl apply`, or both with a clear contract?
+- If part of profile apply, journal WSL file mutations (`.wslconfig`, distro `wsl.conf`) with the same write-ahead + compensation model (file backups are already partially present).
+- Propagate non-zero `wsl.exe` / distro command failures as structured errors; never report success on partial apply.
+- Add tests for merge-preserving-comments, memory calculation edge cases (small RAM, odd sizes), and failure injection.
+
+**Acceptance**
+
+- Profile docs and code agree on what “applying profile X” does to WSL.
+- WSL mutation failures prevent `COMMITTED` when WSL is in scope.
+
+## [ ] P1.4 — Timeouts, hangs, and external tool reliability
+
+**Where:** all subprocess invocations in `system.py` and `wsl.py`
+
+**Problem**  
+External tools (`sc`, `schtasks`, `dism`, `winget`, `wsl`, `taskkill`, `reg`) can hang (network winget, DISM, stuck WSL). Missing uniform timeouts and cancellation.
+
+**Required**
+
+- Default timeouts per tool class; configurable via env or CLI for long operations (WSL export/import).
+- On timeout: kill process tree where safe, record structured `TIMEOUT`, do not commit.
+- Log command, args (redacted), exit code, and truncated stderr for doctor/debug.
+
+**Acceptance**
+
+- No unbounded wait in unit-tested code paths; integration tests can opt into longer timeouts.
+
+## [ ] P1.5 — State schema migration and corruption handling
+
+**Where:** `state.py`
+
+**Problem**  
+Schema version is checked; corruption raises. There is no migration path and limited guidance when `.json.bak` is the only recovery.
+
+**Required**
+
+- Document recovery procedure for corrupted `state.json`.
+- If schema evolves, provide explicit migration or clear “unsupported, restore from backup” path.
+- Consider size limits / rotation of old runs so state files do not grow without bound.
+
+**Acceptance**
+
+- Corrupted state never causes silent data loss; doctor reports it clearly.
+
+## [ ] P1.6 — Real Windows validation path
+
+**Where:** `tests/test_windows_integration.py`, CI, `Dockerfile.windows`, AGENTS.md
+
+**Problem**  
+CI is intentionally Linux-only (cost/principle). Windows integration tests exist but are skipped unless `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`. There is no required gate that real registry/service/task paths work on supported builds.
+
+**Required**
+
+- Expand the Windows integration suite with safe, reversible tests (HKCU only where possible; services/tasks that can be restored).
+- Document a maintainer checklist: run integration tests on 24H2 and 25H2 before release.
+- Optionally add a scheduled/manual workflow that runs on a self-hosted or free-tier Windows runner *only* for release tags (without making every PR pay Microsoft).
+- Keep unit tests fully runnable on Linux with fakes.
+
+**Acceptance**
+
+- Release checklist includes green Windows integration results on at least one supported build.
+- No reliance on “it passed on Ubuntu mocks” as proof of Windows correctness.
+
+---
+
+# P2 — Quality, security posture, and product polish
+
+## [ ] P2.1 — Hardening score and audit honesty
+
+**Where:** `engine.calculate_hardening_score`, `AuditDimension`, posture observations
+
+**Problem**  
+Mixing usability/privacy/developer tweaks into a “hardening” narrative confuses users. CIS mappings are often partial (registry-only).
+
+**Required**
+
+- Keep dimensions strictly separated in UI and JSON.
+- Score only evidence-backed security controls; mark partial CIS mappings explicitly.
+- Never claim CIS compliance; claim “aligned with control X (partial)”.
+- Doctor output should distinguish “security posture” from “comfort/privacy preferences”.
+
+**Acceptance**
+
+- JSON and TUI never present a single misleading aggregate “secure” score without dimension breakdown and confidence.
+
+## [ ] P2.2 — Catalog governance
+
+**Where:** `tweaks/catalog.py`, `tweaks/validation.py`, `tweaks/provenance.py`
+
+**Problem**  
+37 tweaks is manageable. Growth without governance will re-introduce the safety debt this review targets.
+
+**Required**
+
+- Every new tweak must declare: risk, admin, irreversible, reboot/explorer-restart, policy conflict paths, tested builds, verification method, and provenance.
+- Validation tests must reject incomplete definitions.
+- Prefer small, composable tweaks over kitchen-sink ones.
+- Document “why this belongs in winbearable” vs “user should use Group Policy / Intune”.
+
+**Acceptance**
+
+- Catalog validation fails CI on missing metadata or unverifiable claims.
+
+## [ ] P2.3 — CLI / TUI UX consistency
+
+**Where:** `cli.py`, `tui.py`
+
+**Required**
+
+- Uniform `--json` schema versioning (already started with `JSON_SCHEMA_VERSION`).
+- Consistent exit codes for: success, dry-run-only changes pending, blocked, error, unsupported platform.
+- TUI must not offer apply actions that CLI would reject (platform, high-risk, irreversible).
+- Progress / checkpoint feedback for long applies (especially WSL and winget).
+
+## [ ] P2.4 — Documentation accuracy
+
+**Where:** `README.md`, `docs/*`, `AGENTS.md`, `TODO.md` (this file supersedes older review TODOs)
+
+**Required**
+
+- Align README claims (WSL 75% RAM, OneDrive kill, VS Code install, dry-run, rollback) with actual code paths and limitations.
+- Document recovery (`doctor`, incomplete transactions, backup `.reg` files).
+- Document what requires reboot / explorer restart and that some effects are best-effort.
+- Keep AGENTS.md as the source of truth for AI contributor workflow (hooks, no Windows CI burn, native-Python invariant).
+
+## [ ] P2.5 — Dependency and supply-chain hygiene
+
+**Where:** `pyproject.toml`, `uv.lock`, `.github/workflows/*`, `renovate.json`
+
+**Required**
+
+- Runtime deps remain minimal (currently empty core + optional Textual) — preserve that.
+- Ensure release workflow produces verifiable artifacts (SBOM, provenance) if publishing continues.
+- Dependabot/Renovate: keep noise low; pin critical tools used in CI.
+
+## [ ] P2.6 — Performance and resource use
+
+**Where:** journal checkpoint frequency, registry export backups
+
+**Required**
+
+- Checkpointing after every micro-op is correctness-friendly but write-heavy. Consider batching checkpoints per tweak while still recording pre-mutation snapshots for the whole transaction.
+- Registry `.reg` exports for admin tweaks: ensure backup dir lifecycle and disk use are bounded and documented.
+
+---
+
+# Suggested implementation order for agents
+
+1. **P0.1** — recovery UX + crash-injection tests (makes journal trustworthy).
+2. **P0.2** — structured operation results / error taxonomy.
+3. **P0.3** — irreversible/side-effect honesty in plan and gates.
+4. **P0.4** — backend integrity asserts on real apply.
+5. **P1.1 + P1.2** — registry and non-registry observation fidelity.
+6. **P1.3** — WSL ↔ profile contract and error handling.
+7. **P1.4** — timeouts on all external tools.
+8. **P1.5** — state corruption / migration story.
+9. **P1.6** — real Windows integration expansion + release checklist.
+10. **P2.*** — score honesty, catalog governance, UX, docs, supply chain, performance.
+
+Do **not** prioritize new tweaks or large catalog expansion before P0 and P1.1–P1.3 are done.
+
+---
+
+# Definition of done (project-level)
+
+- [x] Incomplete transactions are detected, reported, and recoverable without manual JSON editing.
+- [x] No apply path can report success when a required operation failed, timed out, or was unverified.
+- [x] Real mutating apply refuses non-native backends and non-Windows hosts.
+- [ ] Registry round-trips preserve type and data; wrong type is drift/error.
+- [ ] Unknown/inaccessible observations never count as compliant.
+- [ ] WSL behavior matches documented profile/CLI contract; failures are structured.
+- [ ] External tools have timeouts; hangs cannot wedge the CLI indefinitely.
+- [ ] Windows integration tests cover the critical native paths on a supported build before release.
+- [ ] Hardening/privacy/usability scores are dimensioned and evidence-based.
+- [ ] Docs and AGENTS.md match actual safety model and recovery procedures.
+
+---
+
+# Notes for agents
+
+- Honor `AGENTS.md`: run `.githooks/pre-commit` locally; never `--no-verify`; never add billable `windows-latest` CI for routine PR checks.
+- Preserve invariants: no PowerShell wrappers, dry-run default, high-risk and irreversible confirmation gates, policy-conflict honesty (`BLOCKED_BY_POLICY`).
+- Prefer extending existing models (`ObservationState`, `TransactionState`, `RunRecord`) over parallel ad-hoc status strings.
+- When fixing a P0/P1 item, add a focused regression test that would have failed before the fix.
+- Update this `todo.md` checkboxes and acceptance notes as items land; do not delete historical context without replacing it with a short “resolved in &lt;commit/PR&gt;” note.

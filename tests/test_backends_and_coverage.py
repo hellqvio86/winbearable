@@ -456,14 +456,18 @@ class TestBackendsAndCoverage(unittest.TestCase):
         # TUI apply helper records state and formats status
         with tempfile.TemporaryDirectory() as tmp_dir:
             tui_store = StateStore(state_path=Path(tmp_dir) / "tui_state.json")
-            summary = apply_from_tui(profile=profile, env=env, registry=reg, system=sys_b, state_store=tui_store)
+            summary = apply_from_tui(
+                profile=profile, env=env, registry=reg, system=sys_b, state_store=tui_store, allow_simulated=True
+            )
             self.assertIsNotNone(summary.run_id)
             self.assertGreater(len(summary.applied_ids), 0)
             self.assertIn("Applied", format_apply_status(summary))
             self.assertEqual(len(tui_store.load_runs()), 1)
 
             # Second apply has no drifted tweaks left
-            summary2 = apply_from_tui(profile=profile, env=env, registry=reg, system=sys_b, state_store=tui_store)
+            summary2 = apply_from_tui(
+                profile=profile, env=env, registry=reg, system=sys_b, state_store=tui_store, allow_simulated=True
+            )
             self.assertIsNone(summary2.run_id)
             self.assertIn("No drifted tweaks applied", format_apply_status(summary2))
 
@@ -604,6 +608,7 @@ class TestBackendsAndCoverage(unittest.TestCase):
                 state_store=store,
                 dry_run=False,
                 wslconfig_path=wslcfg,
+                allow_simulated=True,
             )
             self.assertIsNotNone(summary.wsl_result)
             self.assertTrue(wslcfg.is_file())
@@ -1110,6 +1115,7 @@ class TestBackendsAndCoverage(unittest.TestCase):
                 store,
                 dry_run=False,
                 wslconfig_path=wslcfg,
+                allow_simulated=True,
             )
             self.assertFalse(summary.failed_ids)
             self.assertIsNotNone(summary.wsl_result)
@@ -1127,7 +1133,9 @@ class TestBackendsAndCoverage(unittest.TestCase):
                 tweaks={"apps.install_vscode": True},
             )
             with patch.object(win_sys, "install_vscode_extension", return_value=False):
-                winget_fail = apply_profile(ext_profile, win_env, reg, win_sys, store, dry_run=False)
+                winget_fail = apply_profile(
+                    ext_profile, win_env, reg, win_sys, store, dry_run=False, allow_simulated=True
+                )
             self.assertIn("apps.install_vscode", winget_fail.failed_ids)
             # Compensation should have uninstalled Microsoft.VisualStudioCode after failure
             self.assertFalse(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
@@ -1248,6 +1256,148 @@ class TestBackendsAndCoverage(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
             mock_uac.assert_called_once()
+
+    def test_p0_recovery_failure_model_irreversible_and_backend_gate(self) -> None:
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from winbearable.cli import run_cli
+        from winbearable.const import HIVE_HKCU, REG_DWORD
+        from winbearable.engine import IrreversibleActionError, apply_profile, recover_incomplete_runs
+        from winbearable.models import (
+            OperationStatus,
+            ProfileSpec,
+            RegistryValueSnapshot,
+            RunRecord,
+            TransactionState,
+            UnsupportedPlatformError,
+        )
+        from winbearable.state import StateStore, StateStoreError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = StateStore(root / "state.json")
+            reg = InMemoryRegistryBackend()
+            sys_b = InMemorySystemBackend(is_windows=True, is_admin=True)
+            env = sys_b.detect_environment(reg)
+
+            # P0.4: Fail closed on simulated backend when allow_simulated=False
+            prof = ProfileSpec(
+                name="p0",
+                description="p0",
+                tweaks={"privacy.disable_advertising_id": True},
+            )
+            with self.assertRaises(UnsupportedPlatformError):
+                apply_profile(prof, env, reg, sys_b, store, dry_run=False)
+
+            # P0.3: Irreversible error names exact action & plan lists side effects
+            irrev_prof = ProfileSpec(name="irrev", description="irrev", tweaks={"onedrive.uninstall": True})
+            with self.assertRaises(IrreversibleActionError) as ctx:
+                apply_profile(irrev_prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True)
+            self.assertIn("OneDriveSetup.exe /uninstall", str(ctx.exception))
+
+            # P0.1: Crash injection — PLANNED (empty ops), APPLYING (crash after 1st op), ROLLING_BACK
+            reg.set_value(
+                HIVE_HKCU,
+                r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
+                "Enabled",
+                1,
+                REG_DWORD,
+            )
+            planned_rec = RunRecord(
+                run_id="run-planned",
+                timestamp="2026-11-14T00:00:00Z",
+                profile_name="p0",
+                applied_tweaks=(),
+                state=TransactionState.PLANNED,
+            )
+            applying_rec = RunRecord(
+                run_id="run-applying",
+                timestamp="2026-11-14T00:01:00Z",
+                profile_name="p0",
+                applied_tweaks=("privacy.disable_advertising_id",),
+                registry_snapshots=(
+                    RegistryValueSnapshot(
+                        hive=HIVE_HKCU,
+                        key_path=r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
+                        value_name="Enabled",
+                        key_existed=True,
+                        value_existed=True,
+                        previous_data=1,
+                        previous_type=REG_DWORD,
+                    ),
+                ),
+                completed_operations=("privacy.disable_advertising_id:registry",),
+                state=TransactionState.APPLYING,
+            )
+            # Simulate mutated registry left behind by crashed APPLYING run
+            reg.set_value(
+                HIVE_HKCU,
+                r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
+                "Enabled",
+                0,
+                REG_DWORD,
+            )
+            store.upsert_run(planned_rec)
+            store.upsert_run(applying_rec)
+
+            # apply_profile refuses new apply while incomplete runs exist
+            with self.assertRaises(StateStoreError):
+                apply_profile(prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True)
+
+            # Recover dry-run returns incomplete runs without modifying state
+            dry_rec = recover_incomplete_runs(store, reg, sys_b, dry_run=True)
+            self.assertEqual(len(dry_rec), 2)
+            self.assertEqual(
+                reg.get_value(
+                    HIVE_HKCU,
+                    r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
+                    "Enabled",
+                ),
+                (0, REG_DWORD),
+            )
+
+            # Real recovery restores original registry value and marks both ROLLED_BACK
+            done_rec = recover_incomplete_runs(store, reg, sys_b, dry_run=False, allow_simulated=True)
+            self.assertEqual(len(done_rec), 2)
+            self.assertTrue(all(r.state == TransactionState.ROLLED_BACK for r in done_rec))
+            self.assertEqual(
+                reg.get_value(
+                    HIVE_HKCU,
+                    r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
+                    "Enabled",
+                ),
+                (1, REG_DWORD),
+            )
+
+            # Idempotent: second recover is a no-op
+            self.assertEqual(recover_incomplete_runs(store, reg, sys_b, dry_run=False, allow_simulated=True), [])
+
+            # CLI `wb recover --json` works cleanly
+            rc = run_cli(["recover", "--json"], registry=reg, system=sys_b, state_store=store)
+            self.assertEqual(rc, 0)
+
+            # P0.2: NativeSystemBackend._run_native_cmd classifies TIMEOUT, TOOL_MISSING, ACCESS_DENIED
+            native_sys = NativeSystemBackend(platform_override="linux")
+            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["sc.exe"], 5.0)):
+                native_sys._run_native_cmd(["sc.exe"], timeout=5.0)
+            assert native_sys.last_outcome is not None
+            self.assertEqual(native_sys.last_outcome.status, OperationStatus.TIMEOUT)
+
+            with patch("subprocess.run", side_effect=FileNotFoundError("not found")):
+                native_sys._run_native_cmd(["missing.exe"])
+            assert native_sys.last_outcome is not None
+            self.assertEqual(native_sys.last_outcome.status, OperationStatus.TOOL_MISSING)
+
+            with patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(["sc.exe"], 5, stdout="", stderr="Access is denied."),
+            ):
+                native_sys._run_native_cmd(["sc.exe"])
+            assert native_sys.last_outcome is not None
+            self.assertEqual(native_sys.last_outcome.status, OperationStatus.ACCESS_DENIED)
 
 
 if __name__ == "__main__":

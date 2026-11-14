@@ -87,6 +87,46 @@ class ObservationConfidence(StrEnum):
     NONE = "none"
 
 
+class OperationStatus(StrEnum):
+    """Structured failure/outcome taxonomy for native system operations."""
+
+    OK = "ok"
+    ALREADY = "already"
+    BLOCKED_BY_POLICY = "blocked_by_policy"
+    ACCESS_DENIED = "access_denied"
+    TIMEOUT = "timeout"
+    TOOL_MISSING = "tool_missing"
+    PARSE_ERROR = "parse_error"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class OperationOutcome:
+    """Structured outcome from a native backend operation."""
+
+    status: OperationStatus
+    message: str = ""
+    returncode: int | None = None
+    command: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        """Return True when operation succeeded or was already in desired state."""
+        return self.status in {OperationStatus.OK, OperationStatus.ALREADY}
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize operation outcome to a JSON-compatible dictionary."""
+        return {
+            "status": str(self.status),
+            "message": self.message,
+            "returncode": self.returncode,
+            "command": list(self.command),
+        }
+
+    LOW = "low"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class PostureObservation:
     """Evidence-backed security or management posture observation."""

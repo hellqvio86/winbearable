@@ -27,7 +27,14 @@ from ..const import (
     SECURE_BOOT_KEY,
     TCPIP_PARAMS_KEY,
 )
-from ..models import EnvironmentInfo, ObservationConfidence, ObservationState, PostureObservation
+from ..models import (
+    EnvironmentInfo,
+    ObservationConfidence,
+    ObservationState,
+    OperationOutcome,
+    OperationStatus,
+    PostureObservation,
+)
 from .registry import RegistryBackend, find_wsl_reg_exe, is_wsl2
 
 GIB_BYTES = 1024 * 1024 * 1024
@@ -579,6 +586,8 @@ class SystemBackend(Protocol):
 class InMemorySystemBackend:
     """Deterministic fake system backend for unit testing on Linux and Windows."""
 
+    is_simulated: bool = True
+
     def __init__(
         self,
         is_windows: bool = True,
@@ -624,6 +633,7 @@ class InMemorySystemBackend:
         self.onedrive_uninstalled = False
         self.wsl_commands_executed: list[tuple[list[str], str | None]] = []
         self.wsl_etc_conf: dict[str, str] = {}
+        self.last_outcome: OperationOutcome | None = None
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         ok_b, build_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
@@ -765,6 +775,8 @@ class InMemorySystemBackend:
 class NativeSystemBackend:
     """Native Windows/WSL system backend using ctypes, winreg, and direct Win32 executables."""
 
+    is_simulated: bool = False
+
     def __init__(
         self,
         platform_override: str | None = None,
@@ -775,6 +787,7 @@ class NativeSystemBackend:
         self._windll = windll_override if windll_override is not None else getattr(ctypes, "windll", None)
         self._setup_candidates = setup_candidates
         self._winget_installed_cache: dict[str, bool] = {}
+        self.last_outcome: OperationOutcome | None = None
 
     def _check_is_admin(self) -> bool:
         override = os.environ.get(ENV_ADMIN_OVERRIDE)
@@ -807,6 +820,26 @@ class NativeSystemBackend:
             )
             cleaned_stdout = proc.stdout.replace("\x00", "")
             cleaned_stderr = proc.stderr.replace("\x00", "")
+            if proc.returncode == 0:
+                self.last_outcome = OperationOutcome(
+                    status=OperationStatus.OK,
+                    returncode=0,
+                    command=tuple(args),
+                )
+            else:
+                low_err = f"{cleaned_stderr}\n{cleaned_stdout}".lower()
+                if "access is denied" in low_err or "administrator" in low_err:
+                    cat = OperationStatus.ACCESS_DENIED
+                elif "blocked" in low_err or "policy" in low_err:
+                    cat = OperationStatus.BLOCKED_BY_POLICY
+                else:
+                    cat = OperationStatus.UNKNOWN
+                self.last_outcome = OperationOutcome(
+                    status=cat,
+                    message=cleaned_stderr or cleaned_stdout,
+                    returncode=proc.returncode,
+                    command=tuple(args),
+                )
             return CommandResult(
                 args=tuple(args),
                 returncode=proc.returncode,
@@ -820,13 +853,27 @@ class NativeSystemBackend:
             raw_err = (
                 exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             )
+            msg = f"Command timed out after {timeout}s: {raw_err.replace(chr(0), '')}".strip()
+            self.last_outcome = OperationOutcome(
+                status=OperationStatus.TIMEOUT,
+                message=msg,
+                returncode=124,
+                command=tuple(args),
+            )
             return CommandResult(
                 args=tuple(args),
                 returncode=124,
                 stdout=raw_out.replace("\x00", ""),
-                stderr=f"Command timed out after {timeout}s: {raw_err.replace(chr(0), '')}".strip(),
+                stderr=msg,
             )
         except OSError as exc:
+            cat = OperationStatus.TOOL_MISSING if isinstance(exc, FileNotFoundError) else OperationStatus.UNKNOWN
+            self.last_outcome = OperationOutcome(
+                status=cat,
+                message=str(exc),
+                returncode=127,
+                command=tuple(args),
+            )
             return CommandResult(
                 args=tuple(args),
                 returncode=127,

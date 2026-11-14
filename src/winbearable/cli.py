@@ -22,6 +22,7 @@ from .engine import (
     apply_profile,
     calculate_hardening_score,
     evaluate_profile,
+    recover_incomplete_runs,
     rollback_runs,
 )
 from .models import EnvironmentInfo, TweakStatus, UnsupportedPlatformError, WslConfigSpec
@@ -111,6 +112,17 @@ def _format_summary_markdown(summary: ApplySummary) -> str:
         f"{len(summary.skipped_policy_ids)} blocked by policy, "
         f"{len(summary.skipped_build_ids)} unsupported build."
     )
+    irreversible_notes = [
+        f"{item.tweak_id} ({op.operation_type}: {op.target})"
+        for item in summary.results
+        if item.status in {TweakStatus.DRIFTED, TweakStatus.APPLIED}
+        for op in item.operations
+        if not op.reversible
+    ]
+    if irreversible_notes:
+        lines.append(
+            "Irreversible / best-effort side effects (cannot be rolled back): " + "; ".join(irreversible_notes)
+        )
     if summary.dry_run and summary.applied_ids:
         lines.append(
             "Run with `--apply` to execute these changes (registry backups and rollback state will be recorded)."
@@ -176,6 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
     # wb rollback
     rollback_parser = subparsers.add_parser("rollback", help="Revert changes from the last run (or --to <run-id>)")
     rollback_parser.add_argument("--to", dest="to_run_id", default=None, help="Target run ID to revert back to")
+    rollback_parser.add_argument(
+        "--incomplete",
+        action="store_true",
+        help="Recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) journal transactions",
+    )
     rollback_parser.add_argument("--apply", action="store_true", help="Actually execute rollback")
     rollback_parser.add_argument(
         "--elevate",
@@ -183,6 +200,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
     )
     rollback_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    # wb recover
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="Inspect or recover incomplete write-ahead journal transactions",
+    )
+    recover_parser.add_argument("--apply", action="store_true", help="Actually execute recovery compensation")
+    recover_parser.add_argument(
+        "--elevate",
+        action="store_true",
+        help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
+    )
+    recover_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb init
     init_parser = subparsers.add_parser("init", help="Generate a TOML profile from the detected environment")
@@ -389,6 +419,12 @@ def _run_cli_body(
                         f"Developer: {dev.get('passed', 0)}/{dev.get('total_applicable', 0)}\n"
                         f"CIS Technical Checks (partial): {audit['cis_passed']}/{audit['cis_total']}\n"
                     )
+                if incomplete_runs:
+                    sys.stdout.write(
+                        f"WARNING: {len(incomplete_runs)} incomplete transaction(s) in journal "
+                        f"({', '.join(f'{r.run_id}:{r.state}' for r in incomplete_runs)}). "
+                        "Run `wb recover --apply` to clean up.\n"
+                    )
             return 0
 
         if args.command == "status":
@@ -463,18 +499,27 @@ def _run_cli_body(
                 sys.stdout.write(_format_summary_markdown(summary))
             return 1 if summary.failed_ids else 0
 
-        if args.command == "rollback":
+        if args.command in {"rollback", "recover"}:
+            is_recover = args.command == "recover" or bool(getattr(args, "incomplete", False))
             if args.apply:
-                _require_windows_for_mutation(env, "wb rollback --apply")
+                _require_windows_for_mutation(env, f"wb {args.command} --apply")
                 if args.elevate and not env.is_admin and not args.uac_output:
                     return _relay_elevated_uac(raw_argv)
-            reverted = rollback_runs(
-                state_store=store,
-                registry=reg_backend,
-                system=sys_backend,
-                to_run_id=args.to_run_id,
-                dry_run=not args.apply,
-            )
+            if is_recover:
+                reverted = recover_incomplete_runs(
+                    state_store=store,
+                    registry=reg_backend,
+                    system=sys_backend,
+                    dry_run=not args.apply,
+                )
+            else:
+                reverted = rollback_runs(
+                    state_store=store,
+                    registry=reg_backend,
+                    system=sys_backend,
+                    to_run_id=args.to_run_id,
+                    dry_run=not args.apply,
+                )
             if args.json:
                 _print_json(
                     {
@@ -484,13 +529,24 @@ def _run_cli_body(
                 )
             else:
                 if not reverted:
-                    sys.stdout.write("No recorded runs in state store to roll back.\n")
+                    msg = (
+                        "No incomplete transactions in state store.\n"
+                        if is_recover
+                        else "No recorded runs in state store to roll back.\n"
+                    )
+                    sys.stdout.write(msg)
                 else:
-                    prefix = "[DRY-RUN] Would revert" if not args.apply else "Reverted"
+                    prefix = (
+                        "[DRY-RUN] Would recover"
+                        if (is_recover and not args.apply)
+                        else (
+                            "Recovered" if is_recover else ("[DRY-RUN] Would revert" if not args.apply else "Reverted")
+                        )
+                    )
                     for rec in reverted:
                         sys.stdout.write(
                             f"{prefix} run {rec.run_id} (profile={rec.profile_name}, "
-                            f"tweaks={len(rec.applied_tweaks)})\n"
+                            f"state={rec.state}, tweaks={len(rec.applied_tweaks)})\n"
                         )
                         for snap in rec.registry_snapshots:
                             target_desc = (

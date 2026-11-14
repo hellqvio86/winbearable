@@ -84,6 +84,8 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code_dry, 0)
         self.assertIn("DRY-RUN PLAN", stdout_dry)
 
+        self.registry.is_simulated = False
+        self.system.is_simulated = False
         code, stdout, _ = self._invoke(["apply", "--profile", "user-only", "--apply", "--json"])
         self.assertEqual(code, 0)
         apply_data = json.loads(stdout)

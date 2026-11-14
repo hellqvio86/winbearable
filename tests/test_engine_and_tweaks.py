@@ -100,6 +100,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertFalse(apply_summary.dry_run)
         self.assertIsNotNone(apply_summary.run_id)
@@ -115,6 +116,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             registry=registry,
             system=system,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertEqual(len(reverted), 1)
         restored_val = registry.get_value(HIVE_HKCU, run_key, "OneDrive")
@@ -151,6 +153,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertEqual(summary.skipped_policy_ids, ("search.disable_bing",))
         self.assertEqual(summary.applied_ids, ())
@@ -169,6 +172,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertIn("onedrive.disable_policy", summary.skipped_admin_ids)
         self.assertIn("onedrive.unpin_explorer", summary.applied_ids)
@@ -200,6 +204,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertEqual(summary.skipped_build_ids, ("ai.disable_recall",))
 
@@ -236,6 +241,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertIn("apps.install_vscode", summary.applied_ids)
         self.assertTrue(system.is_winget_package_installed(VSCODE_WINGET_ID))
@@ -246,6 +252,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             registry=registry,
             system=system,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertFalse(system.is_winget_package_installed(VSCODE_WINGET_ID))
 
@@ -264,6 +271,7 @@ class TestEngineAndTweaks(unittest.TestCase):
                 system=system,
                 state_store=self.state_store,
                 dry_run=False,
+                allow_simulated=True,
                 allow_high_risk=False,
             )
 
@@ -274,6 +282,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
             allow_high_risk=True,
             allow_irreversible=True,
         )
@@ -311,6 +320,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
             allow_high_risk=True,
             allow_irreversible=True,
         )
@@ -324,6 +334,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             registry=registry,
             system=system,
             dry_run=False,
+            allow_simulated=True,
         )
 
         reverted_score = calculate_hardening_score(env, registry, system)
@@ -357,6 +368,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             system=system,
             state_store=self.state_store,
             dry_run=False,
+            allow_simulated=True,
         )
         self.assertEqual(summary.failed_ids, ("telemetry.disable_scheduled_tasks",))
         err_results = [r for r in summary.results if r.status == TweakStatus.ERROR]
@@ -386,7 +398,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             tweaks={"onedrive.uninstall": True},
         )
         with self.assertRaises(IrreversibleActionError):
-            apply_profile(irrev_profile, env, reg, sys_b, self.state_store, dry_run=False)
+            apply_profile(irrev_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
 
         # P0.5: Stubborn process refuses graceful stop without force_kill_processes=True
         proc_profile = ProfileSpec(
@@ -395,13 +407,25 @@ class TestEngineAndTweaks(unittest.TestCase):
             tweaks={"onedrive.disable_tray_autorun": True},
         )
         reg.set_value(HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive", "OneDrive.exe", REG_SZ)
-        fail_summary = apply_profile(proc_profile, env, reg, sys_b, self.state_store, dry_run=False)
+        fail_summary = apply_profile(
+            proc_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True
+        )
         self.assertEqual(fail_summary.failed_ids, ("onedrive.disable_tray_autorun",))
         self.assertTrue(sys_b.is_process_running(ONEDRIVE_PROCESS_NAME))
+        from winbearable.engine import recover_incomplete_runs
+
+        recover_incomplete_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
 
         # With force_kill_processes=True it succeeds
         ok_summary = apply_profile(
-            proc_profile, env, reg, sys_b, self.state_store, dry_run=False, force_kill_processes=True
+            proc_profile,
+            env,
+            reg,
+            sys_b,
+            self.state_store,
+            dry_run=False,
+            allow_simulated=True,
+            force_kill_processes=True,
         )
         self.assertEqual(ok_summary.failed_ids, ())
         self.assertFalse(sys_b.is_process_running(ONEDRIVE_PROCESS_NAME))
@@ -412,9 +436,9 @@ class TestEngineAndTweaks(unittest.TestCase):
             description="VS Code extension rollback test",
             tweaks={"apps.install_vscode": True},
         )
-        apply_profile(ext_profile, env, reg, sys_b, self.state_store, dry_run=False)
+        apply_profile(ext_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
         self.assertTrue(sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
-        rollback_runs(self.state_store, reg, sys_b, dry_run=False)
+        rollback_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
         self.assertFalse(sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
 
     def test_p2_1_separated_audit_dimensions_and_cis_provenance(self) -> None:
@@ -437,7 +461,7 @@ class TestEngineAndTweaks(unittest.TestCase):
                 "start.disable_recommendations": True,
             },
         )
-        apply_profile(ui_profile, env, reg, sys_b, self.state_store, dry_run=False)
+        apply_profile(ui_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
 
         after_ui = calculate_hardening_score(env, reg, sys_b)
         self.assertGreater(after_ui["dimensions"]["usability"]["score_percent"], 0.0)

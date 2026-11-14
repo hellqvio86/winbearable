@@ -62,6 +62,9 @@ wb apply --profile user-only --apply --json
 
 # Revert most recent apply run
 wb rollback --apply --json
+
+# Recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) journal runs
+wb recover --apply --json
 ```
 
 ## Development & Quality Gate (`uv` / Dev Container)

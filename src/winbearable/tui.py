@@ -49,6 +49,7 @@ def apply_from_tui(
     system: SystemBackend,
     state_store: StateStore,
     allow_high_risk: bool = False,
+    allow_simulated: bool = False,
 ) -> ApplySummary:
     """Apply drifted tweaks in the profile from the TUI, recording rollback state."""
     if not env.is_windows:
@@ -63,6 +64,7 @@ def apply_from_tui(
         state_store=state_store,
         dry_run=False,
         allow_high_risk=allow_high_risk,
+        allow_simulated=allow_simulated,
     )
 
 
