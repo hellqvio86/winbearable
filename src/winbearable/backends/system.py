@@ -29,6 +29,25 @@ from ..models import EnvironmentInfo
 from .registry import RegistryBackend
 
 GIB_BYTES = 1024 * 1024 * 1024
+_TH32CS_SNAPPROCESS = 0x00000002
+_MAX_PATH = 260
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    """Win32 PROCESSENTRY32W structure for native process enumeration."""
+
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_wchar * _MAX_PATH),
+    ]
 
 
 @dataclass(frozen=True)
@@ -284,6 +303,7 @@ class NativeSystemBackend:
         self._platform = platform_override or sys.platform
         self._windll = windll_override if windll_override is not None else getattr(ctypes, "windll", None)
         self._setup_candidates = setup_candidates
+        self._winget_installed_cache: dict[str, bool] = {}
 
     def _check_is_admin(self) -> bool:
         override = os.environ.get(ENV_ADMIN_OVERRIDE)
@@ -448,9 +468,41 @@ class NativeSystemBackend:
         res = self._run_native_cmd(["reg.exe", "export", f"{hive}\\{key_path}", str(output_path), "/y"])
         return res.returncode == 0
 
+    def _is_process_running_win32(self, process_name: str) -> bool | None:
+        """Enumerate running processes via Win32 Toolhelp32 snapshot (avoids slow tasklist.exe/WMI)."""
+        if self._windll is None:
+            return None
+        kernel32 = getattr(self._windll, "kernel32", None)
+        if kernel32 is None or not hasattr(kernel32, "CreateToolhelp32Snapshot"):
+            return None
+        try:
+            kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+            snap = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+            invalid_handle = ctypes.c_void_p(-1).value
+            if snap in (None, 0, invalid_handle, -1):
+                return None
+            target = process_name.lower()
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            snap_handle = ctypes.c_void_p(snap)
+            try:
+                ok = kernel32.Process32FirstW(snap_handle, ctypes.byref(entry))
+                while ok:
+                    if entry.szExeFile.lower() == target:
+                        return True
+                    ok = kernel32.Process32NextW(snap_handle, ctypes.byref(entry))
+                return False
+            finally:
+                kernel32.CloseHandle(snap_handle)
+        except Exception:
+            return None
+
     def is_process_running(self, process_name: str) -> bool:
         if self._platform != "win32":
             return False
+        native_result = self._is_process_running_win32(process_name)
+        if native_result is not None:
+            return native_result
         res = self._run_native_cmd(["tasklist.exe", "/FI", f"IMAGENAME eq {process_name}", "/NH"])
         return process_name.lower() in res.stdout.lower()
 
@@ -472,6 +524,9 @@ class NativeSystemBackend:
     def is_winget_package_installed(self, package_id: str) -> bool:
         if self._platform != "win32":
             return False
+        cache_key = package_id.lower()
+        if cache_key in self._winget_installed_cache:
+            return self._winget_installed_cache[cache_key]
         res = self._run_native_cmd(
             [
                 "winget.exe",
@@ -482,7 +537,9 @@ class NativeSystemBackend:
                 "--accept-source-agreements",
             ]
         )
-        return res.returncode == 0 and package_id.lower() in res.stdout.lower()
+        installed = res.returncode == 0 and cache_key in res.stdout.lower()
+        self._winget_installed_cache[cache_key] = installed
+        return installed
 
     def install_winget_package(
         self,
@@ -492,6 +549,7 @@ class NativeSystemBackend:
     ) -> bool:
         if self._platform != "win32":
             return False
+        self._winget_installed_cache.pop(package_id.lower(), None)
         res = self._run_native_cmd(
             [
                 "winget.exe",
@@ -511,11 +569,13 @@ class NativeSystemBackend:
             return False
         for ext in vscode_extensions:
             self._run_native_cmd(["code.cmd", "--install-extension", ext, "--force"])
+        self._winget_installed_cache[package_id.lower()] = True
         return True
 
     def uninstall_winget_package(self, package_id: str) -> bool:
         if self._platform != "win32":
             return False
+        self._winget_installed_cache.pop(package_id.lower(), None)
         res = self._run_native_cmd(
             [
                 "winget.exe",
@@ -526,7 +586,10 @@ class NativeSystemBackend:
                 "--accept-source-agreements",
             ]
         )
-        return res.returncode == 0
+        ok = res.returncode == 0
+        if ok:
+            self._winget_installed_cache[package_id.lower()] = False
+        return ok
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
         return self._run_native_cmd(["wsl.exe", *args], input_text=input_text)

@@ -326,7 +326,7 @@ def run_cli(
 
         if args.command == "tui":
             profile = load_profile(args.profile)
-            return launch_tui(profile, env, reg_backend, sys_backend)
+            return launch_tui(profile, env, reg_backend, sys_backend, state_store=store)
 
         wslconfig_path = Path(args.wslconfig) if getattr(args, "wslconfig", None) else None
         if args.wsl_command == "audit":

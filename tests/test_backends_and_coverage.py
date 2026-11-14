@@ -46,7 +46,13 @@ from winbearable.profiles import (
     load_profile,
 )
 from winbearable.state import StateStore, resolve_state_path
-from winbearable.tui import format_tui_rows, is_textual_available, launch_tui
+from winbearable.tui import (
+    apply_from_tui,
+    format_apply_status,
+    format_tui_rows,
+    is_textual_available,
+    launch_tui,
+)
 from winbearable.tweaks import get_tweak
 from winbearable.wsl import (
     _atomic_write_text,
@@ -438,6 +444,94 @@ class TestBackendsAndCoverage(unittest.TestCase):
             self.assertEqual(rc_no_tui, 1)
 
         self.assertEqual(format_tui_rows([]), [])
+
+        # TUI apply helper records state and formats status
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tui_store = StateStore(state_path=Path(tmp_dir) / "tui_state.json")
+            summary = apply_from_tui(profile=profile, env=env, registry=reg, system=sys_b, state_store=tui_store)
+            self.assertIsNotNone(summary.run_id)
+            self.assertGreater(len(summary.applied_ids), 0)
+            self.assertIn("Applied", format_apply_status(summary))
+            self.assertEqual(len(tui_store.load_runs()), 1)
+
+            # Second apply has no drifted tweaks left
+            summary2 = apply_from_tui(profile=profile, env=env, registry=reg, system=sys_b, state_store=tui_store)
+            self.assertIsNone(summary2.run_id)
+            self.assertIn("No drifted tweaks applied", format_apply_status(summary2))
+
+    def test_native_win32_process_snapshot_and_winget_cache(self) -> None:
+        """NativeSystemBackend uses Win32 Toolhelp32 snapshot and caches winget checks."""
+
+        class FakeSnapshotKernel32:
+            def __init__(self, proc_names: list[str]) -> None:
+                self.proc_names = proc_names
+                self.idx = 0
+                self.closed = False
+
+                class _Fn:
+                    restype: Any = None
+
+                    def __init__(self, impl: Any) -> None:
+                        self._impl = impl
+
+                    def __call__(self, *args: Any) -> Any:
+                        return self._impl(*args)
+
+                self.CreateToolhelp32Snapshot = _Fn(lambda flags, pid: 1234)
+                self.Process32FirstW = self._first
+                self.Process32NextW = self._next
+                self.CloseHandle = self._close
+
+            def _first(self, snap: Any, entry_ptr: Any) -> int:
+                if not self.proc_names:
+                    return 0
+                entry_ptr._obj.szExeFile = self.proc_names[0]
+                self.idx = 1
+                return 1
+
+            def _next(self, snap: Any, entry_ptr: Any) -> int:
+                if self.idx >= len(self.proc_names):
+                    return 0
+                entry_ptr._obj.szExeFile = self.proc_names[self.idx]
+                self.idx += 1
+                return 1
+
+            def _close(self, snap: Any) -> int:
+                self.closed = True
+                return 1
+
+        class FakeSnapWindll:
+            def __init__(self, proc_names: list[str]) -> None:
+                self.kernel32 = FakeSnapshotKernel32(proc_names)
+
+        k32_windll = FakeSnapWindll(["explorer.exe", "OneDrive.exe"])
+        win_sys = NativeSystemBackend(platform_override="win32", windll_override=k32_windll)
+        self.assertTrue(win_sys.is_process_running("onedrive.exe"))
+        self.assertTrue(k32_windll.kernel32.closed)
+        self.assertFalse(win_sys.is_process_running("missing.exe"))
+
+        # Winget cache avoids duplicate subprocess invocations and invalidates on install/uninstall
+        call_count = 0
+
+        def _fake_cmd(args: list[str], input_text: str | None = None) -> Any:
+            nonlocal call_count
+            call_count += 1
+            return type(
+                "Res",
+                (),
+                {"args": tuple(args), "returncode": 0, "stdout": "Microsoft.VisualStudioCode", "stderr": ""},
+            )()
+
+        with patch.object(win_sys, "_run_native_cmd", side_effect=_fake_cmd):
+            self.assertTrue(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
+            self.assertTrue(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
+            self.assertEqual(call_count, 1)
+            win_sys.uninstall_winget_package("Microsoft.VisualStudioCode")
+            self.assertFalse(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
+            self.assertEqual(call_count, 2)
+            win_sys.install_winget_package("Microsoft.VisualStudioCode")
+            self.assertTrue(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
+            self.assertEqual(call_count, 3)
 
     def test_profile_and_wsl_edge_cases(self) -> None:
         """Cover remaining validation branches in profiles.py and wsl.py."""
