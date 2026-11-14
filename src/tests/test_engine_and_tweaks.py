@@ -1,8 +1,6 @@
 """Unit tests for the core engine, registry snapshots, policy conflicts, and catalog tweaks."""
 
-import tempfile
-import unittest
-from pathlib import Path
+import pytest
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
 from winbearable.const import (
@@ -30,598 +28,586 @@ from winbearable.state import StateStore
 from winbearable.tweaks import get_all_tweaks, get_tweak
 
 
-class TestEngineAndTweaks(unittest.TestCase):
-    """Test detect, apply, policy conflict, and rollback across the tweak catalog."""
+def test_onedrive_tray_autorun_apply_and_rollback(state_store: StateStore) -> None:
+    """OneDrive autorun value and running process are removed on apply and restored on rollback."""
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    onedrive_cmd = r'"C:\Users\alice\AppData\Local\Microsoft\OneDrive\OneDrive.exe" /background'
+    registry = InMemoryRegistryBackend(
+        initial_values={
+            (HIVE_HKCU, run_key, "OneDrive"): (onedrive_cmd, REG_SZ),
+        }
+    )
+    system = InMemorySystemBackend(
+        windows_build=MIN_SUPPORTED_BUILD,
+        is_admin=False,
+        running_processes={ONEDRIVE_PROCESS_NAME},
+    )
+    env = system.detect_environment(registry)
+    tweak = get_tweak("onedrive.disable_tray_autorun")
 
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.state_path = Path(self.temp_dir.name) / "state.json"
-        self.state_store = StateStore(state_path=self.state_path)
+    initial_check = detect_tweak(tweak, env, registry, system)
+    assert initial_check.status == TweakStatus.DRIFTED
+    assert len(initial_check.registry_changes) == 1
+    assert r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run [OneDrive]" in initial_check.detail
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+    profile = ProfileSpec(
+        name="test-onedrive",
+        description="Test OneDrive disable",
+        tweaks={
+            "onedrive.disable_tray_autorun": True,
+            "onedrive.unpin_explorer": True,
+            "search.disable_bing": False,
+        },
+    )
+    evals = evaluate_profile(profile, env, registry, system)
+    assert len(evals) == 2
 
-    def test_onedrive_tray_autorun_apply_and_rollback(self) -> None:
-        """OneDrive autorun value and running process are removed on apply and restored on rollback."""
-        run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        onedrive_cmd = r'"C:\Users\alice\AppData\Local\Microsoft\OneDrive\OneDrive.exe" /background'
-        registry = InMemoryRegistryBackend(
-            initial_values={
-                (HIVE_HKCU, run_key, "OneDrive"): (onedrive_cmd, REG_SZ),
-            }
-        )
-        system = InMemorySystemBackend(
-            windows_build=MIN_SUPPORTED_BUILD,
-            is_admin=False,
-            running_processes={ONEDRIVE_PROCESS_NAME},
-        )
-        env = system.detect_environment(registry)
-        tweak = get_tweak("onedrive.disable_tray_autorun")
+    # Dry-run must not mutate registry or kill process
+    dry_summary = apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=True,
+    )
+    assert dry_summary.dry_run
+    assert dry_summary.run_id is None
+    assert registry.get_value(HIVE_HKCU, run_key, "OneDrive") is not None
+    assert system.is_process_running(ONEDRIVE_PROCESS_NAME)
 
-        initial_check = detect_tweak(tweak, env, registry, system)
-        self.assertEqual(initial_check.status, TweakStatus.DRIFTED)
-        self.assertEqual(len(initial_check.registry_changes), 1)
-        self.assertIn(
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run [OneDrive]",
-            initial_check.detail,
-        )
+    # Real apply removes startup entry, stops OneDrive.exe, and unpins CLSIDs
+    apply_summary = apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert not (apply_summary.dry_run)
+    assert apply_summary.run_id is not None
+    assert registry.get_value(HIVE_HKCU, run_key, "OneDrive") is None
+    assert not (system.is_process_running(ONEDRIVE_PROCESS_NAME))
 
-        profile = ProfileSpec(
-            name="test-onedrive",
-            description="Test OneDrive disable",
-            tweaks={
-                "onedrive.disable_tray_autorun": True,
-                "onedrive.unpin_explorer": True,
-                "search.disable_bing": False,
-            },
-        )
-        evals = evaluate_profile(profile, env, registry, system)
-        self.assertEqual(len(evals), 2)
+    post_check = detect_tweak(tweak, env, registry, system)
+    assert post_check.status == TweakStatus.APPLIED
 
-        # Dry-run must not mutate registry or kill process
-        dry_summary = apply_profile(
-            profile=profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=True,
-        )
-        self.assertTrue(dry_summary.dry_run)
-        self.assertIsNone(dry_summary.run_id)
-        self.assertIsNotNone(registry.get_value(HIVE_HKCU, run_key, "OneDrive"))
-        self.assertTrue(system.is_process_running(ONEDRIVE_PROCESS_NAME))
+    # Rollback restores the original OneDrive Run value and removes newly created CLSID values
+    reverted = rollback_runs(
+        state_store=state_store,
+        registry=registry,
+        system=system,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert len(reverted) == 1
+    restored_val = registry.get_value(HIVE_HKCU, run_key, "OneDrive")
+    assert restored_val == (onedrive_cmd, REG_SZ)
 
-        # Real apply removes startup entry, stops OneDrive.exe, and unpins CLSIDs
-        apply_summary = apply_profile(
-            profile=profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertFalse(apply_summary.dry_run)
-        self.assertIsNotNone(apply_summary.run_id)
-        self.assertIsNone(registry.get_value(HIVE_HKCU, run_key, "OneDrive"))
-        self.assertFalse(system.is_process_running(ONEDRIVE_PROCESS_NAME))
 
-        post_check = detect_tweak(tweak, env, registry, system)
-        self.assertEqual(post_check.status, TweakStatus.APPLIED)
+def test_policy_conflict_marks_blocked_by_policy(state_store: StateStore) -> None:
+    """When GPO/MDM enforces a conflicting policy, tweak is marked BLOCKED_BY_POLICY and skipped."""
+    registry = InMemoryRegistryBackend(
+        initial_values={
+            (
+                HIVE_HKLM,
+                r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
+                "DisableSearchBoxSuggestions",
+            ): (0, REG_DWORD),
+        }
+    )
+    system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
+    env = system.detect_environment(registry)
+    tweak = get_tweak("search.disable_bing")
 
-        # Rollback restores the original OneDrive Run value and removes newly created CLSID values
-        reverted = rollback_runs(
-            state_store=self.state_store,
-            registry=registry,
-            system=system,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertEqual(len(reverted), 1)
-        restored_val = registry.get_value(HIVE_HKCU, run_key, "OneDrive")
-        self.assertEqual(restored_val, (onedrive_cmd, REG_SZ))
+    result = detect_tweak(tweak, env, registry, system)
+    assert result.status == TweakStatus.BLOCKED_BY_POLICY
+    assert "Enforced by policy" in result.detail
 
-    def test_policy_conflict_marks_blocked_by_policy(self) -> None:
-        """When GPO/MDM enforces a conflicting policy, tweak is marked BLOCKED_BY_POLICY and skipped."""
-        registry = InMemoryRegistryBackend(
-            initial_values={
-                (
-                    HIVE_HKLM,
-                    r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
-                    "DisableSearchBoxSuggestions",
-                ): (0, REG_DWORD),
-            }
-        )
-        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
-        env = system.detect_environment(registry)
-        tweak = get_tweak("search.disable_bing")
+    profile = ProfileSpec(
+        name="test-policy",
+        description="Policy conflict test",
+        tweaks={"search.disable_bing": True},
+    )
+    summary = apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert summary.skipped_policy_ids == ("search.disable_bing",)
+    assert summary.applied_ids == ()
 
-        result = detect_tweak(tweak, env, registry, system)
-        self.assertEqual(result.status, TweakStatus.BLOCKED_BY_POLICY)
-        self.assertIn("Enforced by policy", result.detail)
 
-        profile = ProfileSpec(
-            name="test-policy",
-            description="Policy conflict test",
-            tweaks={"search.disable_bing": True},
-        )
-        summary = apply_profile(
-            profile=profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertEqual(summary.skipped_policy_ids, ("search.disable_bing",))
-        self.assertEqual(summary.applied_ids, ())
+def test_admin_tweak_skipped_when_unprivileged(state_store: StateStore) -> None:
+    """Admin tweaks report REQUIRES_ADMIN and are skipped when running without elevation."""
+    registry = InMemoryRegistryBackend()
+    system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
+    env = system.detect_environment(registry)
 
-    def test_admin_tweak_skipped_when_unprivileged(self) -> None:
-        """Admin tweaks report REQUIRES_ADMIN and are skipped when running without elevation."""
-        registry = InMemoryRegistryBackend()
-        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
-        env = system.detect_environment(registry)
+    owner_profile = load_profile("owner")
+    summary = apply_profile(
+        profile=owner_profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert "onedrive.disable_policy" in summary.skipped_admin_ids
+    assert "onedrive.unpin_explorer" in summary.applied_ids
+    assert "onedrive.disable_tray_autorun" in summary.already_applied_ids
 
-        owner_profile = load_profile("owner")
-        summary = apply_profile(
-            profile=owner_profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertIn("onedrive.disable_policy", summary.skipped_admin_ids)
-        self.assertIn("onedrive.unpin_explorer", summary.applied_ids)
-        self.assertIn("onedrive.disable_tray_autorun", summary.already_applied_ids)
 
-    def test_build_requirement_filtering(self) -> None:
-        """Any Windows build older than Windows 11 24H2 (26100) is marked UNSUPPORTED_BUILD, and max_build works."""
-        registry = InMemoryRegistryBackend()
-        system = InMemorySystemBackend(windows_build=22631, is_admin=True)
-        env = system.detect_environment(registry)
+def test_build_requirement_filtering(state_store: StateStore) -> None:
+    """Any Windows build older than Windows 11 24H2 (26100) is marked UNSUPPORTED_BUILD, and max_build works."""
+    registry = InMemoryRegistryBackend()
+    system = InMemorySystemBackend(windows_build=22631, is_admin=True)
+    env = system.detect_environment(registry)
 
-        recall_tweak = get_tweak("ai.disable_recall")
-        res = detect_tweak(recall_tweak, env, registry, system)
-        self.assertEqual(res.status, TweakStatus.UNSUPPORTED_BUILD)
+    recall_tweak = get_tweak("ai.disable_recall")
+    res = detect_tweak(recall_tweak, env, registry, system)
+    assert res.status == TweakStatus.UNSUPPORTED_BUILD
 
-        vscode_tweak = get_tweak("apps.install_vscode")
-        res_vscode = detect_tweak(vscode_tweak, env, registry, system)
-        self.assertEqual(res_vscode.status, TweakStatus.UNSUPPORTED_BUILD)
+    vscode_tweak = get_tweak("apps.install_vscode")
+    res_vscode = detect_tweak(vscode_tweak, env, registry, system)
+    assert res_vscode.status == TweakStatus.UNSUPPORTED_BUILD
 
-        profile = ProfileSpec(
-            name="old-build-test",
-            description="Old build test",
-            tweaks={"ai.disable_recall": True},
-        )
-        summary = apply_profile(
-            profile=profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertEqual(summary.skipped_build_ids, ("ai.disable_recall",))
+    profile = ProfileSpec(
+        name="old-build-test",
+        description="Old build test",
+        tweaks={"ai.disable_recall": True},
+    )
+    summary = apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert summary.skipped_build_ids == ("ai.disable_recall",)
 
-        # Test max_build cap
-        legacy_tweak = TweakDefinition(
-            tweak_id="legacy.test",
-            category="test",
-            title="Legacy Only",
-            description="Legacy build cap test",
-            source_url="https://learn.microsoft.com/",
-            risk=RiskLevel.LOW,
-            requires_admin=False,
-            min_build=20000,
-            max_build=22000,
-            tested_builds=(22000,),
-        )
-        res_max = detect_tweak(legacy_tweak, env, registry, system)
-        self.assertEqual(res_max.status, TweakStatus.UNSUPPORTED_BUILD)
+    # Test max_build cap
+    legacy_tweak = TweakDefinition(
+        tweak_id="legacy.test",
+        category="test",
+        title="Legacy Only",
+        description="Legacy build cap test",
+        source_url="https://learn.microsoft.com/",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=20000,
+        max_build=22000,
+        tested_builds=(22000,),
+    )
+    res_max = detect_tweak(legacy_tweak, env, registry, system)
+    assert res_max.status == TweakStatus.UNSUPPORTED_BUILD
 
-    def test_vscode_winget_install_and_rollback(self) -> None:
-        """apps.install_vscode installs Microsoft.VisualStudioCode + Remote-WSL and uninstalls on rollback."""
-        registry = InMemoryRegistryBackend()
-        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
-        env = system.detect_environment(registry)
-        profile = ProfileSpec(
-            name="vscode-test",
-            description="Install VS Code",
-            tweaks={"apps.install_vscode": True},
-        )
-        summary = apply_profile(
-            profile=profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertIn("apps.install_vscode", summary.applied_ids)
-        self.assertTrue(system.is_winget_package_installed(VSCODE_WINGET_ID))
-        self.assertIn(VSCODE_WSL_EXTENSION_ID, system.installed_vscode_extensions)
 
-        rollback_runs(
-            state_store=self.state_store,
-            registry=registry,
-            system=system,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertFalse(system.is_winget_package_installed(VSCODE_WINGET_ID))
+def test_vscode_winget_install_and_rollback(state_store: StateStore) -> None:
+    """apps.install_vscode installs Microsoft.VisualStudioCode + Remote-WSL and uninstalls on rollback."""
+    registry = InMemoryRegistryBackend()
+    system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
+    env = system.detect_environment(registry)
+    profile = ProfileSpec(
+        name="vscode-test",
+        description="Install VS Code",
+        tweaks={"apps.install_vscode": True},
+    )
+    summary = apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert "apps.install_vscode" in summary.applied_ids
+    assert system.is_winget_package_installed(VSCODE_WINGET_ID)
+    assert VSCODE_WSL_EXTENSION_ID in system.installed_vscode_extensions
 
-    def test_high_risk_requires_explicit_confirmation(self) -> None:
-        """High-risk tweaks (e.g. VBS/HVCI) refuse to apply without allow_high_risk=True."""
-        registry = InMemoryRegistryBackend()
-        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
-        env = system.detect_environment(registry)
-        paranoid_profile = load_profile("paranoid")
+    rollback_runs(
+        state_store=state_store,
+        registry=registry,
+        system=system,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert not (system.is_winget_package_installed(VSCODE_WINGET_ID))
 
-        with self.assertRaises(HighRiskConfirmationError):
-            apply_profile(
-                profile=paranoid_profile,
-                env=env,
-                registry=registry,
-                system=system,
-                state_store=self.state_store,
-                dry_run=False,
-                allow_simulated=True,
-                allow_high_risk=False,
-            )
 
-        summary = apply_profile(
+def test_high_risk_requires_explicit_confirmation(state_store: StateStore) -> None:
+    """High-risk tweaks (e.g. VBS/HVCI) refuse to apply without allow_high_risk=True."""
+    registry = InMemoryRegistryBackend()
+    system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
+    env = system.detect_environment(registry)
+    paranoid_profile = load_profile("paranoid")
+
+    with pytest.raises(HighRiskConfirmationError):
+        apply_profile(
             profile=paranoid_profile,
             env=env,
             registry=registry,
             system=system,
-            state_store=self.state_store,
+            state_store=state_store,
             dry_run=False,
             allow_simulated=True,
-            allow_high_risk=True,
-            allow_irreversible=True,
-        )
-        self.assertIn("hardening.enable_vbs_hvci", summary.applied_ids)
-        self.assertTrue(system.onedrive_uninstalled)
-
-    def test_every_catalog_tweak_apply_and_revert_cycle(self) -> None:
-        """Every tweak in TWEAK_CATALOG transitions DRIFTED -> APPLIED -> DRIFTED across apply/rollback."""
-        registry = InMemoryRegistryBackend(
-            initial_values={
-                (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive"): (
-                    "OneDrive.exe",
-                    REG_SZ,
-                ),
-                (HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\WSearch", "Start"): (2, REG_DWORD),
-            }
-        )
-        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
-        env = system.detect_environment(registry)
-
-        all_tweaks = get_all_tweaks()
-        profile = ProfileSpec(
-            name="all-tweaks",
-            description="All catalog tweaks",
-            tweaks={tweak.tweak_id: True for tweak in all_tweaks},
+            allow_high_risk=False,
         )
 
-        before_score = calculate_hardening_score(env, registry, system)
-        self.assertEqual(before_score["passed"], 0)
-
-        apply_profile(
-            profile=profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-            allow_high_risk=True,
-            allow_irreversible=True,
-        )
-
-        after_score = calculate_hardening_score(env, registry, system)
-        self.assertEqual(after_score["passed"], len(all_tweaks))
-        self.assertEqual(after_score["score_percent"], 100.0)
-
-        rollback_runs(
-            state_store=self.state_store,
-            registry=registry,
-            system=system,
-            dry_run=False,
-            allow_simulated=True,
-        )
-
-        reverted_score = calculate_hardening_score(env, registry, system)
-        self.assertEqual(reverted_score["passed"], 0)
-
-    def test_write_ahead_journal_and_compensation_on_failure(self) -> None:
-        """Failed native operation triggers compensating rollback and leaves FAILED journal record."""
-        run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        registry = InMemoryRegistryBackend(
-            initial_values={
-                (HIVE_HKCU, run_key, "OneDrive"): ("OneDrive.exe", REG_SZ),
-            }
-        )
-        system = InMemorySystemBackend(is_admin=True)
-        # Fail the scheduled task operation after the earlier registry tweak succeeds
-        system.set_scheduled_task_enabled = lambda task_path, enabled: False  # type: ignore[method-assign]
-        env = system.detect_environment(registry)
-
-        profile = ProfileSpec(
-            name="fail-mid-run",
-            description="Test write-ahead journal compensation",
-            tweaks={
-                "onedrive.disable_tray_autorun": True,
-                "telemetry.disable_scheduled_tasks": True,
-            },
-        )
-        summary = apply_profile(
-            profile=profile,
-            env=env,
-            registry=registry,
-            system=system,
-            state_store=self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-        )
-        self.assertEqual(summary.failed_ids, ("telemetry.disable_scheduled_tasks",))
-        err_results = [r for r in summary.results if r.status == TweakStatus.ERROR]
-        self.assertEqual(len(err_results), 1)
-
-        # Earlier registry mutation was compensated back to original value
-        self.assertEqual(registry.get_value(HIVE_HKCU, run_key, "OneDrive"), ("OneDrive.exe", REG_SZ))
-
-        # Journal retains the FAILED record and reports it as incomplete
-        runs = self.state_store.load_runs()
-        self.assertEqual(len(runs), 1)
-        self.assertEqual(runs[0].state, TransactionState.FAILED)
-        self.assertIsNotNone(runs[0].error)
-        self.assertEqual(len(self.state_store.get_incomplete_runs()), 1)
-
-    def test_p0_4_and_p0_5_irreversible_extensions_and_graceful_process_stop(self) -> None:
-        """Cover P0.4 (irreversible guard, VS Code extension rollback) and P0.5 (graceful vs force kill)."""
-        reg = InMemoryRegistryBackend()
-        sys_b = InMemorySystemBackend(is_admin=True, running_processes={ONEDRIVE_PROCESS_NAME})
-        sys_b.stubborn_processes.add(ONEDRIVE_PROCESS_NAME)
-        env = sys_b.detect_environment(reg)
-
-        # P0.4: Irreversible tweak refused without allow_irreversible=True
-        irrev_profile = ProfileSpec(
-            name="irrev",
-            description="Irreversible test",
-            tweaks={"onedrive.uninstall": True},
-        )
-        with self.assertRaises(IrreversibleActionError):
-            apply_profile(irrev_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
-
-        # P0.5: Stubborn process refuses graceful stop without force_kill_processes=True
-        proc_profile = ProfileSpec(
-            name="proc-stop",
-            description="Process stop test",
-            tweaks={"onedrive.disable_tray_autorun": True},
-        )
-        reg.set_value(HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive", "OneDrive.exe", REG_SZ)
-        fail_summary = apply_profile(
-            proc_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True
-        )
-        self.assertEqual(fail_summary.failed_ids, ("onedrive.disable_tray_autorun",))
-        self.assertTrue(sys_b.is_process_running(ONEDRIVE_PROCESS_NAME))
-        from winbearable.engine import recover_incomplete_runs
-
-        recover_incomplete_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
-
-        # With force_kill_processes=True it succeeds
-        ok_summary = apply_profile(
-            proc_profile,
-            env,
-            reg,
-            sys_b,
-            self.state_store,
-            dry_run=False,
-            allow_simulated=True,
-            force_kill_processes=True,
-        )
-        self.assertEqual(ok_summary.failed_ids, ())
-        self.assertFalse(sys_b.is_process_running(ONEDRIVE_PROCESS_NAME))
-
-        # P0.4: VS Code extension installed by run is removed on rollback
-        ext_profile = ProfileSpec(
-            name="vscode",
-            description="VS Code extension rollback test",
-            tweaks={"apps.install_vscode": True},
-        )
-        apply_profile(ext_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
-        self.assertTrue(sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
-        rollback_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
-        self.assertFalse(sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
-
-    def test_p2_1_separated_audit_dimensions_and_cis_provenance(self) -> None:
-        """UI-only profiles cannot raise security score, and CIS controls carry traceable mappings."""
-        reg = InMemoryRegistryBackend()
-        sys_b = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
-        env = sys_b.detect_environment(reg)
-
-        before = calculate_hardening_score(env, reg, sys_b)
-        self.assertEqual(before["security_score_percent"], 0.0)
-        self.assertEqual(before["dimensions"]["security"]["score_percent"], 0.0)
-        self.assertGreater(before["dimensions"]["security"]["unknown"], 0)
-
-        ui_profile = ProfileSpec(
-            name="ui-only",
-            description="UI usability tweaks only",
-            tweaks={
-                "explorer.show_file_extensions": True,
-                "explorer.show_hidden_files": True,
-                "start.disable_recommendations": True,
-            },
-        )
-        apply_profile(ui_profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
-
-        after_ui = calculate_hardening_score(env, reg, sys_b)
-        self.assertGreater(after_ui["dimensions"]["usability"]["score_percent"], 0.0)
-        self.assertEqual(after_ui["dimensions"]["security"]["score_percent"], 0.0)
-        self.assertEqual(after_ui["security_score_percent"], 0.0)
-
-        cis_controls = after_ui["cis_controls"]["controls"]
-        self.assertGreater(len(cis_controls), 0)
-        for ctrl in cis_controls:
-            self.assertIn("benchmark", ctrl)
-            self.assertIn("version", ctrl)
-            self.assertIn("level", ctrl)
-            self.assertIn("section", ctrl)
-            self.assertIn("control_id", ctrl)
-            self.assertIn("verification_method", ctrl)
-            self.assertIn("evidence", ctrl)
-            self.assertIn(
-                ctrl["audit_status"],
-                {"passed", "failed", "blocked_by_policy", "not_applicable", "unknown"},
-            )
-
-    def test_p2_1_office_macro_ole_apply_rollback_and_policy_block(self) -> None:
-        """P2.1: Office macro/OLE pre-hardening applies, rolls back, and yields to HKLM MDM policy."""
-        reg = InMemoryRegistryBackend()
-        sys_b = InMemorySystemBackend(is_admin=True)
-        env = sys_b.detect_environment(reg)
-        profile = ProfileSpec(
-            name="office-macro-test",
-            description="Test Office macro/OLE policy pre-hardening",
-            tweaks={"hardening.office_macro_ole": True},
-        )
-
-        detect_res = evaluate_profile(profile, env, reg, sys_b)
-        self.assertEqual(detect_res[0].status, TweakStatus.DRIFTED)
-
-        plan_summary = apply_profile(profile, env, reg, sys_b, self.state_store, dry_run=True, allow_simulated=True)
-        self.assertTrue(plan_summary.dry_run)
-        self.assertEqual(plan_summary.results[0].status, TweakStatus.DRIFTED)
-        self.assertIsNone(
-            reg.get_value(HIVE_HKCU, r"Software\Policies\Microsoft\Office\16.0\word\Security", "vbawarnings")
-        )
-
-        apply_summary = apply_profile(profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
-        self.assertFalse(apply_summary.dry_run)
-        self.assertIsNotNone(apply_summary.run_id)
-        self.assertEqual(evaluate_profile(profile, env, reg, sys_b)[0].status, TweakStatus.APPLIED)
-        for app in ("word", "excel", "powerpoint"):
-            sec_key = rf"Software\Policies\Microsoft\Office\16.0\{app}\Security"
-            self.assertEqual(reg.get_value(HIVE_HKCU, sec_key, "blockcontentexecutionfrominternet"), (1, REG_DWORD))
-            self.assertEqual(reg.get_value(HIVE_HKCU, sec_key, "vbawarnings"), (4, REG_DWORD))
-            self.assertEqual(reg.get_value(HIVE_HKCU, sec_key, "packagershortcut"), (0, REG_DWORD))
-
-        rollback_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
-        for app in ("word", "excel", "powerpoint"):
-            sec_key = rf"Software\Policies\Microsoft\Office\16.0\{app}\Security"
-            self.assertIsNone(reg.get_value(HIVE_HKCU, sec_key, "blockcontentexecutionfrominternet"))
-
-        # Simulate MDM/GPO machine policy owning Office security keys -> BLOCKED_BY_POLICY
-        reg.set_value(
-            HIVE_HKLM,
-            r"SOFTWARE\Policies\Microsoft\Office\16.0\word\Security",
-            "blockcontentexecutionfrominternet",
-            0,
-            REG_DWORD,
-        )
-        blocked_plan = evaluate_profile(profile, env, reg, sys_b)
-        self.assertEqual(blocked_plan[0].status, TweakStatus.BLOCKED_BY_POLICY)
-
-    def test_p2_4_defender_smartscreen_posture_honesty(self) -> None:
-        """P2.4: Defender PUA & SmartScreen posture reports partial/unknown confidence honestly."""
-        from winbearable.engine import inspect_defender_smartscreen_posture
-
-        reg = InMemoryRegistryBackend()
-        unset = inspect_defender_smartscreen_posture(reg)
-        self.assertEqual(unset["defender_pua"]["state"], "unset")
-        self.assertEqual(unset["defender_pua"]["confidence"], "unknown")
-        self.assertEqual(unset["smartscreen"]["state"], "unset")
-        self.assertFalse(unset["smartscreen"]["managed_by_wb"])
-
-        reg.set_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows Defender", "PUAProtection", 1, REG_DWORD)
-        reg.set_value(
-            HIVE_HKLM,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer",
-            "SmartScreenEnabled",
-            "RequireAdmin",
-            REG_SZ,
-        )
-        observed = inspect_defender_smartscreen_posture(reg)
-        self.assertEqual(observed["defender_pua"]["state"], "enabled")
-        self.assertEqual(observed["defender_pua"]["confidence"], "partial")
-        self.assertEqual(observed["smartscreen"]["state"], "enabled")
-        self.assertEqual(observed["smartscreen"]["confidence"], "partial")
-        self.assertFalse(observed["smartscreen"]["managed_by_wb"])
-
-    def test_p2_3_vbs_credential_guard_posture_detect(self) -> None:
-        """P2.3: VBS/HVCI/Credential Guard posture reports states honestly and never auto-enables CG."""
-        from winbearable.engine import inspect_vbs_credential_guard_posture
-
-        reg = InMemoryRegistryBackend()
-        unset = inspect_vbs_credential_guard_posture(reg)
-        self.assertEqual(unset["vbs"]["state"], "unset")
-        self.assertEqual(unset["hvci"]["state"], "unset")
-        self.assertEqual(unset["credential_guard"]["state"], "unset")
-        self.assertFalse(unset["credential_guard"]["auto_enable_supported"])
-        self.assertIn("WSL2", unset["wsl_performance_note"])
-
-        reg.set_value(
-            HIVE_HKLM,
-            r"SYSTEM\CurrentControlSet\Control\DeviceGuard",
-            "EnableVirtualizationBasedSecurity",
-            1,
-            REG_DWORD,
-        )
-        reg.set_value(
-            HIVE_HKLM,
-            r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
-            "Enabled",
-            1,
-            REG_DWORD,
-        )
-        reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LsaCfgFlags", 1, REG_DWORD)
-        locked = inspect_vbs_credential_guard_posture(reg)
-        self.assertEqual(locked["vbs"]["state"], "enabled")
-        self.assertEqual(locked["hvci"]["state"], "enabled")
-        self.assertEqual(locked["credential_guard"]["state"], "enabled_with_uefi_lock")
-
-        reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LsaCfgFlags", 2, REG_DWORD)
-        unlocked = inspect_vbs_credential_guard_posture(reg)
-        self.assertEqual(unlocked["credential_guard"]["state"], "enabled_without_lock")
-
-    def test_p2_2_netbios_broadcast_apply_and_rollback(self) -> None:
-        """P2.2: NetBIOS NodeType=2 applies/rolls back and owner/paranoid cover LLMNR/mDNS/WPAD/NetBIOS."""
-        reg = InMemoryRegistryBackend()
-        sys_b = InMemorySystemBackend(is_admin=True)
-        env = sys_b.detect_environment(reg)
-
-        owner = load_profile("owner")
-        paranoid = load_profile("paranoid")
-        for tid in (
-            "hardening.disable_llmnr",
-            "hardening.disable_mdns",
-            "hardening.disable_wpad",
-            "hardening.disable_netbios_broadcast",
-        ):
-            self.assertTrue(owner.tweaks.get(tid))
-            self.assertTrue(paranoid.tweaks.get(tid))
-
-        profile = ProfileSpec(
-            name="netbios-test",
-            description="Test NetBIOS broadcast disable",
-            tweaks={"hardening.disable_netbios_broadcast": True},
-        )
-        apply_profile(profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
-        self.assertEqual(
-            reg.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters", "NodeType"),
-            (2, REG_DWORD),
-        )
-        rollback_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
-        self.assertIsNone(reg.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters", "NodeType"))
+    summary = apply_profile(
+        profile=paranoid_profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+        allow_high_risk=True,
+        allow_irreversible=True,
+    )
+    assert "hardening.enable_vbs_hvci" in summary.applied_ids
+    assert system.onedrive_uninstalled
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> None:
+    """Every tweak in TWEAK_CATALOG transitions DRIFTED -> APPLIED -> DRIFTED across apply/rollback."""
+    registry = InMemoryRegistryBackend(
+        initial_values={
+            (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive"): (
+                "OneDrive.exe",
+                REG_SZ,
+            ),
+            (HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\WSearch", "Start"): (2, REG_DWORD),
+        }
+    )
+    system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
+    env = system.detect_environment(registry)
+
+    all_tweaks = get_all_tweaks()
+    profile = ProfileSpec(
+        name="all-tweaks",
+        description="All catalog tweaks",
+        tweaks={tweak.tweak_id: True for tweak in all_tweaks},
+    )
+
+    before_score = calculate_hardening_score(env, registry, system)
+    assert before_score["passed"] == 0
+
+    apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+        allow_high_risk=True,
+        allow_irreversible=True,
+    )
+
+    after_score = calculate_hardening_score(env, registry, system)
+    assert after_score["passed"] == len(all_tweaks)
+    assert after_score["score_percent"] == 100.0
+
+    rollback_runs(
+        state_store=state_store,
+        registry=registry,
+        system=system,
+        dry_run=False,
+        allow_simulated=True,
+    )
+
+    reverted_score = calculate_hardening_score(env, registry, system)
+    assert reverted_score["passed"] == 0
+
+
+def test_write_ahead_journal_and_compensation_on_failure(state_store: StateStore) -> None:
+    """Failed native operation triggers compensating rollback and leaves FAILED journal record."""
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    registry = InMemoryRegistryBackend(
+        initial_values={
+            (HIVE_HKCU, run_key, "OneDrive"): ("OneDrive.exe", REG_SZ),
+        }
+    )
+    system = InMemorySystemBackend(is_admin=True)
+    # Fail the scheduled task operation after the earlier registry tweak succeeds
+    system.set_scheduled_task_enabled = lambda task_path, enabled: False  # type: ignore[method-assign]
+    env = system.detect_environment(registry)
+
+    profile = ProfileSpec(
+        name="fail-mid-run",
+        description="Test write-ahead journal compensation",
+        tweaks={
+            "onedrive.disable_tray_autorun": True,
+            "telemetry.disable_scheduled_tasks": True,
+        },
+    )
+    summary = apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=state_store,
+        dry_run=False,
+        allow_simulated=True,
+    )
+    assert summary.failed_ids == ("telemetry.disable_scheduled_tasks",)
+    err_results = [r for r in summary.results if r.status == TweakStatus.ERROR]
+    assert len(err_results) == 1
+
+    # Earlier registry mutation was compensated back to original value
+    assert registry.get_value(HIVE_HKCU, run_key, "OneDrive") == ("OneDrive.exe", REG_SZ)
+
+    # Journal retains the FAILED record and reports it as incomplete
+    runs = state_store.load_runs()
+    assert len(runs) == 1
+    assert runs[0].state == TransactionState.FAILED
+    assert runs[0].error is not None
+    assert len(state_store.get_incomplete_runs()) == 1
+
+
+def test_irreversible_guard_and_graceful_process_stop(state_store: StateStore) -> None:
+    """Cover P0.4 (irreversible guard, VS Code extension rollback) and P0.5 (graceful vs force kill)."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True, running_processes={ONEDRIVE_PROCESS_NAME})
+    sys_b.stubborn_processes.add(ONEDRIVE_PROCESS_NAME)
+    env = sys_b.detect_environment(reg)
+
+    # P0.4: Irreversible tweak refused without allow_irreversible=True
+    irrev_profile = ProfileSpec(
+        name="irrev",
+        description="Irreversible test",
+        tweaks={"onedrive.uninstall": True},
+    )
+    with pytest.raises(IrreversibleActionError):
+        apply_profile(irrev_profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+
+    # P0.5: Stubborn process refuses graceful stop without force_kill_processes=True
+    proc_profile = ProfileSpec(
+        name="proc-stop",
+        description="Process stop test",
+        tweaks={"onedrive.disable_tray_autorun": True},
+    )
+    reg.set_value(HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive", "OneDrive.exe", REG_SZ)
+    fail_summary = apply_profile(proc_profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert fail_summary.failed_ids == ("onedrive.disable_tray_autorun",)
+    assert sys_b.is_process_running(ONEDRIVE_PROCESS_NAME)
+    from winbearable.engine import recover_incomplete_runs
+
+    recover_incomplete_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+
+    # With force_kill_processes=True it succeeds
+    ok_summary = apply_profile(
+        proc_profile,
+        env,
+        reg,
+        sys_b,
+        state_store,
+        dry_run=False,
+        allow_simulated=True,
+        force_kill_processes=True,
+    )
+    assert ok_summary.failed_ids == ()
+    assert not (sys_b.is_process_running(ONEDRIVE_PROCESS_NAME))
+
+    # P0.4: VS Code extension installed by run is removed on rollback
+    ext_profile = ProfileSpec(
+        name="vscode",
+        description="VS Code extension rollback test",
+        tweaks={"apps.install_vscode": True},
+    )
+    apply_profile(ext_profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID)
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert not (sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
+
+
+def test_separated_audit_dimensions_and_cis_provenance(state_store: StateStore) -> None:
+    """UI-only profiles cannot raise security score, and CIS controls carry traceable mappings."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
+    env = sys_b.detect_environment(reg)
+
+    before = calculate_hardening_score(env, reg, sys_b)
+    assert before["security_score_percent"] == 0.0
+    assert before["dimensions"]["security"]["score_percent"] == 0.0
+    assert before["dimensions"]["security"]["unknown"] > 0
+
+    ui_profile = ProfileSpec(
+        name="ui-only",
+        description="UI usability tweaks only",
+        tweaks={
+            "explorer.show_file_extensions": True,
+            "explorer.show_hidden_files": True,
+            "start.disable_recommendations": True,
+        },
+    )
+    apply_profile(ui_profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+
+    after_ui = calculate_hardening_score(env, reg, sys_b)
+    assert after_ui["dimensions"]["usability"]["score_percent"] > 0.0
+    assert after_ui["dimensions"]["security"]["score_percent"] == 0.0
+    assert after_ui["security_score_percent"] == 0.0
+
+    cis_controls = after_ui["cis_controls"]["controls"]
+    assert len(cis_controls) > 0
+    for ctrl in cis_controls:
+        assert "benchmark" in ctrl
+        assert "version" in ctrl
+        assert "level" in ctrl
+        assert "section" in ctrl
+        assert "control_id" in ctrl
+        assert "verification_method" in ctrl
+        assert "evidence" in ctrl
+        assert ctrl["audit_status"] in {"passed", "failed", "blocked_by_policy", "not_applicable", "unknown"}
+
+
+def test_office_macro_ole_apply_rollback_and_policy_block(state_store: StateStore) -> None:
+    """P2.1: Office macro/OLE pre-hardening applies, rolls back, and yields to HKLM MDM policy."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+    profile = ProfileSpec(
+        name="office-macro-test",
+        description="Test Office macro/OLE policy pre-hardening",
+        tweaks={"hardening.office_macro_ole": True},
+    )
+
+    detect_res = evaluate_profile(profile, env, reg, sys_b)
+    assert detect_res[0].status == TweakStatus.DRIFTED
+
+    plan_summary = apply_profile(profile, env, reg, sys_b, state_store, dry_run=True, allow_simulated=True)
+    assert plan_summary.dry_run
+    assert plan_summary.results[0].status == TweakStatus.DRIFTED
+    assert reg.get_value(HIVE_HKCU, r"Software\Policies\Microsoft\Office\16.0\word\Security", "vbawarnings") is None
+
+    apply_summary = apply_profile(profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert not (apply_summary.dry_run)
+    assert apply_summary.run_id is not None
+    assert evaluate_profile(profile, env, reg, sys_b)[0].status == TweakStatus.APPLIED
+    for app in ("word", "excel", "powerpoint"):
+        sec_key = rf"Software\Policies\Microsoft\Office\16.0\{app}\Security"
+        assert reg.get_value(HIVE_HKCU, sec_key, "blockcontentexecutionfrominternet") == (1, REG_DWORD)
+        assert reg.get_value(HIVE_HKCU, sec_key, "vbawarnings") == (4, REG_DWORD)
+        assert reg.get_value(HIVE_HKCU, sec_key, "packagershortcut") == (0, REG_DWORD)
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    for app in ("word", "excel", "powerpoint"):
+        sec_key = rf"Software\Policies\Microsoft\Office\16.0\{app}\Security"
+        assert reg.get_value(HIVE_HKCU, sec_key, "blockcontentexecutionfrominternet") is None
+
+    # Simulate MDM/GPO machine policy owning Office security keys -> BLOCKED_BY_POLICY
+    reg.set_value(
+        HIVE_HKLM,
+        r"SOFTWARE\Policies\Microsoft\Office\16.0\word\Security",
+        "blockcontentexecutionfrominternet",
+        0,
+        REG_DWORD,
+    )
+    blocked_plan = evaluate_profile(profile, env, reg, sys_b)
+    assert blocked_plan[0].status == TweakStatus.BLOCKED_BY_POLICY
+
+
+def test_defender_smartscreen_posture_honesty() -> None:
+    """P2.4: Defender PUA & SmartScreen posture reports partial/unknown confidence honestly."""
+    from winbearable.engine import inspect_defender_smartscreen_posture
+
+    reg = InMemoryRegistryBackend()
+    unset = inspect_defender_smartscreen_posture(reg)
+    assert unset["defender_pua"]["state"] == "unset"
+    assert unset["defender_pua"]["confidence"] == "unknown"
+    assert unset["smartscreen"]["state"] == "unset"
+    assert not (unset["smartscreen"]["managed_by_wb"])
+
+    reg.set_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows Defender", "PUAProtection", 1, REG_DWORD)
+    reg.set_value(
+        HIVE_HKLM,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer",
+        "SmartScreenEnabled",
+        "RequireAdmin",
+        REG_SZ,
+    )
+    observed = inspect_defender_smartscreen_posture(reg)
+    assert observed["defender_pua"]["state"] == "enabled"
+    assert observed["defender_pua"]["confidence"] == "partial"
+    assert observed["smartscreen"]["state"] == "enabled"
+    assert observed["smartscreen"]["confidence"] == "partial"
+    assert not (observed["smartscreen"]["managed_by_wb"])
+
+
+def test_vbs_credential_guard_posture_detect() -> None:
+    """P2.3: VBS/HVCI/Credential Guard posture reports states honestly and never auto-enables CG."""
+    from winbearable.engine import inspect_vbs_credential_guard_posture
+
+    reg = InMemoryRegistryBackend()
+    unset = inspect_vbs_credential_guard_posture(reg)
+    assert unset["vbs"]["state"] == "unset"
+    assert unset["hvci"]["state"] == "unset"
+    assert unset["credential_guard"]["state"] == "unset"
+    assert not (unset["credential_guard"]["auto_enable_supported"])
+    assert "WSL2" in unset["wsl_performance_note"]
+
+    reg.set_value(
+        HIVE_HKLM,
+        r"SYSTEM\CurrentControlSet\Control\DeviceGuard",
+        "EnableVirtualizationBasedSecurity",
+        1,
+        REG_DWORD,
+    )
+    reg.set_value(
+        HIVE_HKLM,
+        r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+        "Enabled",
+        1,
+        REG_DWORD,
+    )
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LsaCfgFlags", 1, REG_DWORD)
+    locked = inspect_vbs_credential_guard_posture(reg)
+    assert locked["vbs"]["state"] == "enabled"
+    assert locked["hvci"]["state"] == "enabled"
+    assert locked["credential_guard"]["state"] == "enabled_with_uefi_lock"
+
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LsaCfgFlags", 2, REG_DWORD)
+    unlocked = inspect_vbs_credential_guard_posture(reg)
+    assert unlocked["credential_guard"]["state"] == "enabled_without_lock"
+
+
+def test_netbios_broadcast_apply_and_rollback(state_store: StateStore) -> None:
+    """P2.2: NetBIOS NodeType=2 applies/rolls back and owner/paranoid cover LLMNR/mDNS/WPAD/NetBIOS."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+
+    owner = load_profile("owner")
+    paranoid = load_profile("paranoid")
+    for tid in (
+        "hardening.disable_llmnr",
+        "hardening.disable_mdns",
+        "hardening.disable_wpad",
+        "hardening.disable_netbios_broadcast",
+    ):
+        assert owner.tweaks.get(tid)
+        assert paranoid.tweaks.get(tid)
+
+    profile = ProfileSpec(
+        name="netbios-test",
+        description="Test NetBIOS broadcast disable",
+        tweaks={"hardening.disable_netbios_broadcast": True},
+    )
+    apply_profile(profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert reg.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters", "NodeType") == (
+        2,
+        REG_DWORD,
+    )
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert reg.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters", "NodeType") is None
