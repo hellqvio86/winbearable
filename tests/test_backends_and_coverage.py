@@ -883,6 +883,112 @@ class TestBackendsAndCoverage(unittest.TestCase):
         self.assertEqual(unpin.registry_specs[0].view, RegistryView.VIEW_64)
         self.assertEqual(unpin.registry_specs[1].view, RegistryView.VIEW_32)
 
+    def test_wsl2_interop_readonly_registry_and_host_audit(self) -> None:
+        import subprocess
+        from unittest.mock import patch
+
+        from winbearable.backends.registry import (
+            WslInteropRegistryBackend,
+            create_default_registry_backend,
+        )
+        from winbearable.backends.system import NativeSystemBackend
+        from winbearable.models import RegistryValueSnapshot, RegistryView
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            cmd_str = " ".join(args)
+            if "/v TestDword" in cmd_str:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=("\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Test\r\n    TestDword    REG_DWORD    0x1\r\n"),
+                    stderr="",
+                )
+            if "/v TestString" in cmd_str:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=("\r\nHKEY_CURRENT_USER\\Software\\Test\r\n    TestString    REG_SZ    hello world\r\n"),
+                    stderr="",
+                )
+            if "/v Denied" in cmd_str:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="ERROR: Access is denied.")
+            if r"HKEY_LOCAL_MACHINE\SOFTWARE\Parent" in cmd_str:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=(
+                        "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Parent\\ChildA\r\n"
+                        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Parent\\ChildB\r\n"
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args,
+                1,
+                stdout="",
+                stderr="ERROR: The system was unable to find the specified registry key or value.",
+            )
+
+        with patch("subprocess.run", side_effect=fake_run):
+            backend = WslInteropRegistryBackend("/mnt/c/Windows/System32/reg.exe")
+            dword = backend.get_value("HKLM", r"SOFTWARE\Test", "TestDword", RegistryView.VIEW_64)
+            self.assertEqual(dword, (1, "REG_DWORD"))
+
+            sz = backend.get_value("HKCU", r"Software\Test", "TestString", RegistryView.VIEW_32)
+            self.assertEqual(sz, ("hello world", "REG_SZ"))
+
+            self.assertTrue(backend.key_exists("HKLM", r"SOFTWARE\Parent"))
+            self.assertEqual(
+                backend.list_subkeys("HKLM", r"SOFTWARE\Parent"),
+                ["ChildA", "ChildB"],
+            )
+            with self.assertRaises(PermissionError):
+                backend.get_value("HKLM", r"SOFTWARE\Test", "Denied")
+
+            snap = backend.snapshot_value("HKLM", r"SOFTWARE\Test", "TestDword", RegistryView.VIEW_64)
+            self.assertTrue(snap.value_existed)
+            self.assertEqual(snap.previous_data, 1)
+
+        with self.assertRaises(RuntimeError):
+            backend.set_value("HKCU", r"Software\Test", "X", 1, "REG_DWORD")
+        with self.assertRaises(RuntimeError):
+            backend.delete_value("HKCU", r"Software\Test", "X")
+        with self.assertRaises(RuntimeError):
+            backend.restore_snapshot(
+                RegistryValueSnapshot(
+                    hive="HKCU",
+                    key_path=r"Software\Test",
+                    value_name="X",
+                    key_existed=False,
+                    value_existed=False,
+                    previous_data=None,
+                    previous_type=None,
+                )
+            )
+
+        with (
+            patch("winbearable.backends.registry.is_wsl2", return_value=True),
+            patch(
+                "winbearable.backends.registry.find_wsl_reg_exe",
+                return_value="/mnt/c/Windows/System32/reg.exe",
+            ),
+        ):
+            auto_backend = create_default_registry_backend("linux")
+            self.assertIsInstance(auto_backend, WslInteropRegistryBackend)
+
+        with (
+            patch("winbearable.backends.system.is_wsl2", return_value=True),
+            patch(
+                "winbearable.backends.system.find_wsl_reg_exe",
+                return_value="/mnt/c/Windows/System32/reg.exe",
+            ),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            env = NativeSystemBackend(platform_override="linux").detect_environment(backend)
+            self.assertFalse(env.is_windows)
+            self.assertTrue(env.host_auditable)
+            self.assertEqual(env.os_name, "Linux (WSL2 -> Windows host)")
+
 
 if __name__ == "__main__":
     unittest.main()

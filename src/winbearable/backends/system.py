@@ -28,7 +28,7 @@ from ..const import (
     TCPIP_PARAMS_KEY,
 )
 from ..models import EnvironmentInfo, ObservationConfidence, ObservationState, PostureObservation
-from .registry import RegistryBackend
+from .registry import RegistryBackend, find_wsl_reg_exe, is_wsl2
 
 GIB_BYTES = 1024 * 1024 * 1024
 _TH32CS_SNAPPROCESS = 0x00000002
@@ -823,6 +823,8 @@ class NativeSystemBackend:
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         is_win = self._platform == "win32"
+        wsl_interop_audit = (self._platform == "linux") and is_wsl2() and (find_wsl_reg_exe() is not None)
+        can_audit_windows = is_win or wsl_interop_audit
         build_override = os.environ.get(ENV_BUILD_OVERRIDE)
 
         ok_b, build_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
@@ -841,12 +843,12 @@ class NativeSystemBackend:
 
         observations, flags = _collect_posture_observations(
             registry=registry,
-            is_windows=is_win,
+            is_windows=can_audit_windows,
             edition=edition,
             run_cmd=self._run_native_cmd if is_win else None,
         )
 
-        wsl_installed = False
+        wsl_installed = wsl_interop_audit
         wsl_version: str | None = None
         wsl_distros: list[str] = []
 
@@ -862,9 +864,12 @@ class NativeSystemBackend:
             if list_res.returncode == 0:
                 wsl_distros = [line.strip() for line in list_res.stdout.splitlines() if line.strip()]
 
+        os_label = "Windows" if is_win else ("Linux (WSL2 -> Windows host)" if wsl_interop_audit else platform.system())
+
         return EnvironmentInfo(
-            os_name="Windows" if is_win else platform.system(),
+            os_name=os_label,
             is_windows=is_win,
+            host_auditable=can_audit_windows,
             windows_build=windows_build,
             display_version=display_version,
             edition=edition,

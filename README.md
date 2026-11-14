@@ -275,6 +275,29 @@ wb plan --profile paranoid
 wb apply --profile paranoid --apply --i-know-what-im-doing --allow-irreversible
 ```
 
+### Running Audits & Status Checks from WSL2
+
+When running inside **WSL2**, you can audit your live Windows host and see which tweaks have taken effect in two ways:
+
+1. **Directly with native `wb` inside WSL2 (read-only over WSL2 interop):**
+
+   ```bash
+   wb doctor
+   wb status --profile owner
+   wb plan --profile owner
+   ```
+
+   When WSL2→Windows interop is enabled (`[interop] enabled = true`, which `user-only` and `owner` preserve), `wb` automatically queries the Windows host registry read-only via `/mnt/c/Windows/System32/reg.exe` so `wb doctor`, `wb status`, and `wb plan` reflect live Windows posture. Applying or rolling back (`--apply`) is still intentionally blocked from Linux and must be run from Windows.
+
+2. **Via `wb.exe` from WSL2 bash:**
+
+   ```bash
+   wb.exe doctor
+   wb.exe status --profile owner
+   ```
+
+> **Note for `paranoid` users:** The `paranoid` profile sets `[interop] enabled = false` in `.wslconfig` to block Linux→Windows binary execution. After applying `paranoid`, run `wb doctor` and `wb status --profile paranoid` from **Windows Terminal** (PowerShell / Command Prompt) instead of inside WSL2.
+
 ---
 
 ## Windows Build Support Policy

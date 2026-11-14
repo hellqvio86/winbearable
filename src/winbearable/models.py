@@ -320,6 +320,7 @@ class EnvironmentInfo:
     wsl_distros: tuple[str, ...] = ()
     bitlocker_protected: bool | None = None
     applocker_configured: bool | None = None
+    host_auditable: bool = False
     observations: dict[str, PostureObservation] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -327,6 +328,7 @@ class EnvironmentInfo:
         return {
             "os_name": self.os_name,
             "is_windows": self.is_windows,
+            "host_auditable": self.host_auditable,
             "windows_build": self.windows_build,
             "display_version": self.display_version,
             "edition": self.edition,

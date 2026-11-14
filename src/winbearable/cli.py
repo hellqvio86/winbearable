@@ -263,12 +263,12 @@ def run_cli(
     try:
         env = sys_backend.detect_environment(reg_backend)
         if args.command == "doctor":
-            if env.is_windows:
+            if env.is_windows or env.host_auditable:
                 audit: dict[str, Any] = calculate_hardening_score(env, reg_backend, sys_backend)
             else:
                 audit = {
                     "applicable": False,
-                    "reason": "Not running on Windows",
+                    "reason": "Not running on Windows (or WSL2 interop is disabled)",
                     "passed": 0,
                     "total": 0,
                     "score_percent": 0.0,
@@ -287,10 +287,11 @@ def run_cli(
             if args.json:
                 _print_json(payload)
             else:
-                if not env.is_windows:
+                if not (env.is_windows or env.host_auditable):
                     sys.stdout.write(
                         f"winbearable v{__version__} — Doctor Report\n"
-                        f"OS: {env.os_name} (not running on Windows — Windows compliance audit skipped)\n"
+                        f"OS: {env.os_name} (not running on Windows and WSL2 interop unavailable — "
+                        "run `wb doctor` from Windows Terminal)\n"
                     )
                 else:
                     distros_str = ", ".join(env.wsl_distros) or "none"

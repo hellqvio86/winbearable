@@ -1,7 +1,12 @@
 """Native Windows registry backend using stdlib winreg and in-memory test fake."""
 
 import importlib
+import os
+import platform
+import shutil
+import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Protocol
 
 from ..const import (
@@ -431,9 +436,191 @@ class WinregBackend:
         return None
 
 
+def is_wsl2() -> bool:
+    """Return True when running inside a WSL2 Linux distribution."""
+    if sys.platform != "linux":
+        return False
+    if "WSL_DISTRO_NAME" in os.environ or "WSL_INTEROP" in os.environ:
+        return True
+    return "microsoft" in platform.uname().release.lower()
+
+
+def find_wsl_reg_exe() -> str | None:
+    """Locate Windows reg.exe via WSL2 interop if enabled and accessible."""
+    found = shutil.which("reg.exe")
+    if found:
+        return found
+    candidate = Path("/mnt/c/Windows/System32/reg.exe")
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
+
+
+class WslInteropRegistryBackend:
+    """Read-only Windows registry backend for WSL2 via reg.exe interop."""
+
+    def __init__(self, reg_exe_path: str = "reg.exe") -> None:
+        self._reg_exe = reg_exe_path
+
+    def _view_args(self, view: RegistryView) -> list[str]:
+        if view == RegistryView.VIEW_64:
+            return ["/reg:64"]
+        if view == RegistryView.VIEW_32:
+            return ["/reg:32"]
+        return []
+
+    def _run_reg_query(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self._reg_exe, "query", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15.0,
+            shell=False,
+        )
+
+    _HIVE_ALIASES: dict[str, str] = {
+        "HKLM": "HKEY_LOCAL_MACHINE",
+        "HKCU": "HKEY_CURRENT_USER",
+        "HKCR": "HKEY_CLASSES_ROOT",
+        "HKU": "HKEY_USERS",
+    }
+
+    def _full_key(self, hive: str, key_path: str) -> str:
+        canonical_hive = self._HIVE_ALIASES.get(hive.upper(), hive)
+        norm = _normalize_key_path(key_path)
+        return f"{canonical_hive}\\{norm}" if norm else canonical_hive
+
+    def key_exists(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> bool:
+        res = self._run_reg_query([self._full_key(hive, key_path), *self._view_args(view)])
+        if res.returncode != 0:
+            if "access is denied" in res.stderr.lower():
+                raise PermissionError(f"Access denied checking {self._full_key(hive, key_path)}")
+            return False
+        return True
+
+    def list_subkeys(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> list[str]:
+        full = self._full_key(hive, key_path)
+        res = self._run_reg_query([full, *self._view_args(view)])
+        if res.returncode != 0:
+            if "access is denied" in res.stderr.lower():
+                raise PermissionError(f"Access denied listing {full}")
+            return []
+        prefix = f"{full.lower()}\\"
+        subkeys: set[str] = set()
+        for raw_line in res.stdout.splitlines():
+            line = raw_line.strip()
+            if line.lower().startswith(prefix):
+                child = line[len(prefix) :].split("\\", 1)[0]
+                if child:
+                    subkeys.add(child)
+        return sorted(subkeys)
+
+    def get_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> tuple[RegistryValueData, str] | None:
+        full = self._full_key(hive, key_path)
+        val_arg = ["/ve"] if not value_name else ["/v", value_name]
+        res = self._run_reg_query([full, *val_arg, *self._view_args(view)])
+        if res.returncode != 0:
+            if "access is denied" in res.stderr.lower():
+                raise PermissionError(f"Access denied reading {full}\\{value_name}")
+            return None
+        for raw_line in res.stdout.splitlines():
+            parts = raw_line.strip().split(None, 2)
+            if len(parts) < 2:
+                continue
+            reg_type = parts[1]
+            if reg_type not in {REG_SZ, REG_EXPAND_SZ, REG_BINARY, REG_DWORD, REG_QWORD, REG_MULTI_SZ}:
+                continue
+            raw_val = parts[2] if len(parts) == 3 else ""
+            if reg_type in {REG_DWORD, REG_QWORD}:
+                return int(raw_val, 0), reg_type
+            if reg_type == REG_MULTI_SZ:
+                return [item for item in raw_val.split("\\0") if item], reg_type
+            if reg_type == REG_BINARY:
+                return bytes.fromhex(raw_val) if raw_val else b"", reg_type
+            return raw_val, reg_type
+        return None
+
+    def set_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        value_data: RegistryValueData,
+        value_type: str = REG_DWORD,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> None:
+        raise RuntimeError("WslInteropRegistryBackend is read-only; run `wb apply --apply` from Windows.")
+
+    def delete_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
+        raise RuntimeError("WslInteropRegistryBackend is read-only; run `wb rollback --apply` from Windows.")
+
+    def snapshot_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryValueSnapshot:
+        norm = _normalize_key_path(key_path)
+        existed_key = self.key_exists(hive, norm, view=view)
+        current = self.get_value(hive, norm, value_name, view=view)
+        if current is None:
+            return RegistryValueSnapshot(
+                hive=hive,
+                key_path=norm,
+                value_name=value_name,
+                key_existed=existed_key,
+                value_existed=False,
+                previous_data=None,
+                previous_type=None,
+                view=view,
+            )
+        return RegistryValueSnapshot(
+            hive=hive,
+            key_path=norm,
+            value_name=value_name,
+            key_existed=existed_key,
+            value_existed=True,
+            previous_data=current[0],
+            previous_type=current[1],
+            view=view,
+        )
+
+    def restore_snapshot(self, snapshot: RegistryValueSnapshot) -> None:
+        raise RuntimeError("WslInteropRegistryBackend is read-only; run `wb rollback --apply` from Windows.")
+
+    def check_policy_conflict(self, policy_checks: tuple[PolicyConflictPath, ...]) -> str | None:
+        for policy in policy_checks:
+            existing = self.get_value(policy.hive, policy.key_path, policy.value_name)
+            if existing is None:
+                continue
+            current_val, _ = existing
+            if policy.enforced_value is None or current_val == policy.enforced_value:
+                return f"Enforced by policy at {policy.hive}\\{policy.key_path}\\{policy.value_name}={current_val!r}"
+        return None
+
+
 def create_default_registry_backend(platform_override: str | None = None) -> RegistryBackend:
-    """Create WinregBackend on Windows or InMemoryRegistryBackend on non-Windows hosts."""
+    """Create WinregBackend on Windows, WslInteropRegistryBackend in WSL2, or InMemoryRegistryBackend."""
     target_platform = platform_override or sys.platform
     if target_platform == "win32":
         return WinregBackend()  # pragma: no cover
+    if target_platform == "linux" and is_wsl2():
+        reg_exe = find_wsl_reg_exe()
+        if reg_exe is not None:
+            return WslInteropRegistryBackend(reg_exe)
     return InMemoryRegistryBackend()
