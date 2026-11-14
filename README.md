@@ -76,17 +76,29 @@ uv tool install git+https://github.com/hellqvio86/winbearable.git
 pipx install git+https://github.com/hellqvio86/winbearable.git
 ```
 
-### 🔄 Upgrading `winbearable`
+### 🔄 Updating `winbearable`
 
 ```bash
 # If installed via uv tool:
 uv tool upgrade winbearable
+
+# Or with the optional Textual TUI extra:
+uv tool install --upgrade "winbearable[tui]"
+
+# If using one-shot uvx (forces cache refresh):
+uvx --refresh --from winbearable wb doctor
+
+# If installed from GitHub main:
+uv tool install --force --reinstall git+https://github.com/hellqvio86/winbearable.git
 
 # If installed via pipx:
 pipx upgrade winbearable
 
 # If installed via pip:
 pip install --upgrade winbearable
+
+# Verify your active version:
+wb --version
 ```
 
 ---
