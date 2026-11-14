@@ -220,6 +220,7 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 | `explorer.classic_context_menu` | Restores full Windows 10 right-click menu (no "Show more options") | No | `HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32` | `(Default)` | `REG_SZ` | `""` |
 | `explorer.show_file_extensions` | Always shows real file extensions (like Linux `ls`; prevents `.exe` spoofing) | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `HideFileExt` | `REG_DWORD` | `0` (Always show file extensions) |
 | `explorer.show_hidden_files` | Shows hidden files and `.dotfiles` in File Explorer | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Hidden` | `REG_DWORD` | `1` (Show hidden files & dotfiles) |
+| `explorer.show_hidden_files` | Shows protected operating system hidden files in File Explorer | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowSuperHidden` | `REG_DWORD` | `1` (Show protected OS files) |
 
 ### 4. AI, Privacy & Native CIS Hardening (`ai.*`, `privacy.*`, `hardening.*`)
 

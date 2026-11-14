@@ -505,10 +505,11 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
     "explorer.show_hidden_files": TweakDefinition(
         tweak_id="explorer.show_hidden_files",
         category="explorer",
-        title="Show Hidden Files and Dotfiles in File Explorer",
+        title="Show All Hidden Files and Dotfiles in File Explorer",
         description=(
             "Sets HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced\\Hidden=1 "
-            "so hidden files and folders (.wslconfig, .ssh, AppData) are visible in File Explorer."
+            "and ShowSuperHidden=1 so all hidden and protected OS files (.wslconfig, .ssh, AppData) "
+            "are visible in File Explorer."
         ),
         source_url="https://learn.microsoft.com/en-us/windows/win32/shell/shell-registry-settings",
         risk=RiskLevel.LOW,
@@ -521,6 +522,14 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
                 hive=HIVE_HKCU,
                 key_path=r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
                 value_name="Hidden",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                value_name="ShowSuperHidden",
                 value_data=1,
                 value_type=REG_DWORD,
                 action=ACTION_SET,
