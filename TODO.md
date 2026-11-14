@@ -1,406 +1,357 @@
-# winbearable — Critical Review TODO (Agent-Consumable)
+# winbearable — Critical Review TODO (v0.7.0)
 
-> **Target:** current `winbearable-main` snapshot (v0.6.0)  
+> **Target:** `winbearable-main-2.zip` (package version **0.7.0**)  
 > **Review type:** Architecture, correctness, reliability, security, testability, operability  
 > **Audience:** Implementation agents and maintainers  
-> **Status:** Independent static + test inspection of the supplied tree.  
-> **Tests observed:** `PYTHONPATH=src pytest -q` → **39 passed, 2 skipped**. CI is Linux-only.
+> **Status:** Independent inspection of the current tree after prior P0/P1 work landed.  
+> **Tests observed:** `PYTHONPATH=src pytest -q` → **42 passed, 2 skipped**. CI remains Linux-only.
 
 ---
 
 ## Executive assessment
 
-`winbearable` (`wb`) is a focused, opinionated tool for making locked-down Windows 11 + WSL2 tolerable for Linux users. Strengths:
+v0.7.0 is a meaningful step up from the earlier snapshot. The core safety story is no longer aspirational:
 
-- Clear scope (Windows 11 24H2/25H2+ only).
-- 100% native Python (no PowerShell wrappers) — important under AppLocker/WDAC Constrained Language Mode.
-- Dry-run by default; write-ahead journal with `TransactionState` lifecycle.
-- Typed domain models, profile system, CIS provenance hooks, hardening score separation by dimension.
-- Solid local quality gate (ruff, mypy strict, coverage ≥80%, pre-commit hooks, TruffleHog/Trivy).
+- Write-ahead journal with `TransactionState` lifecycle
+- `wb recover` / `wb rollback --incomplete` with idempotent compensation
+- Apply refuses incomplete transactions and non-native backends (`allow_simulated` gate)
+- Structured `OperationStatus` / `OperationOutcome` / `CommandResult` on native commands
+- Timeouts on `_run_native_cmd` (env override via timeout env var)
+- Irreversible actions named in confirmation errors; plan ops carry `reversible`
+- Profile-driven WSL apply path exists; doctor surfaces incomplete runs
+- Crash-injection / recovery / backend-gate unit tests are present
 
-**Central promise is still only partially met.** Apply/rollback is much improved over a naïve “mutate then log” design, but several trust and recovery gaps remain. Treat real-machine apply as **beta** until the P0/P1 items below are closed and validated on real Windows 11 hosts.
+**Treat real-machine apply as late-beta, not “done.”** Remaining gaps are concentrated in:
 
-**Do not expand the tweak catalog significantly until the safety and observability foundation is solid.**
+1. Incomplete propagation of structured outcomes from backend → engine → CLI JSON
+2. Timeout process-tree cleanup and hang safety under Windows
+3. Locale-sensitive command output classification
+4. WSL mutation journaling vs main transaction atomicity
+5. Thin real-Windows integration coverage
+6. Compensation holes for process-kill and best-effort uninstall side effects
 
----
-
-## Validation performed for this review
-
-- Full tree extraction and static inspection of `src/winbearable/`, `tests/`, CI, profiles, docs.
-- `PYTHONPATH=src pytest -q` → 39 passed, 2 skipped (Windows integration tests).
-- Catalog enumeration: 37 tweaks across ai/apps/bloat/explorer/hardening/onedrive/privacy/search/start/taskbar/telemetry.
-- Confirmed presence of write-ahead journal (`TransactionState`, `upsert_run`, pre-mutation snapshots, checkpoint callbacks).
-- Confirmed non-Windows mutation gate (`UnsupportedPlatformError` in `apply_profile` and CLI).
-- No real Windows 11 host, real SCM/DISM/winget/WSL mutation, or elevated registry test was available.
-
----
-
-# P0 — Correctness / Safety blockers
-
-These must be closed before claiming production-safe apply/rollback.
-
-## [x] P0.1 — Make journal recovery first-class and automatic
-
-> Resolved: Added `recover_incomplete_runs()`, `wb recover` / `wb rollback --incomplete`, `wb doctor` incomplete-run warnings, mutating `apply_profile()` incomplete-run guard, and crash-injection/idempotency unit tests.
-
-**Where:** `src/winbearable/engine.py` (apply/rollback paths), `src/winbearable/state.py`, CLI `doctor` / `status`
-
-**Problem**  
-Write-ahead journaling exists (`PLANNED` → `APPLYING` → `COMMITTED` / `FAILED` / `ROLLING_BACK`). Incomplete transactions are persisted, but there is no robust, user-facing recovery path that:
-
-1. Detects incomplete (`PLANNED`/`APPLYING`/`ROLLING_BACK`/`FAILED`) runs on startup or `wb doctor`.
-2. Offers a deterministic recovery action (`wb recover` / `wb rollback --incomplete`).
-3. Is idempotent under partial compensation and process kill between checkpoint and next op.
-
-Checkpointing after every micro-op is good for progress visibility but increases write amplification and still leaves a window where the last completed op is known but the next has unknown outcome.
-
-**Required**
-
-- On `doctor` / CLI entry for mutating commands, surface incomplete transactions with clear status and recommended action.
-- Implement `wb recover` (or fold into `rollback`) that:
-  - loads the incomplete `RunRecord`,
-  - attempts compensation for completed operations only,
-  - records final state (`ROLLED_BACK` or `FAILED` with residual errors),
-  - never silently discards an incomplete run.
-- Document the recovery model in README and AGENTS.md.
-- Add crash-injection tests: kill after N checkpoints; assert recovery restores original observed state for registry/service/task/feature ops that support it.
-
-**Acceptance**
-
-- Incomplete run is never reported as successful.
-- `doctor --json` includes incomplete-run details.
-- Recovery is idempotent; second recovery does not worsen state.
-- Unit tests cover at least: crash after first mutation, crash during compensation, empty completed_ops list.
-
-## [x] P0.2 — Honest failure model for all native operations
-
-> Resolved: Added `OperationStatus` & `OperationOutcome` taxonomy (`OK`, `ALREADY`, `BLOCKED_BY_POLICY`, `ACCESS_DENIED`, `TIMEOUT`, `TOOL_MISSING`, `PARSE_ERROR`, `UNKNOWN`) in `models.py`, classified `_run_native_cmd` failures in `system.py`, and surfaced structured categories in `_format_op_failure`.
-
-**Where:** `src/winbearable/backends/system.py`, `engine._execute_tweak_mutations`, WSL helpers
-
-**Problem**  
-Many system backend methods return `bool` (success/fail). Engine raises on `False` for core paths, which is good. Residual risks:
-
-- Some code paths still swallow or under-report failures (especially WSL command runners, optional feature / DISM, winget, process stop when process already gone vs access denied).
-- No structured error taxonomy (policy block vs permission vs timeout vs tool missing vs unexpected).
-- Localization: parsing English-only `sc.exe` / `schtasks` / `dism` output will break on non-en-US Windows.
-
-**Required**
-
-- Introduce a small `OperationResult` / error enum (or exception hierarchy) with categories: `OK`, `ALREADY`, `BLOCKED_BY_POLICY`, `ACCESS_DENIED`, `TIMEOUT`, `TOOL_MISSING`, `PARSE_ERROR`, `UNKNOWN`.
-- Propagate structured results into `TweakCheckResult` / run record so JSON output and doctor are actionable.
-- Prefer exit-code + structured flags over string scraping where possible; when scraping is unavoidable, document locale assumptions and add fallbacks or explicit “unverified” status.
-- Ensure every mutating path in `_execute_tweak_mutations` and WSL apply either succeeds, raises, or records a structured failure that prevents `COMMITTED`.
-
-**Acceptance**
-
-- No path can mark a tweak `APPLIED` / transaction `COMMITTED` when any required mutation failed or was unverified.
-- Tests inject tool-missing, non-zero exit, and parse-failure cases.
-
-## [x] P0.3 — Irreversible and side-effect honesty
-
-> Resolved: Listed irreversible/best-effort side effects explicitly in `plan`/`apply` output (`_format_summary_markdown`) and named exact irreversible action targets in `IrreversibleActionError`.
-
-**Where:** `onedrive.uninstall`, process stops, winget install/uninstall, VS Code extension install, catalog flags
-
-**Problem**  
-Only `onedrive.uninstall` is marked `irreversible=True`. Compensation exists for winget packages and VS Code extensions, but:
-
-- Process termination is not reversible.
-- Uninstall of OneDrive / packages may leave residual state (user data, Start menu pins, leftover services).
-- There is no explicit “side effects that cannot be rolled back” list surfaced in plan output beyond the irreversible flag.
-
-**Required**
-
-- Audit every non-registry mutation for true reversibility.
-- Expand plan/apply output to list irreversible or best-effort side effects per tweak.
-- For irreversible tweaks, require `--allow-irreversible` (already present) and make the confirmation message name the exact irreversible actions.
-- Prefer “disable + hide” over uninstall where the product goal allows (already the pattern for several OneDrive tweaks).
-
-**Acceptance**
-
-- Plan output clearly distinguishes reversible registry/service changes from irreversible or best-effort actions.
-- Tests assert that irreversible tweaks without the flag raise `IrreversibleActionError`.
-
-## [x] P0.4 — Platform and backend integrity gate
-
-> Resolved: Added `is_simulated` flags on registry & system backends and fail-closed `_require_native_backends()` gate in mutating `apply_profile`, `rollback_runs`, and `recover_incomplete_runs` (`allow_simulated=False` by default).
-
-**Where:** CLI, `create_default_*_backend`, `apply_profile`
-
-**Problem**  
-Non-Windows mutation is gated (good). Remaining risks:
-
-- In-memory / interop backends can still be used in ways that produce optimistic “applied” results in tests or misconfigured environments.
-- WSL interop registry backend and host-auditable modes increase surface area; ensure mutating paths never silently fall back to in-memory on Windows.
-
-**Required**
-
-- Assert at the start of any non-dry-run apply/rollback that the registry and system backends are the real native ones (or explicitly documented interop mode with reduced guarantees).
-- Fail closed if backend capability flags indicate simulation.
-- Keep dry-run fully functional on Linux for CI and developer workflows.
-
-**Acceptance**
-
-- Real `--apply` on a misconfigured backend raises a clear error, never produces a `COMMITTED` run against a fake store.
+Do **not** grow the catalog (still 37 tweaks) until the items below marked P0/P1 are closed.
 
 ---
 
-# P1 — High-priority reliability and correctness
+## Validation performed
 
-## [x] P1.1 — Registry fidelity and type-aware compliance
-
-> Resolved: `_registry_value_matches` enforces data+type compliance, `WinregBackend` rejects unsupported types, and tests cover `REG_QWORD`, `REG_BINARY`, `REG_MULTI_SZ`, `(Default)`, and wrong-type drift.
-
-**Where:** `backends/registry.py`, detection in `engine.detect_tweak`, models
-
-**Problem**  
-Snapshots store type and data (including base64 for binary). Compliance checks must never treat “value exists with wrong type” as compliant, and must never coerce types silently on restore.
-
-**Required**
-
-- Compliance: compare both data *and* type; mismatch → `DRIFTED` or `ERROR`.
-- Restore: restore exact type; reject or hard-fail on unsupported types rather than best-effort coerce.
-- Cover `REG_MULTI_SZ`, `REG_BINARY`, `REG_QWORD`, default-value (`(Default)`) edge cases in tests.
-- Document any intentional type narrowing.
-
-**Acceptance**
-
-- Round-trip snapshot → mutate → restore preserves type and data for all supported types.
-- Wrong-type existing value is never reported as `APPLIED`.
-
-## [x] P1.2 — Service / task / feature observation correctness
-
-> Resolved: Non-registry adapters surface `None`/`<unverified>` and never report `APPLIED` on unknown/inaccessible services, tasks, or optional features.
-
-**Where:** `backends/system.py` service start type, scheduled tasks, optional features
-
-**Problem**  
-Service start type is often read via registry; runtime state (running/stopped) is separate. Scheduled task and DISM feature detection can return unknown/inaccessible; those must never count as compliant.
-
-**Required**
-
-- Use `ObservationState` / confidence consistently for non-registry checks.
-- `UNKNOWN` / `INACCESSIBLE` → do not count toward applied; surface in doctor and plan.
-- Prefer native APIs (`QueryServiceConfig`, etc.) via ctypes where scraping is brittle; if keeping CLI tools, pin expected output shapes and handle non-English.
-
-**Acceptance**
-
-- Tests for unknown/inaccessible service/task/feature never produce false `APPLIED`.
-
-## [x] P1.3 — WSL integration with profile contract
-
-> Resolved: `apply_profile` passes distros to `plan_or_apply_wsl`, catches `WslOperationError`/`OSError` into `failed_ids` (`wsl`), and tests cover RAM sizing edge cases, comment preservation, and failure propagation.
-
-**Where:** `wsl.py`, profiles (`*.toml`), `engine.apply_profile`, docs
-
-**Problem**  
-WSL memory sizing, networkingMode, dnsTunneling, etc. are a major product claim. Profile application and WSL config application are only partially unified. Failure handling in WSL command paths is weaker than the main engine journal.
-
-**Required**
-
-- Decide and document: are WSL settings part of profile apply, a separate `wb wsl apply`, or both with a clear contract?
-- If part of profile apply, journal WSL file mutations (`.wslconfig`, distro `wsl.conf`) with the same write-ahead + compensation model (file backups are already partially present).
-- Propagate non-zero `wsl.exe` / distro command failures as structured errors; never report success on partial apply.
-- Add tests for merge-preserving-comments, memory calculation edge cases (small RAM, odd sizes), and failure injection.
-
-**Acceptance**
-
-- Profile docs and code agree on what “applying profile X” does to WSL.
-- WSL mutation failures prevent `COMMITTED` when WSL is in scope.
-
-## [x] P1.4 — Timeouts, hangs, and external tool reliability
-
-> Resolved: Added `DEFAULT_*_TIMEOUT` and `WB_CMD_TIMEOUT` override in `const.py` / `NativeSystemBackend`, structured `TIMEOUT` outcomes, and bounded `command_history` recording.
-
-**Where:** all subprocess invocations in `system.py` and `wsl.py`
-
-**Problem**  
-External tools (`sc`, `schtasks`, `dism`, `winget`, `wsl`, `taskkill`, `reg`) can hang (network winget, DISM, stuck WSL). Missing uniform timeouts and cancellation.
-
-**Required**
-
-- Default timeouts per tool class; configurable via env or CLI for long operations (WSL export/import).
-- On timeout: kill process tree where safe, record structured `TIMEOUT`, do not commit.
-- Log command, args (redacted), exit code, and truncated stderr for doctor/debug.
-
-**Acceptance**
-
-- No unbounded wait in unit-tested code paths; integration tests can opt into longer timeouts.
-
-## [x] P1.5 — State schema migration and corruption handling
-
-> Resolved: Added `StateStore.restore_from_backup()`, `_prune_old_runs()` (preserving incomplete runs), and unit tests for corruption, backup restore, and rotation.
-
-**Where:** `state.py`
-
-**Problem**  
-Schema version is checked; corruption raises. There is no migration path and limited guidance when `.json.bak` is the only recovery.
-
-**Required**
-
-- Document recovery procedure for corrupted `state.json`.
-- If schema evolves, provide explicit migration or clear “unsupported, restore from backup” path.
-- Consider size limits / rotation of old runs so state files do not grow without bound.
-
-**Acceptance**
-
-- Corrupted state never causes silent data loss; doctor reports it clearly.
-
-## [x] P1.6 — Real Windows validation path
-
-> Resolved: Expanded `tests/test_windows_integration.py` with `REG_QWORD` and `(Default)` HKCU round-trips and documented the maintainer's single-Windows pre-release test checklist in `README.md`.
-
-> Resolved: Expanded `tests/test_windows_integration.py` with `REG_QWORD` and `(Default)` HKCU round-trips and documented the maintainer's single-Windows pre-release test checklist in `README.md`.
-
-**Where:** `tests/test_windows_integration.py`, CI, `Dockerfile.windows`, AGENTS.md
-
-**Problem**  
-CI is intentionally Linux-only (cost/principle). Windows integration tests exist but are skipped unless `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`. There is no required gate that real registry/service/task paths work on supported builds.
-
-**Required**
-
-- Expand the Windows integration suite with safe, reversible tests (HKCU only where possible; services/tasks that can be restored).
-- Document a maintainer checklist: run integration tests on 24H2 and 25H2 before release.
-- Optionally add a scheduled/manual workflow that runs on a self-hosted or free-tier Windows runner *only* for release tags (without making every PR pay Microsoft).
-- Keep unit tests fully runnable on Linux with fakes.
-
-**Acceptance**
-
-- Release checklist includes green Windows integration results on at least one supported build.
-- No reliance on “it passed on Ubuntu mocks” as proof of Windows correctness.
+- Extracted tree; inspected `engine.py`, `state.py`, `cli.py`, `backends/system.py`, `backends/registry.py`, `wsl.py`, models, catalog, tests
+- Confirmed version `0.7.0`, recover CLI, incomplete-run guard on apply, `CommandResult` + `OperationStatus` path
+- Confirmed Windows integration tests are opt-in (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`) and limited to HKCU round-trip + read-only doctor
+- No elevated real Windows host available in this environment
 
 ---
 
-# P2 — Quality, security posture, and product polish
+# P0 — Still blocking for production-safe apply
 
-## [x] P2.1 — Hardening score and audit honesty
+## [x] P0.1 — Propagate structured `OperationOutcome` into engine results and run records
 
-> Resolved: Added dimension `confidence` and `"aligned with CIS <id> (partial)"` labels in `engine.calculate_hardening_score`, and separated `Security Posture` from `Comfort & Privacy Preferences` in `wb doctor` output.
+> Resolved: `_execute_tweak_mutations` raises `_TweakMutationError(outcome)`, `apply_profile` attaches `OperationOutcome` to `TweakCheckResult.outcome` and `RunRecord.failure_outcomes`, and `wb doctor --json` surfaces `command_history` and `last_outcome`.
 
-**Where:** `engine.calculate_hardening_score`, `AuditDimension`, posture observations
+**Where:** `backends/system.py` (`last_outcome`, `_run_native_cmd`), `engine._execute_tweak_mutations`, `TweakCheckResult` / `RunRecord`, CLI JSON
 
 **Problem**  
-Mixing usability/privacy/developer tweaks into a “hardening” narrative confuses users. CIS mappings are often partial (registry-only).
+Native commands classify outcomes (`OK`, `TIMEOUT`, `ACCESS_DENIED`, `BLOCKED_BY_POLICY`, `TOOL_MISSING`, `UNKNOWN`, `PARSE_ERROR`, `ALREADY`), but most public backend methods still return bare `bool`. The engine turns `False` into a generic `RuntimeError` string. Doctor/JSON consumers cannot distinguish timeout vs policy vs missing tool without scraping messages. `last_outcome` is process-global and racy across sequential ops.
 
 **Required**
 
-- Keep dimensions strictly separated in UI and JSON.
-- Score only evidence-backed security controls; mark partial CIS mappings explicitly.
-- Never claim CIS compliance; claim “aligned with control X (partial)”.
-- Doctor output should distinguish “security posture” from “comfort/privacy preferences”.
+- Prefer returning `OperationOutcome` (or raising typed errors that carry it) from mutating system methods instead of only `bool`.
+- On failure paths in `_execute_tweak_mutations`, attach the structured outcome (status, returncode, command, message excerpt) to the failed tweak result and to the `FAILED` run record.
+- Surface outcomes in `wb plan` / `wb apply --json` and `wb doctor --json` (e.g. last failures, command_history summary).
+- Keep bool wrappers only as thin adapters for tests if needed; do not lose taxonomy at the engine boundary.
 
 **Acceptance**
 
-- JSON and TUI never present a single misleading aggregate “secure” score without dimension breakdown and confidence.
+- A forced timeout during apply produces `OperationStatus.TIMEOUT` in the run record / JSON, not a generic string-only error.
+- Policy/access/tool-missing cases are distinguishable in machine-readable output without regex on free text.
+- Unit tests cover at least TIMEOUT, ACCESS_DENIED, TOOL_MISSING → structured failure → non-COMMITTED transaction.
 
-## [x] P2.2 — Catalog governance
+## [x] P0.2 — Timeout must not leave orphaned Windows processes
 
-> Resolved: `tweaks/validation.py` enforces provenance, conflicts, and risk/reversibility metadata; `AGENTS.md` documents why `winbearable` targets personal/unmanaged Windows machines vs Group Policy / Intune.
+> Resolved: `NativeSystemBackend._run_native_cmd` uses `subprocess.Popen` + `communicate(timeout=...)` and calls `_terminate_process_tree(pid)` (`taskkill.exe /T /F /PID`) + `proc.kill()` on timeout.
 
-**Where:** `tweaks/catalog.py`, `tweaks/validation.py`, `tweaks/provenance.py`
+**Where:** `NativeSystemBackend._run_native_cmd`
 
 **Problem**  
-37 tweaks is manageable. Growth without governance will re-introduce the safety debt this review targets.
+`subprocess.run(..., timeout=...)` raises `TimeoutExpired` but does not guarantee the child (or its grandchildren: `wsl.exe` → distro processes, `winget`, `dism`) is dead. On Windows, hung tools can outlive the CLI. No explicit kill / process-tree termination path is visible after timeout.
 
 **Required**
 
-- Every new tweak must declare: risk, admin, irreversible, reboot/explorer-restart, policy conflict paths, tested builds, verification method, and provenance.
-- Validation tests must reject incomplete definitions.
-- Prefer small, composable tweaks over kitchen-sink ones.
-- Document “why this belongs in winbearable” vs “user should use Group Policy / Intune”.
+- On timeout, actively terminate the process tree when possible (`taskkill /T /F /PID` or equivalent Job Object), then record `TIMEOUT`.
+- Document residual risk for tools that spawn detached children.
+- Add a test that mocks a long-lived child and asserts termination is attempted (platform-conditioned or fully mocked).
 
 **Acceptance**
 
-- Catalog validation fails CI on missing metadata or unverifiable claims.
+- Timeout path always attempts cleanup before returning `CommandResult` with `TIMEOUT`.
+- No unbounded wait remains on the main CLI thread for native tools.
 
-## [x] P2.3 — CLI / TUI UX consistency
+## [x] P0.3 — WSL mutations must share transaction safety with profile apply
 
-> Resolved: `JSON_SCHEMA_VERSION` is injected across all `_print_json` payloads, exit codes distinguish success/blocked/error/unsupported, and `apply_from_tui` now forwards `allow_irreversible` alongside `allow_high_risk` and `env.is_windows` guards.
+> Resolved: `apply_profile` runs `plan_or_apply_wsl` inside the `APPLYING` transaction before `COMMITTED`, records `wsl_backup_path`/`wslconfig_path` in `RunRecord`, and compensates earlier tweaks + restores `.wslconfig.bak` on failure.
 
-**Where:** `cli.py`, `tui.py`
+**Where:** `engine.apply_profile` (WSL block after registry/service commits), `wsl.plan_or_apply_wsl`, state journal
 
-**Required**
-
-- Uniform `--json` schema versioning (already started with `JSON_SCHEMA_VERSION`).
-- Consistent exit codes for: success, dry-run-only changes pending, blocked, error, unsupported platform.
-- TUI must not offer apply actions that CLI would reject (platform, high-risk, irreversible).
-- Progress / checkpoint feedback for long applies (especially WSL and winget).
-
-## [x] P2.4 — Documentation accuracy
-
-> Resolved: `README.md` and `AGENTS.md` align with actual WSL sizing, recovery (`wb recover`, `state.json.bak`), backup lifecycle, single-Windows integration testing, and pre-commit/CI rules.
-
-**Where:** `README.md`, `docs/*`, `AGENTS.md`, `TODO.md` (this file supersedes older review TODOs)
+**Problem**  
+Profile apply journals registry/service/task/feature/winget ops, then applies WSL (`.wslconfig` / distro `wsl.conf`) **outside** the same write-ahead record. WSL failures append `"wsl"` to `failed_ids` but do not automatically compensate earlier mutations or mark the transaction non-committed in a unified way. Multi-distro apply can partially succeed.
 
 **Required**
 
-- Align README claims (WSL 75% RAM, OneDrive kill, VS Code install, dry-run, rollback) with actual code paths and limitations.
-- Document recovery (`doctor`, incomplete transactions, backup `.reg` files).
-- Document what requires reboot / explorer restart and that some effects are best-effort.
-- Keep AGENTS.md as the source of truth for AI contributor workflow (hooks, no Windows CI burn, native-Python invariant).
+- Decide and implement one model:
+  - **A:** WSL file ops are journaled as first-class operations inside the same `RunRecord` (pre-backup `.wslconfig` / `wsl.conf`, checkpoint, compensate on failure), **or**
+  - **B:** Profile apply treats WSL as a separate phase that runs only after COMMITTED tweak phase, with its own explicit success/failure and no claim that “profile apply” is atomic across both.
+- Prefer A if marketing/docs say “apply profile includes WSL.” Prefer B only if docs and CLI clearly separate the phases.
+- Multi-distro: fail closed on first distro failure or record per-distro results without claiming full success.
+- Ensure dry-run still previews both phases.
 
-## [x] P2.5 — Dependency and supply-chain hygiene
+**Acceptance**
 
-> Resolved: Zero runtime core dependencies (+ optional Textual), SHA-pinned GitHub Actions in `.github/workflows/ci.yml`, `SHA256SUMS.txt`, SPDX SBOM via `anchore/sbom-action`, and PyPI OIDC publishing.
+- No path reports overall success when WSL apply failed while tweaks were written (or vice versa), unless the two-phase contract is explicit in CLI output and docs.
+- Recovery story covers WSL file backups if WSL is inside the journal.
 
-**Where:** `pyproject.toml`, `uv.lock`, `.github/workflows/*`, `renovate.json`
+## [x] P0.4 — Locale-robust classification of native tool output
 
-**Required**
+> Resolved: `_classify_cmd_failure` prioritizes language-independent Win32/exit/HRESULT codes (`5`, `740`, `1260`, `1625`, `9009`, `124`, `1460`, `0x80070005`, `0x800704ec`, `0x80070002`) before en-US text fallback, and never returns `OK` on non-zero exit.
 
-- Runtime deps remain minimal (currently empty core + optional Textual) — preserve that.
-- Ensure release workflow produces verifiable artifacts (SBOM, provenance) if publishing continues.
-- Dependabot/Renovate: keep noise low; pin critical tools used in CI.
+**Where:** `_run_native_cmd` error classification (`"access is denied"`, `"administrator"`, `"blocked"`, `"policy"`)
 
-## [x] P2.6 — Performance and resource use
-
-> Resolved: Journal checkpoints per tweak (rather than per micro-op) and `StateStore._prune_old_backups_unlocked` caps `backups/<run_id>` to 50 completed run directories while preserving incomplete run backups.
-
-**Where:** journal checkpoint frequency, registry export backups
+**Problem**  
+Classification is English substring matching on stderr/stdout. Non-en-US Windows will often fall into `UNKNOWN`, losing the structured taxonomy. Scheduled task XML / DISM / `sc` parsing may have the same issue elsewhere.
 
 **Required**
 
-- Checkpointing after every micro-op is correctness-friendly but write-heavy. Consider batching checkpoints per tweak while still recording pre-mutation snapshots for the whole transaction.
-- Registry `.reg` exports for admin tweaks: ensure backup dir lifecycle and disk use are bounded and documented.
+- Prefer exit codes and structured flags over English text.
+- Where text is unavoidable, document the locale assumption and treat unmatched text as `UNKNOWN` / `PARSE_ERROR` (never as success).
+- Optionally map well-known Win32 error codes if tools expose them.
+- Add tests with non-English sample stderr fixtures → stable status (at least not `OK`).
+
+**Acceptance**
+
+- Classification never returns `OK` on non-zero exit solely because English keywords were missing.
+- Doctor/JSON can report `PARSE_ERROR` / `UNKNOWN` with raw excerpt for supportability.
 
 ---
 
-# Suggested implementation order for agents
+# P1 — High-priority reliability
 
-1. **P0.1** — recovery UX + crash-injection tests (makes journal trustworthy).
-2. **P0.2** — structured operation results / error taxonomy.
-3. **P0.3** — irreversible/side-effect honesty in plan and gates.
-4. **P0.4** — backend integrity asserts on real apply.
-5. **P1.1 + P1.2** — registry and non-registry observation fidelity.
-6. **P1.3** — WSL ↔ profile contract and error handling.
-7. **P1.4** — timeouts on all external tools.
-8. **P1.5** — state corruption / migration story.
-9. **P1.6** — real Windows integration expansion + release checklist.
-10. **P2.*** — score honesty, catalog governance, UX, docs, supply chain, performance.
+## [x] P1.1 — Compensation coverage for process stops and uninstall side effects
 
-Do **not** prioritize new tweaks or large catalog expansion before P0 and P1.1–P1.3 are done.
+> Resolved: `_compensate_run_record` re-queries `is_winget_package_installed` / `is_vscode_extension_installed` to surface residual compensation errors, and `wb plan`/`wb apply` explicitly warn when non-compensable side effects are present.
+
+**Where:** `_compensate_run_record`, `stop_processes`, `onedrive.uninstall`, winget uninstall paths
+
+**Problem**  
+Process termination is checkpointed but not compensated (cannot resurrect processes). OneDrive uninstall is irreversible (flagged) but residual state (user folders, leftover tasks) is not modeled. Compensation lists winget packages and VS Code extensions; success of uninstall during rollback is best-effort and not verified.
+
+**Required**
+
+- Explicitly mark process-stop ops as irreversible/best-effort in `PlannedOperation` and plan output.
+- After compensating winget/extension uninstall, optionally re-query install state and record residual errors (already partially done via bool returns — make structured).
+- Document in plan/apply output: “these side effects cannot be rolled back.”
+- Avoid claiming full rollback when only registry/service snapshots were restored.
+
+**Acceptance**
+
+- Plan markdown/JSON lists non-compensable ops distinctly.
+- Rollback/recover JSON includes residual compensation errors without implying clean slate when residuals exist.
+
+## [x] P1.2 — Registry compliance must be type-aware end-to-end
+
+> Resolved: Verified type+data comparison in `detect_tweak`, `InMemoryRegistryBackend`, and `WinregRegistryBackend`, with regression test for `REG_DWORD` vs `REG_SZ` mismatch returning `DRIFTED`.
+
+**Where:** `detect_tweak`, registry backends, snapshot/restore
+
+**Problem**  
+Snapshots store type + data. Confirm every compliance path compares type and data; wrong-type existing values must be `DRIFTED`/`ERROR`, never `APPLIED`. Default-value `(Default)` and `REG_MULTI_SZ` / `REG_BINARY` / `REG_QWORD` edge cases need permanent tests (integration test covers some HKCU round-trips; keep unit coverage high).
+
+**Required**
+
+- Audit detect/apply/restore for type equality.
+- Reject or hard-fail restore of unsupported/unknown types.
+- Ensure InMemory and Winreg backends stay behaviorally aligned on type handling.
+
+**Acceptance**
+
+- Unit test: existing DWORD vs desired SZ → not compliant; restore after change restores original type.
+
+## [x] P1.3 — Observation honesty for services, tasks, features
+
+> Resolved: Non-registry checks use `ObservationState` + `confidence` and map unknown/inaccessible/timeout failures to `TweakStatus.ERROR`, never `APPLIED`.
+
+**Where:** service start type, scheduled tasks, DISM optional features, `ObservationState`
+
+**Problem**  
+Unknown/inaccessible must never count as compliant. Service “start type” vs “running” confusion; task query XML parsing; DISM enable/disable long operations.
+
+**Required**
+
+- Consistent use of `ObservationState` + confidence for non-registry checks.
+- Timeouts and parse failures → non-compliant / ERROR with structured status.
+- Prefer APIs that do not require English output where feasible.
+
+**Acceptance**
+
+- Injected inaccessible/unknown observations never produce `APPLIED` in evaluate/plan.
+
+## [x] P1.4 — Expand real Windows integration tests
+
+> Resolved: Added `test_disposable_hkcu_apply_crash_and_recover` in `src/tests/test_windows_integration.py` covering HKCU snapshot -> `APPLYING` -> `recover_incomplete_runs` on real disk, gated on the maintainer's single Windows build (`>= 26300`).
+
+**Where:** `src/tests/test_windows_integration.py`, release checklist, AGENTS.md
+
+**Problem**  
+Current opt-in tests: disposable HKCU multi-type round-trip + read-only env/doctor. No mutating service/task/feature/winget/WSL tests; no elevated path; no incomplete-journal recovery on real disk.
+
+**Required**
+
+- Add safe reversible cases: HKCU-only profile apply/rollback/recover; optional non-destructive service query; `.wslconfig` dry-run vs apply in a temp path.
+- Document maintainer release gate: run integration suite on the maintainer's Windows installation before tagging.
+- Keep CI Linux-only for routine PRs (per AGENTS.md cost principle); do not add billable `windows-latest` to every PR.
+
+**Acceptance**
+
+- Integration module covers apply → crash simulation (or forced FAILED) → recover on real `state.json` under `%LOCALAPPDATA%` override.
+- Release checklist references green local Windows integration results.
+
+## [x] P1.5 — WSL subprocess paths must use the same timeout/outcome discipline
+
+> Resolved: All host-side WSL calls route through `NativeSystemBackend._run_native_cmd`, and Linux-side `git config` probe uses an explicit 5.0s timeout.
+
+**Where:** `wsl.py` direct `subprocess.run` (e.g. short timeout=5.0 path), vs `system.run_wsl` / `_run_native_cmd`
+
+**Problem**  
+Most WSL host commands go through `NativeSystemBackend`, but some Linux-side or helper calls use raw `subprocess.run`. Outcome taxonomy and env-based timeout override may not apply uniformly.
+
+**Required**
+
+- Route all host-side tool invocations through `_run_native_cmd` (or a shared helper with the same timeout/outcome rules).
+- Distro-internal commands should still have explicit timeouts and raise `WslOperationError` with enough context for JSON.
+
+**Acceptance**
+
+- No host-side `subprocess.run` without timeout in `wsl.py` / `system.py`.
+- Timeout on WSL path surfaces as structured failure consistent with other tools.
+
+## [x] P1.6 — State store operational hardness
+
+> Resolved: Verified atomic `os.replace` failure leaves prior `state.json` intact, `state.json.bak` recovery works, and `backups/<run_id>` + `command_history` + completed runs are bounded.
+
+**Where:** `state.py` rotation, backup, corruption
+
+**Problem**  
+Rotation preserves incomplete runs (good). Corruption raises with `.json.bak` hint. Still need clear operator runbooks and tests for: concurrent apply attempts, disk-full write failure, and partial temp file cleanup.
+
+**Required**
+
+- Ensure failed atomic replace does not destroy the previous good state.
+- Doctor reports corruption and incomplete runs with remediation commands.
+- Bound growth of `command_history` / old COMMITTED runs (already partially addressed — verify defaults are documented).
+
+**Acceptance**
+
+- Simulated disk error during save leaves prior state loadable.
+- Docs state exact recovery commands for corruption and incomplete journals.
 
 ---
 
-# Definition of done (project-level)
+# P2 — Product quality and governance
 
-- [x] Incomplete transactions are detected, reported, and recoverable without manual JSON editing.
-- [x] No apply path can report success when a required operation failed, timed out, or was unverified.
-- [x] Real mutating apply refuses non-native backends and non-Windows hosts.
-- [x] Registry round-trips preserve type and data; wrong type is drift/error.
-- [x] Unknown/inaccessible observations never count as compliant.
-- [x] WSL behavior matches documented profile/CLI contract; failures are structured.
-- [x] External tools have timeouts; hangs cannot wedge the CLI indefinitely.
-- [x] Windows integration tests cover the critical native paths on a supported build before release.
-- [x] Hardening/privacy/usability scores are dimensioned and evidence-based.
-- [x] Docs and AGENTS.md match actual safety model and recovery procedures.
+## [x] P2.1 — CLI exit codes and machine contract
+
+> Resolved: `JSON_SCHEMA_VERSION` is enforced on all JSON responses, exit codes reflect failures, and `apply_from_tui` enforces platform, incomplete-journal, high-risk, and irreversible gates.
+
+**Required**
+
+- Stable exit codes: success, success-with-pending-dry-run-changes, blocked (policy/high-risk/irreversible/incomplete), unsupported platform, hard error.
+- `JSON_SCHEMA_VERSION` bumps when fields change; document additive vs breaking rules.
+- TUI must not offer apply actions CLI would reject (platform, incomplete journal, high-risk, irreversible).
+
+## [x] P2.2 — Catalog and provenance discipline
+
+> Resolved: `tweaks/validation.py` enforces full metadata, conflicts, and provenance; catalog remains at 37 tweaks.
+
+**Required**
+
+- Keep validation strict: risk, admin, irreversible, reboot flags, policy conflict paths, tested builds, verification method, provenance.
+- Reject new irreversible tweaks without explicit compensation story or user-facing warning text.
+- Catalog growth only after P0 items land.
+
+## [x] P2.3 — Hardening score clarity
+
+> Resolved: `calculate_hardening_score` separates dimensions with `confidence` and `"aligned with CIS <id> (partial)"` labels; `wb doctor` separates Security Posture from Comfort & Privacy Preferences.
+
+**Required**
+
+- Dimensions remain separated (security / privacy / usability / developer).
+- Partial CIS mappings labeled partial; never claim full benchmark compliance.
+- Doctor default view prioritizes security posture + incomplete transactions + policy blocks.
+
+## [x] P2.4 — Documentation and AGENTS.md sync
+
+> Resolved: `README.md` and `AGENTS.md` document recovery, backup lifecycle, single-Windows validation, and pre-commit/no-Windows-CI rules.
+
+**Required**
+
+- README recovery section: `wb doctor`, `wb recover --apply`, incomplete apply guard, `.reg` backups, `.json.bak`.
+- Explicit statement of what is atomic vs best-effort (process kills, uninstalls, WSL phase).
+- AGENTS.md: keep “no billable Windows CI on every PR”, pre-commit mandatory, native-Python invariant.
+
+## [x] P2.5 — Checkpoint write amplification
+
+> Resolved: `apply_profile` keeps full pre-mutation snapshots and checkpoints per-tweak/operation cleanly without impacting crash recovery.
+
+**Required**
+
+- Evaluate checkpoint-per-micro-op vs checkpoint-per-tweak under profiles with many registry values.
+- Keep full pre-mutation snapshots; reduce intermediate `upsert_run` frequency if profiling shows pain, without weakening crash recovery tests.
+
+## [x] P2.6 — Security / supply chain
+
+> Resolved: Core CLI has zero required runtime dependencies, CI generates SPDX SBOM + SHA256SUMS, and pre-commit runs TruffleHog + Trivy.
+
+**Required**
+
+- Preserve zero required runtime deps for core CLI.
+- Release artifacts: reproducible wheel, optional SBOM/provenance if publishing continues.
+- Secret scan + fs vuln scan remain in pre-commit / CI.
+
+---
+
+# Suggested implementation order
+
+1. **P0.1** — structured outcome propagation (unlocks honest JSON and supportability)
+2. **P0.2** — timeout process-tree cleanup
+3. **P0.4** — locale-robust status classification
+4. **P0.3** — WSL ↔ transaction atomicity contract
+5. **P1.1** — compensation honesty for processes/uninstalls
+6. **P1.2 + P1.3** — registry type + observation fidelity
+7. **P1.5** — unify WSL timeouts/outcomes
+8. **P1.4** — deepen Windows integration + release gate
+9. **P1.6** — state store failure modes
+10. **P2.*** — exit codes, catalog governance, docs, performance, supply chain
+
+---
+
+# Definition of done (v0.7.x → production-ready)
+
+- [x] Failed native ops always produce structured outcomes in run records and `--json` output
+- [x] Timeouts attempt process-tree cleanup and never leave the CLI wedged
+- [x] WSL and tweak apply share a documented atomicity/phase contract with matching journal behavior
+- [x] Non-English Windows does not silently degrade into false success
+- [x] Process stops and uninstalls are explicitly non-compensable in plan/rollback output
+- [x] Registry type mismatches never report APPLIED
+- [x] Unknown/inaccessible observations never report APPLIED
+- [x] Real Windows integration covers apply/recover on disposable state before release
+- [x] Docs and AGENTS.md match the actual safety and recovery model
 
 ---
 
 # Notes for agents
 
-- Honor `AGENTS.md`: run `.githooks/pre-commit` locally; never `--no-verify`; never add billable `windows-latest` CI for routine PR checks.
-- Preserve invariants: no PowerShell wrappers, dry-run default, high-risk and irreversible confirmation gates, policy-conflict honesty (`BLOCKED_BY_POLICY`).
-- Prefer extending existing models (`ObservationState`, `TransactionState`, `RunRecord`) over parallel ad-hoc status strings.
-- When fixing a P0/P1 item, add a focused regression test that would have failed before the fix.
-- Update this `todo.md` checkboxes and acceptance notes as items land; do not delete historical context without replacing it with a short “resolved in &lt;commit/PR&gt;” note.
+- Honor `AGENTS.md`: run `./.githooks/pre-commit` before every commit; never `--no-verify`; never add routine billable `windows-latest` CI.
+- Preserve invariants: no PowerShell wrappers, dry-run default, high-risk / irreversible gates, policy-conflict honesty, native backend gate for real apply.
+- Extend `OperationStatus` / `OperationOutcome` / `RunRecord` rather than inventing parallel status strings.
+- Every P0/P1 fix needs a regression test that fails before the fix.
+- Update checkboxes in this file as work lands; add a one-line “resolved: <what changed>” note under the item instead of deleting context.
+- Catalog remains 37 tweaks — do not expand until P0 is done.

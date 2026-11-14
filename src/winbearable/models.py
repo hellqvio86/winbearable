@@ -123,8 +123,16 @@ class OperationOutcome:
             "command": list(self.command),
         }
 
-    LOW = "low"
-    NONE = "none"
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "OperationOutcome":
+        """Deserialize operation outcome from a dictionary."""
+        raw_rc = payload.get("returncode")
+        return cls(
+            status=OperationStatus(str(payload.get("status", OperationStatus.UNKNOWN))),
+            message=str(payload.get("message", "")),
+            returncode=int(raw_rc) if raw_rc is not None else None,
+            command=tuple(str(c) for c in payload.get("command", [])),
+        )
 
 
 @dataclass(frozen=True)
@@ -436,6 +444,7 @@ class TweakCheckResult:
     requires_explorer_restart: bool = False
     irreversible: bool = False
     operations: tuple[PlannedOperation, ...] = ()
+    outcome: OperationOutcome | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize check result to a JSON-compatible dictionary."""
@@ -457,6 +466,7 @@ class TweakCheckResult:
             "requires_explorer_restart": self.requires_explorer_restart,
             "irreversible": self.irreversible,
             "operations": [op.to_dict() for op in self.operations],
+            "outcome": self.outcome.to_dict() if self.outcome is not None else None,
             "registry_changes": [change.to_dict() for change in self.registry_changes],
         }
 
@@ -604,6 +614,9 @@ class RunRecord:
     installed_winget_packages: tuple[str, ...] = ()
     installed_vscode_extensions: tuple[str, ...] = ()
     completed_operations: tuple[str, ...] = ()
+    failure_outcomes: tuple[dict[str, Any], ...] = ()
+    wsl_backup_path: str | None = None
+    wslconfig_path: str | None = None
     state: TransactionState = TransactionState.COMMITTED
     error: str | None = None
 
@@ -621,6 +634,9 @@ class RunRecord:
             "installed_winget_packages": list(self.installed_winget_packages),
             "installed_vscode_extensions": list(self.installed_vscode_extensions),
             "completed_operations": list(self.completed_operations),
+            "failure_outcomes": list(self.failure_outcomes),
+            "wsl_backup_path": self.wsl_backup_path,
+            "wslconfig_path": self.wslconfig_path,
             "state": str(self.state),
             "error": self.error,
         }
@@ -635,6 +651,9 @@ class RunRecord:
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
         vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
         completed_ops = tuple(str(item) for item in payload.get("completed_operations", []))
+        failure_outcomes = tuple(dict(item) for item in payload.get("failure_outcomes", []) if isinstance(item, dict))
+        raw_wsl_backup = payload.get("wsl_backup_path")
+        raw_wslconfig = payload.get("wslconfig_path")
         raw_state = payload.get("state", TransactionState.COMMITTED)
         raw_error = payload.get("error")
         return cls(
@@ -649,6 +668,9 @@ class RunRecord:
             installed_winget_packages=winget_pkgs,
             installed_vscode_extensions=vscode_exts,
             completed_operations=completed_ops,
+            failure_outcomes=failure_outcomes,
+            wsl_backup_path=str(raw_wsl_backup) if raw_wsl_backup is not None else None,
+            wslconfig_path=str(raw_wslconfig) if raw_wslconfig is not None else None,
             state=TransactionState(str(raw_state)),
             error=str(raw_error) if raw_error is not None else None,
         )

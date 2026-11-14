@@ -641,7 +641,19 @@ class TestBackendsAndCoverage(unittest.TestCase):
 
         # P1.9: TimeoutExpired returns structured returncode 124
         native = NativeSystemBackend(platform_override="linux")
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["sleep"], timeout=1.0)):
+
+        class _TimeoutPopen:
+            pid = 4242
+
+            def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
+                if timeout == 1.0:
+                    raise subprocess.TimeoutExpired(cmd=["sleep"], timeout=1.0)
+                return ("", "")
+
+            def kill(self) -> None:
+                return None
+
+        with patch("subprocess.Popen", return_value=_TimeoutPopen()):
             tout = native._run_native_cmd(["sleep", "5"], timeout=1.0)
             self.assertEqual(tout.returncode, 124)
             self.assertIn("timed out", tout.stderr)
@@ -1381,20 +1393,46 @@ class TestBackendsAndCoverage(unittest.TestCase):
 
             # P0.2: NativeSystemBackend._run_native_cmd classifies TIMEOUT, TOOL_MISSING, ACCESS_DENIED
             native_sys = NativeSystemBackend(platform_override="linux")
-            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["sc.exe"], 5.0)):
+
+            class _FakeTimeoutProc:
+                pid = 9991
+                killed = False
+
+                def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
+                    if timeout == 5.0:
+                        raise subprocess.TimeoutExpired(["sc.exe"], 5.0)
+                    return ("", "")
+
+                def kill(self) -> None:
+                    self.killed = True
+
+            timeout_proc = _FakeTimeoutProc()
+            with patch("subprocess.Popen", return_value=timeout_proc):
                 native_sys._run_native_cmd(["sc.exe"], timeout=5.0)
             assert native_sys.last_outcome is not None
             self.assertEqual(native_sys.last_outcome.status, OperationStatus.TIMEOUT)
+            self.assertTrue(timeout_proc.killed)
 
-            with patch("subprocess.run", side_effect=FileNotFoundError("not found")):
+            with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
                 native_sys._run_native_cmd(["missing.exe"])
             assert native_sys.last_outcome is not None
             self.assertEqual(native_sys.last_outcome.status, OperationStatus.TOOL_MISSING)
 
-            with patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess(["sc.exe"], 5, stdout="", stderr="Access is denied."),
-            ):
+            class _FakeResultProc:
+                pid = 9992
+
+                def __init__(self, rc: int, out: str, err: str) -> None:
+                    self.returncode = rc
+                    self._out = out
+                    self._err = err
+
+                def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
+                    return (self._out, self._err)
+
+                def kill(self) -> None:
+                    return None
+
+            with patch("subprocess.Popen", return_value=_FakeResultProc(5, "", "Access is denied.")):
                 native_sys._run_native_cmd(["sc.exe"])
             assert native_sys.last_outcome is not None
             self.assertEqual(native_sys.last_outcome.status, OperationStatus.ACCESS_DENIED)
@@ -1543,6 +1581,196 @@ class TestBackendsAndCoverage(unittest.TestCase):
             self.assertFalse((backups_root / "old1").exists())
             self.assertTrue((backups_root / "new1").exists())
             self.assertTrue((backups_root / "new2").exists())
+
+    def test_v070_p0_structured_outcomes_process_tree_locale_and_wsl_tx(self) -> None:
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from winbearable.backends.system import NativeSystemBackend
+        from winbearable.const import HIVE_HKCU
+        from winbearable.engine import apply_profile
+        from winbearable.models import OperationOutcome, OperationStatus, ProfileSpec, TransactionState, WslConfigSpec
+        from winbearable.state import StateStore
+        from winbearable.wsl import WslOperationError
+
+        # P0.4: Locale-robust exit/Win32 code classification
+        self.assertEqual(
+            NativeSystemBackend._classify_cmd_failure(5, "", "Zugriff verweigert"),
+            OperationStatus.ACCESS_DENIED,
+        )
+        self.assertEqual(
+            NativeSystemBackend._classify_cmd_failure(1260, "", "Gesperrt durch Richtlinie"),
+            OperationStatus.BLOCKED_BY_POLICY,
+        )
+        self.assertEqual(
+            NativeSystemBackend._classify_cmd_failure(9009, "", "Befehl nicht gefunden"),
+            OperationStatus.TOOL_MISSING,
+        )
+        self.assertEqual(
+            NativeSystemBackend._classify_cmd_failure(1, "", "Okänt fel"),
+            OperationStatus.UNKNOWN,
+        )
+
+        # P0.2: Win32 timeout attempts taskkill /T /F /PID
+        win_sys = NativeSystemBackend(platform_override="win32")
+
+        class _HungProc:
+            pid = 7777
+
+            def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
+                if timeout == 3.0:
+                    raise subprocess.TimeoutExpired(["wsl.exe"], 3.0)
+                return ("", "")
+
+            def kill(self) -> None:
+                return None
+
+        with (
+            patch("subprocess.Popen", return_value=_HungProc()),
+            patch("subprocess.run") as mock_taskkill,
+        ):
+            res = win_sys._run_native_cmd(["wsl.exe", "--status"], timeout=3.0)
+        self.assertEqual(res.returncode, 124)
+        mock_taskkill.assert_called_once()
+        self.assertEqual(mock_taskkill.call_args[0][0][:4], ["taskkill.exe", "/T", "/F", "/PID"])
+
+        # P0.1: Engine propagates TIMEOUT, ACCESS_DENIED, TOOL_MISSING into TweakCheckResult & RunRecord
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+        env = sys_b.detect_environment(reg)
+        prof = ProfileSpec(
+            name="p01",
+            description="p01",
+            tweaks={"telemetry.disable_scheduled_tasks": True},
+        )
+        for expected_status in (
+            OperationStatus.TIMEOUT,
+            OperationStatus.ACCESS_DENIED,
+            OperationStatus.TOOL_MISSING,
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                store = StateStore(Path(tmp) / "state.json")
+                sys_b.last_outcome = OperationOutcome(
+                    status=expected_status,
+                    message=f"sim {expected_status}",
+                    returncode=124 if expected_status == OperationStatus.TIMEOUT else 5,
+                    command=("schtasks.exe",),
+                )
+                with patch.object(sys_b, "set_scheduled_task_enabled", return_value=False):
+                    summary = apply_profile(prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True)
+                self.assertEqual(summary.failed_ids, ("telemetry.disable_scheduled_tasks",))
+                failed_res = summary.results[0]
+                assert failed_res.outcome is not None
+                self.assertEqual(failed_res.outcome.status, expected_status)
+                runs = store.load_runs()
+                self.assertEqual(runs[-1].state, TransactionState.FAILED)
+                self.assertEqual(runs[-1].failure_outcomes[0]["status"], str(expected_status))
+
+        # P0.3: WSL failure inside apply_profile compensates earlier registry mutations & marks FAILED
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = StateStore(root / "state.json")
+            wsl_cfg = root / ".wslconfig"
+            wsl_cfg.write_text("[wsl2]\nmemory=4GB\n", encoding="utf-8")
+            reg_wsl = InMemoryRegistryBackend()
+            sys_wsl = InMemorySystemBackend(is_windows=True, is_admin=False, wsl_installed=True, windows_build=26300)
+            env_wsl = sys_wsl.detect_environment(reg_wsl)
+            prof_wsl = ProfileSpec(
+                name="p03",
+                description="p03",
+                wsl=WslConfigSpec(enabled=True),
+                tweaks={"explorer.show_file_extensions": True},
+            )
+            with patch("winbearable.engine.plan_or_apply_wsl", side_effect=WslOperationError("distro failed")):
+                summary_wsl = apply_profile(
+                    prof_wsl,
+                    env_wsl,
+                    reg_wsl,
+                    sys_wsl,
+                    store,
+                    dry_run=False,
+                    wslconfig_path=wsl_cfg,
+                    allow_simulated=True,
+                )
+            self.assertIn("wsl", summary_wsl.failed_ids)
+            self.assertEqual(store.load_runs()[-1].state, TransactionState.FAILED)
+            # Earlier registry tweak was compensated
+            val = reg_wsl.get_value(
+                HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt"
+            )
+            self.assertIsNone(val)
+            self.assertEqual(
+                reg_wsl.get_value(
+                    HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt"
+                ),
+                None,
+            )
+
+    def test_v070_p1_compensation_residuals_type_mismatch_and_disk_full(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from winbearable.const import HIVE_HKCU, REG_DWORD
+        from winbearable.engine import _compensate_run_record, detect_tweak
+        from winbearable.models import RunRecord, TransactionState, TweakStatus
+        from winbearable.state import StateStore, StateStoreError
+        from winbearable.tweaks import get_tweak
+
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+        env = sys_b.detect_environment(reg)
+
+        # P1.1: Residual winget package after uninstall reports compensation error
+        rec = RunRecord(
+            run_id="res-1",
+            timestamp="2026-11-14T00:00:00Z",
+            profile_name="p",
+            applied_tweaks=(),
+            installed_winget_packages=("Microsoft.VisualStudioCode",),
+            state=TransactionState.ROLLING_BACK,
+        )
+        with (
+            patch.object(sys_b, "uninstall_winget_package", return_value=True),
+            patch.object(sys_b, "is_winget_package_installed", return_value=True),
+        ):
+            comp_errors = _compensate_run_record(rec, reg, sys_b)
+        self.assertIn("winget Microsoft.VisualStudioCode", comp_errors)
+
+        # P1.2: Type mismatch (REG_DWORD vs REG_SZ) never reports APPLIED
+        reg.set_value(
+            HIVE_HKCU,
+            r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32",
+            "",
+            1,
+            REG_DWORD,
+        )
+        res = detect_tweak(get_tweak("explorer.classic_context_menu"), env, reg, sys_b)
+        self.assertNotEqual(res.status, TweakStatus.APPLIED)
+        self.assertEqual(res.status, TweakStatus.DRIFTED)
+
+        # P1.6: Disk-full error during os.replace leaves prior state.json intact
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.json")
+            r1 = RunRecord("ok-1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED)
+            r2 = RunRecord("ok-2", "2026-11-14T01:00:00Z", "p", (), state=TransactionState.COMMITTED)
+            store.save_runs([r1])
+            with (
+                patch("os.replace", side_effect=OSError("No space left on device")),
+                self.assertRaises((OSError, StateStoreError)),
+            ):
+                store.save_runs([r1, r2])
+            loaded = store.load_runs()
+            self.assertEqual([r.run_id for r in loaded], ["ok-1"])
+            existing_val = reg.get_value(
+                HIVE_HKCU,
+                r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32",
+                "",
+            )
+            assert existing_val is not None
+            self.assertEqual(existing_val[1], REG_DWORD)
 
 
 if __name__ == "__main__":

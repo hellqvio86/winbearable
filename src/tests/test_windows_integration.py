@@ -80,6 +80,55 @@ class TestWindowsIntegration(unittest.TestCase):
         self.assertIn("dimensions", payload["audit"])
         self.assertIn("security", payload["audit"]["dimensions"])
 
+    def test_disposable_hkcu_apply_crash_and_recover(self) -> None:
+        """Simulate an interrupted HKCU mutation in real StateStore and recover cleanly."""
+        import tempfile
+        import winreg as winreg_mod
+        from pathlib import Path
+
+        from winbearable.engine import recover_incomplete_runs
+        from winbearable.models import RegistryValueSnapshot, RunRecord, TransactionState
+        from winbearable.state import StateStore
+
+        reg = WinregBackend()
+        sys_b = NativeSystemBackend()
+        test_root = rf"Software\winbearable_integration_rec_{os.getpid()}"
+        try:
+            snap = RegistryValueSnapshot(
+                hive=HIVE_HKCU,
+                key_path=test_root,
+                value_name="TestVal",
+                key_existed=False,
+                value_existed=False,
+                previous_data=None,
+                previous_type=None,
+            )
+            reg.set_value(HIVE_HKCU, test_root, "TestVal", 1, REG_DWORD)
+            with tempfile.TemporaryDirectory() as tmp:
+                store = StateStore(Path(tmp) / "state.json")
+                store.save_runs(
+                    [
+                        RunRecord(
+                            run_id="win-int-rec-1",
+                            timestamp="2026-11-14T00:00:00Z",
+                            profile_name="disposable",
+                            applied_tweaks=(),
+                            registry_snapshots=(snap,),
+                            state=TransactionState.APPLYING,
+                        )
+                    ]
+                )
+                recovered = recover_incomplete_runs(store, reg, sys_b, dry_run=False)
+                self.assertEqual(len(recovered), 1)
+                self.assertEqual(recovered[0].state, TransactionState.ROLLED_BACK)
+                self.assertIsNone(reg.get_value(HIVE_HKCU, test_root, "TestVal"))
+        finally:
+            with suppress(OSError):
+                del_key = getattr(winreg_mod, "DeleteKey", None)
+                hkcu_handle = getattr(winreg_mod, "HKEY_CURRENT_USER", None)
+                if callable(del_key) and hkcu_handle is not None:
+                    del_key(hkcu_handle, test_root)
+
 
 if __name__ == "__main__":
     unittest.main()

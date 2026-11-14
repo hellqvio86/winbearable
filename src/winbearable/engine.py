@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from .const import ACTION_DELETE
 from .models import (
     AuditDimension,
     EnvironmentInfo,
+    OperationOutcome,
+    OperationStatus,
     OptionalFeatureSnapshot,
     PlannedOperation,
     ProfileSpec,
@@ -42,6 +45,28 @@ class HighRiskConfirmationError(RuntimeError):
 
 class IrreversibleActionError(RuntimeError):
     """Raised when applying an irreversible tweak without --allow-irreversible."""
+
+
+class _TweakMutationError(RuntimeError):
+    """Internal error carrying structured OperationOutcome from a failed mutation."""
+
+    def __init__(self, outcome: OperationOutcome) -> None:
+        super().__init__(outcome.message or f"Operation failed with status {outcome.status}")
+        self.outcome = outcome
+
+
+def _capture_failure_outcome(system: SystemBackend, base_message: str) -> OperationOutcome:
+    """Capture structured OperationOutcome from backend or synthesize UNKNOWN outcome."""
+    raw = getattr(system, "last_outcome", None)
+    if isinstance(raw, OperationOutcome) and not raw.ok:
+        detail = _format_op_failure(system, base_message)
+        return OperationOutcome(
+            status=raw.status,
+            message=detail,
+            returncode=raw.returncode,
+            command=raw.command,
+        )
+    return OperationOutcome(status=OperationStatus.UNKNOWN, message=base_message)
 
 
 _CATEGORY_DIMENSION_MAP: dict[str, AuditDimension] = {
@@ -398,11 +423,18 @@ def _compensate_run_record(
         ):
             errors.append(f"feature {feat_snap.feature_name}")
     for ext_id in reversed(run_record.installed_vscode_extensions):
-        if not system.uninstall_vscode_extension(ext_id):
+        if not system.uninstall_vscode_extension(ext_id) or system.is_vscode_extension_installed(ext_id):
             errors.append(f"vscode_extension {ext_id}")
     for pkg_id in reversed(run_record.installed_winget_packages):
-        if not system.uninstall_winget_package(pkg_id):
+        if not system.uninstall_winget_package(pkg_id) or system.is_winget_package_installed(pkg_id):
             errors.append(f"winget {pkg_id}")
+    if run_record.wsl_backup_path and run_record.wslconfig_path:
+        try:
+            bak = Path(run_record.wsl_backup_path)
+            if bak.is_file():
+                shutil.copy2(bak, run_record.wslconfig_path)
+        except OSError as exc:
+            errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
     return errors
 
 
@@ -426,8 +458,11 @@ def _execute_tweak_mutations(
 
     for proc_name in tweak.stop_processes:
         if system.is_process_running(proc_name) and not system.stop_process(proc_name, force=force_kill_processes):
-            raise RuntimeError(
-                f"Failed to stop process '{proc_name}' gracefully (pass --force-kill to force termination)."
+            raise _TweakMutationError(
+                _capture_failure_outcome(
+                    system,
+                    f"Failed to stop process '{proc_name}' gracefully (pass --force-kill to force termination).",
+                )
             )
         _ckpt(f"{tweak.tweak_id}:process_stop:{proc_name}")
 
@@ -440,7 +475,12 @@ def _execute_tweak_mutations(
                 reg_spec.key_path,
                 backup_dir / f"{reg_spec.hive}_{safe_name}.reg",
             ):
-                raise RuntimeError(f"Failed to export registry backup for {reg_spec.hive}\\{reg_spec.key_path}.")
+                raise _TweakMutationError(
+                    _capture_failure_outcome(
+                        system,
+                        f"Failed to export registry backup for {reg_spec.hive}\\{reg_spec.key_path}.",
+                    )
+                )
             exported_subtrees.add(subtree)
 
         if reg_spec.action == ACTION_DELETE:
@@ -458,8 +498,8 @@ def _execute_tweak_mutations(
 
     for svc_spec in tweak.service_specs:
         if not system.set_service_start_type(registry, svc_spec.service_name, svc_spec.start_type):
-            raise RuntimeError(
-                _format_op_failure(
+            raise _TweakMutationError(
+                _capture_failure_outcome(
                     system,
                     f"Failed to configure service '{svc_spec.service_name}' start_type={svc_spec.start_type}.",
                 )
@@ -468,8 +508,8 @@ def _execute_tweak_mutations(
 
     for task_spec in tweak.task_specs:
         if not system.set_scheduled_task_enabled(task_spec.task_path, task_spec.enabled):
-            raise RuntimeError(
-                _format_op_failure(
+            raise _TweakMutationError(
+                _capture_failure_outcome(
                     system,
                     f"Failed to set scheduled task '{task_spec.task_path}' enabled={task_spec.enabled}.",
                 )
@@ -478,8 +518,8 @@ def _execute_tweak_mutations(
 
     for feat_spec in tweak.feature_specs:
         if not system.set_optional_feature_enabled(feat_spec.feature_name, feat_spec.enabled):
-            raise RuntimeError(
-                _format_op_failure(
+            raise _TweakMutationError(
+                _capture_failure_outcome(
                     system,
                     f"Failed to set optional feature '{feat_spec.feature_name}' enabled={feat_spec.enabled}.",
                 )
@@ -493,16 +533,16 @@ def _execute_tweak_mutations(
                 scope=winget_spec.scope,
                 vscode_extensions=(),
             ):
-                raise RuntimeError(
-                    _format_op_failure(system, f"Failed to install winget package '{winget_spec.package_id}'.")
+                raise _TweakMutationError(
+                    _capture_failure_outcome(system, f"Failed to install winget package '{winget_spec.package_id}'.")
                 )
             newly_installed_winget.append(winget_spec.package_id)
             _ckpt(f"{tweak.tweak_id}:winget:{winget_spec.package_id}")
         for ext in winget_spec.vscode_extensions:
             if not system.is_vscode_extension_installed(ext):
                 if not system.install_vscode_extension(ext):
-                    raise RuntimeError(
-                        _format_op_failure(
+                    raise _TweakMutationError(
+                        _capture_failure_outcome(
                             system,
                             f"Failed to install VS Code extension '{ext}' for '{winget_spec.package_id}'.",
                         )
@@ -512,13 +552,18 @@ def _execute_tweak_mutations(
 
     if tweak.uninstall_onedrive:
         if not system.uninstall_onedrive_client():
-            raise RuntimeError(_format_op_failure(system, "Failed to uninstall OneDrive client."))
+            raise _TweakMutationError(_capture_failure_outcome(system, "Failed to uninstall OneDrive client."))
         _ckpt(f"{tweak.tweak_id}:onedrive_uninstall")
 
     post_check = detect_tweak(tweak, env, registry, system)
     if post_check.status != TweakStatus.APPLIED:
-        raise RuntimeError(
-            f"Post-apply verification failed for '{tweak.tweak_id}': {post_check.status} ({post_check.detail})"
+        raise _TweakMutationError(
+            OperationOutcome(
+                status=OperationStatus.UNKNOWN,
+                message=(
+                    f"Post-apply verification failed for '{tweak.tweak_id}': {post_check.status} ({post_check.detail})"
+                ),
+            )
         )
 
 
@@ -618,6 +663,7 @@ def apply_profile(
             applied_ids.append(res.tweak_id)
 
     run_id: str | None = None
+    wsl_result: dict[str, Any] | None = None
     if not dry_run and drifted_indices:
         with state_store.transaction_lock():
             run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
@@ -628,6 +674,9 @@ def apply_profile(
             newly_installed_winget: list[str] = []
             newly_installed_extensions: list[str] = []
             completed_ops: list[str] = []
+            failure_outcomes: list[dict[str, Any]] = []
+            wsl_backup_path: str | None = None
+            wsl_target_path: str | None = None
             exported_subtrees: set[tuple[str, str]] = set()
             now_iso = datetime.now(tz=UTC).isoformat()
 
@@ -644,6 +693,9 @@ def apply_profile(
                     installed_winget_packages=tuple(newly_installed_winget),
                     installed_vscode_extensions=tuple(newly_installed_extensions),
                     completed_operations=tuple(completed_ops),
+                    failure_outcomes=tuple(failure_outcomes),
+                    wsl_backup_path=wsl_backup_path,
+                    wslconfig_path=wsl_target_path,
                     state=state,
                     error=error,
                 )
@@ -674,7 +726,13 @@ def apply_profile(
                     )
                 except Exception as exc:
                     err_msg = str(exc)
+                    outcome = (
+                        exc.outcome
+                        if isinstance(exc, _TweakMutationError)
+                        else _capture_failure_outcome(system, err_msg)
+                    )
                     failed_ids.append(res.tweak_id)
+                    failure_outcomes.append({"tweak_id": res.tweak_id, **outcome.to_dict()})
                     final_results[idx] = TweakCheckResult(
                         tweak_id=res.tweak_id,
                         title=res.title,
@@ -686,6 +744,9 @@ def apply_profile(
                         source_url=res.source_url,
                         registry_changes=res.registry_changes,
                         cis_id=res.cis_id,
+                        cis_mapping=res.cis_mapping,
+                        dimension=res.dimension,
+                        outcome=outcome,
                     )
                     comp_errors = _compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
                     full_error = (
@@ -698,18 +759,71 @@ def apply_profile(
                 applied_ids.append(res.tweak_id)
                 state_store.upsert_run(_make_record(TransactionState.APPLYING))
             else:
-                state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                if profile.wsl.enabled and env.wsl_installed:
+                    try:
+                        distros = list(env.wsl_distros)
+                        if distros:
+                            distro_results: list[dict[str, Any]] = []
+                            first_res = plan_or_apply_wsl(
+                                spec=profile.wsl,
+                                system=system,
+                                distro=distros[0],
+                                wslconfig_path=wslconfig_path,
+                                dry_run=False,
+                            )
+                            distro_results.append({"distro": distros[0], "distro_changed": first_res["distro_changed"]})
+                            for extra_distro in distros[1:]:
+                                extra_res = plan_or_apply_wsl(
+                                    spec=profile.wsl,
+                                    system=system,
+                                    distro=extra_distro,
+                                    wslconfig_path=wslconfig_path,
+                                    dry_run=False,
+                                )
+                                distro_results.append(
+                                    {"distro": extra_distro, "distro_changed": extra_res["distro_changed"]}
+                                )
+                            wsl_result = {**first_res, "distros_applied": distro_results}
+                        else:
+                            wsl_result = plan_or_apply_wsl(
+                                spec=profile.wsl,
+                                system=system,
+                                wslconfig_path=wslconfig_path,
+                                dry_run=False,
+                            )
+                        wsl_backup_path = wsl_result.get("wslconfig_backup_path")
+                        wsl_target_path = wsl_result.get("wslconfig_path")
+                        state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                    except PermissionError as exc:
+                        if wslconfig_path is not None:
+                            raise
+                        wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
+                        state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                    except (WslOperationError, OSError) as exc:
+                        err_msg = str(exc)
+                        failed_ids.append("wsl")
+                        wsl_outcome = OperationOutcome(status=OperationStatus.UNKNOWN, message=err_msg)
+                        failure_outcomes.append({"tweak_id": "wsl", **wsl_outcome.to_dict()})
+                        wsl_result = {"enabled": True, "error": err_msg, "outcome": wsl_outcome.to_dict()}
+                        comp_errors = _compensate_run_record(
+                            _make_record(TransactionState.ROLLING_BACK), registry, system
+                        )
+                        full_error = (
+                            err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
+                        )
+                        state_store.upsert_run(_make_record(TransactionState.FAILED, error=full_error))
+                else:
+                    state_store.upsert_run(_make_record(TransactionState.COMMITTED))
                 run_id = run_id_candidate
 
-    wsl_result: dict[str, Any] | None = None
-    if profile.wsl.enabled and not failed_ids:
+    if wsl_result is None and profile.wsl.enabled and not failed_ids:
         if not env.wsl_installed:
             wsl_result = {"enabled": True, "skipped": True, "reason": "WSL2 is not installed on host."}
         else:
             try:
                 distros = list(env.wsl_distros)
                 if distros:
-                    distro_results: list[dict[str, Any]] = []
+                    dry_distro_results: list[dict[str, Any]] = []
                     first_res = plan_or_apply_wsl(
                         spec=profile.wsl,
                         system=system,
@@ -717,7 +831,7 @@ def apply_profile(
                         wslconfig_path=wslconfig_path,
                         dry_run=dry_run,
                     )
-                    distro_results.append({"distro": distros[0], "distro_changed": first_res["distro_changed"]})
+                    dry_distro_results.append({"distro": distros[0], "distro_changed": first_res["distro_changed"]})
                     for extra_distro in distros[1:]:
                         extra_res = plan_or_apply_wsl(
                             spec=profile.wsl,
@@ -726,8 +840,10 @@ def apply_profile(
                             wslconfig_path=wslconfig_path,
                             dry_run=dry_run,
                         )
-                        distro_results.append({"distro": extra_distro, "distro_changed": extra_res["distro_changed"]})
-                    wsl_result = {**first_res, "distros_applied": distro_results}
+                        dry_distro_results.append(
+                            {"distro": extra_distro, "distro_changed": extra_res["distro_changed"]}
+                        )
+                    wsl_result = {**first_res, "distros_applied": dry_distro_results}
                 else:
                     wsl_result = plan_or_apply_wsl(
                         spec=profile.wsl,

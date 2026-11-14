@@ -1,5 +1,6 @@
 """Native system backend for environment detection, services, tasks, features, winget, and WSL."""
 
+import contextlib
 import ctypes
 import os
 import platform
@@ -826,27 +827,60 @@ class NativeSystemBackend:
                 return False
         return False
 
+    @staticmethod
+    def _classify_cmd_failure(returncode: int, stdout: str, stderr: str) -> OperationStatus:
+        """Classify non-zero native command failures using exit/Win32 codes first, then en-US text fallback."""
+        low_err = f"{stderr}\n{stdout}".lower()
+        if returncode in (5, 740, -2147024891) or "0x80070005" in low_err or "win32 error 5" in low_err:
+            return OperationStatus.ACCESS_DENIED
+        if returncode in (1260, 1625, -2147023636) or "0x800704ec" in low_err:
+            return OperationStatus.BLOCKED_BY_POLICY
+        if returncode in (2, 3, 9009, -2147024894) or "0x80070002" in low_err:
+            return OperationStatus.TOOL_MISSING
+        if returncode in (124, 1460):
+            return OperationStatus.TIMEOUT
+        # Fallback for en-US Windows locales when tools exit with generic code 1
+        if "access is denied" in low_err or "administrator" in low_err or "elevation" in low_err:
+            return OperationStatus.ACCESS_DENIED
+        if "blocked" in low_err or "policy" in low_err:
+            return OperationStatus.BLOCKED_BY_POLICY
+        return OperationStatus.UNKNOWN
+
+    def _terminate_process_tree(self, pid: int) -> None:
+        """Attempt best-effort process-tree termination on timeout (detached COM children cannot be tracked)."""
+        if self._platform == "win32":
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(
+                    ["taskkill.exe", "/T", "/F", "/PID", str(pid)],
+                    capture_output=True,
+                    shell=False,
+                    check=False,
+                    timeout=5.0,
+                )
+
     def _run_native_cmd(
         self,
         args: list[str],
         input_text: str | None = None,
         timeout: float = DEFAULT_CMD_TIMEOUT,
     ) -> CommandResult:
+        """Execute a native command with timeout, process-tree cleanup on timeout, and structured outcomes."""
         effective_timeout = self._resolve_timeout(timeout)
+        proc: subprocess.Popen[str] | None = None
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 args,
-                input=input_text,
-                capture_output=True,
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 shell=False,
-                check=False,
-                timeout=effective_timeout,
             )
-            cleaned_stdout = proc.stdout.replace("\x00", "")
-            cleaned_stderr = proc.stderr.replace("\x00", "")
+            stdout_raw, stderr_raw = proc.communicate(input=input_text, timeout=effective_timeout)
+            cleaned_stdout = (stdout_raw or "").replace("\x00", "")
+            cleaned_stderr = (stderr_raw or "").replace("\x00", "")
             if proc.returncode == 0:
                 cat = OperationStatus.OK
                 self.last_outcome = OperationOutcome(
@@ -855,13 +889,7 @@ class NativeSystemBackend:
                     command=tuple(args),
                 )
             else:
-                low_err = f"{cleaned_stderr}\n{cleaned_stdout}".lower()
-                if "access is denied" in low_err or "administrator" in low_err:
-                    cat = OperationStatus.ACCESS_DENIED
-                elif "blocked" in low_err or "policy" in low_err:
-                    cat = OperationStatus.BLOCKED_BY_POLICY
-                else:
-                    cat = OperationStatus.UNKNOWN
+                cat = self._classify_cmd_failure(proc.returncode, cleaned_stdout, cleaned_stderr)
                 self.last_outcome = OperationOutcome(
                     status=cat,
                     message=cleaned_stderr or cleaned_stdout,
@@ -876,6 +904,13 @@ class NativeSystemBackend:
                 stderr=cleaned_stderr,
             )
         except subprocess.TimeoutExpired as exc:
+            if proc is not None:
+                self._terminate_process_tree(proc.pid)
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=2.0)
+                except (OSError, subprocess.SubprocessError):
+                    pass
             raw_out = (
                 exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             )

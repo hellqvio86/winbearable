@@ -351,12 +351,16 @@ def _run_cli_body(
                 }
             wsl_info = audit_wsl(env)
             incomplete_runs = store.get_incomplete_runs()
+            raw_history = getattr(sys_backend, "command_history", ())
+            last_outcome = getattr(sys_backend, "last_outcome", None)
             payload = {
                 "version": __version__,
                 "environment": env.to_dict(),
                 "wsl": wsl_info,
                 "audit": audit,
                 "incomplete_runs": [run.to_dict() for run in incomplete_runs],
+                "command_history": list(raw_history)[-10:] if isinstance(raw_history, list) else [],
+                "last_outcome": last_outcome.to_dict() if last_outcome is not None else None,
             }
             if args.json:
                 _print_json(payload)
@@ -461,6 +465,10 @@ def _run_cli_body(
                 _print_json(summary.to_dict())
             else:
                 sys.stdout.write(_format_summary_markdown(summary))
+                if any(not op.reversible for r in summary.results for op in r.operations):
+                    sys.stdout.write(
+                        "Note: non-compensable side effects (process stops / uninstalls) cannot be rolled back.\n"
+                    )
             return 1 if summary.failed_ids else 0
 
         if args.command == "apply":
@@ -498,6 +506,10 @@ def _run_cli_body(
                 _print_json(summary.to_dict())
             else:
                 sys.stdout.write(_format_summary_markdown(summary))
+                if any(not op.reversible for r in summary.results for op in r.operations):
+                    sys.stdout.write(
+                        "Note: non-compensable side effects (process stops / uninstalls) cannot be rolled back.\n"
+                    )
             return 1 if summary.failed_ids else 0
 
         if args.command in {"rollback", "recover"}:
