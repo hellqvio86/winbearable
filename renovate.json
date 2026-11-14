@@ -12,6 +12,31 @@
   "github-actions": {
     "enabled": true
   },
+  "dockerfile": {
+    "enabled": true,
+    "pinDigests": true
+  },
+  "docker-compose": {
+    "enabled": true,
+    "pinDigests": true
+  },
+  "devcontainer": {
+    "enabled": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update Docker container images in .githooks/pre-commit and Makefile",
+      "fileMatch": [
+        "^\\.githooks/pre-commit$",
+        "^Makefile$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=docker depName=(?<depName>[^\\s]+)\\n\\s*[A-Z_]+\\s*[:?]?=\\s*\"?(?<currentValue>[^\"\\s]+)\"?"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
       "description": "Group Python dependencies",
@@ -30,6 +55,18 @@
       ],
       "groupName": "github-actions",
       "groupSlug": "github-actions",
+      "pinDigests": true
+    },
+    {
+      "description": "Pin container image digests",
+      "matchManagers": [
+        "dockerfile",
+        "docker-compose",
+        "devcontainer",
+        "custom.regex"
+      ],
+      "groupName": "container-images",
+      "groupSlug": "containers",
       "pinDigests": true
     }
   ],

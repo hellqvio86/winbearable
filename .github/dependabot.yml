@@ -16,3 +16,19 @@ updates:
   - hellqvio86
   cooldown:
     default-days: 3
+- package-ecosystem: docker-compose
+  directory: /.devcontainer
+  schedule:
+    interval: weekly
+  assignees:
+  - hellqvio86
+  cooldown:
+    default-days: 3
+- package-ecosystem: devcontainers
+  directory: /.devcontainer
+  schedule:
+    interval: weekly
+  assignees:
+  - hellqvio86
+  cooldown:
+    default-days: 3

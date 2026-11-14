@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# renovate: datasource=docker depName=trufflesecurity/trufflehog
+TRUFFLEHOG_VERSION="3.99.9"
+# renovate: datasource=docker depName=aquasec/trivy
+TRIVY_VERSION="0.76.2"
+
 if [[ -d "${HOME}/.local/bin" && ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
     export PATH="${HOME}/.local/bin:${PATH}"
 fi
@@ -52,7 +57,7 @@ fi
 
 echo "--> [3/4] Running TruffleHog secret scan (container)..."
 if command -v docker >/dev/null 2>&1; then
-    run_docker run --rm -v "$REPO_ROOT":/src -w /src trufflesecurity/trufflehog:latest git file:///src --only-verified --fail
+    run_docker run --rm -v "$REPO_ROOT":/src -w /src "trufflesecurity/trufflehog:${TRUFFLEHOG_VERSION}" git file:///src --only-verified --fail
 else
     echo "ERROR: docker is required to run TruffleHog container!" >&2
     exit 1
@@ -60,7 +65,7 @@ fi
 
 echo "--> [4/4] Running Trivy vulnerability scan (container)..."
 if command -v docker >/dev/null 2>&1; then
-    run_docker run --rm -v "$REPO_ROOT":/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 1 .
+    run_docker run --rm -v "$REPO_ROOT":/src -v trivy-cache:/root/.cache -w /src "aquasec/trivy:${TRIVY_VERSION}" fs --severity HIGH,CRITICAL --exit-code 1 .
 else
     echo "ERROR: docker is required to run Trivy container!" >&2
     exit 1

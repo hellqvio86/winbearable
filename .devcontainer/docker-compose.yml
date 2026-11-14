@@ -6,3 +6,23 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /workspace
     command: sleep infinity
+
+  trufflehog:
+    image: trufflesecurity/trufflehog:3.99.9
+    profiles: ["security"]
+    volumes:
+      - ..:/src:ro
+    working_dir: /src
+    command: ["git", "file:///src", "--only-verified", "--fail"]
+
+  trivy:
+    image: aquasec/trivy:0.76.2
+    profiles: ["security"]
+    volumes:
+      - ..:/src:ro
+      - trivy-cache:/root/.cache
+    working_dir: /src
+    command: ["fs", "--severity", "HIGH,CRITICAL", "--exit-code", "1", "."]
+
+volumes:
+  trivy-cache:

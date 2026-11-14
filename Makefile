@@ -1,5 +1,10 @@
 .PHONY: venv lint test clean format build publish run install version release-check hooks secrets trivy pre-commit
 
+# renovate: datasource=docker depName=trufflesecurity/trufflehog
+TRUFFLEHOG_VERSION ?= 3.99.9
+# renovate: datasource=docker depName=aquasec/trivy
+TRIVY_VERSION ?= 0.76.2
+
 .venv: pyproject.toml
 	if [ ! -d .venv ]; then uv venv; fi
 	uv pip install -e . --group dev
@@ -49,9 +54,9 @@ hooks: ## Install git pre-commit hook
 secrets: ## Run TruffleHog secret scanning via Docker container
 	@echo "Running TruffleHog secret scan (container)..."
 	@if docker info >/dev/null 2>&1; then \
-		docker run --rm -v $$(pwd):/src -w /src trufflesecurity/trufflehog:latest git file:///src --only-verified --fail; \
+		docker run --rm -v $$(pwd):/src -w /src trufflesecurity/trufflehog:$(TRUFFLEHOG_VERSION) git file:///src --only-verified --fail; \
 	elif command -v sg >/dev/null 2>&1; then \
-		sg docker -c "docker run --rm -v $$(pwd):/src -w /src trufflesecurity/trufflehog:latest git file:///src --only-verified --fail"; \
+		sg docker -c "docker run --rm -v $$(pwd):/src -w /src trufflesecurity/trufflehog:$(TRUFFLEHOG_VERSION) git file:///src --only-verified --fail"; \
 	else \
 		echo "ERROR: docker is required!" >&2 && exit 1; \
 	fi
@@ -59,9 +64,9 @@ secrets: ## Run TruffleHog secret scanning via Docker container
 trivy: ## Run Trivy vulnerability scanning via Docker container
 	@echo "Running Trivy vulnerability scan (container)..."
 	@if docker info >/dev/null 2>&1; then \
-		docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 1 .; \
+		docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:$(TRIVY_VERSION) fs --severity HIGH,CRITICAL --exit-code 1 .; \
 	elif command -v sg >/dev/null 2>&1; then \
-		sg docker -c "docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 1 ."; \
+		sg docker -c "docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:$(TRIVY_VERSION) fs --severity HIGH,CRITICAL --exit-code 1 ."; \
 	else \
 		echo "ERROR: docker is required!" >&2 && exit 1; \
 	fi
