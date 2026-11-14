@@ -258,11 +258,22 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 
 ## Built-in TOML Profiles
 
-| Profile | Requires Admin? | What It Configures |
-| :--- | :--- | :--- |
-| [`profiles/user-only.toml`](profiles/user-only.toml) | **No** (`HKCU` / user scope) | Installs Windows-side VS Code + `ms-vscode-remote.remote-wsl`, kills OneDrive tray autorun & Explorer pin, disables Bing web search, Search Highlights, taskbar search box, Start menu ads/recommendations, Widgets/Chat/Task View, restores classic Windows 11 right-click menu, shows file extensions/dotfiles, disables user Copilot, Advertising ID, and WSH. |
-| [`profiles/owner.toml`](profiles/owner.toml) | **Yes** (`extends = "user-only"`) | Adds machine-wide OneDrive sync block (`DisableFileSyncNGSC=1`), disables Windows Recall & Copilot machine-wide, blocks silent consumer bloatware, disables telemetry & CEIP scheduled tasks, disables SMBv1/LLMNR/mDNS/WPAD/AutoRun, enforces Windows Firewall + Defender Cloud/PUA + Guest/Blank-Password lockdown + Browser privacy baseline, and enables PowerShell ScriptBlock & 4688 command-line auditing. |
-| [`profiles/paranoid.toml`](profiles/paranoid.toml) | **Yes** (`extends = "owner"`) | Uninstalls the OneDrive client, disables the `WSearch` indexer service, enables LSA `RunAsPPL` protection, enforces VBS/HVCI (`--i-know-what-im-doing`), and switches WSL2 to `strict` isolation (`[interop] enabled=false`, `[automount] enabled=false`). |
+Built-in profiles form a strict **aggressiveness & privilege ladder**:
+
+`user-only` (user-scope, no Admin) → `owner` (Admin baseline, extends `user-only`) → **`paranoid` (most aggressive, extends `owner`)**
+
+| Profile | Aggressiveness | Requires Admin? | Extra Flags Required? | What It Configures |
+| :--- | :--- | :--- | :--- | :--- |
+| **`user-only`** ([`profiles/user-only.toml`](profiles/user-only.toml)) | **Mild** (safe daily user tweaks) | **No** (`HKCU` / user scope) | None | Installs Windows-side VS Code + `ms-vscode-remote.remote-wsl`, kills OneDrive tray autorun & Explorer pin, disables Bing web search, Search Highlights, taskbar search box, Start menu ads/recommendations, Widgets/Chat/Task View, restores classic Windows 11 right-click menu, shows file extensions/dotfiles, disables user Copilot, Advertising ID, and WSH. |
+| **`owner`** ([`profiles/owner.toml`](profiles/owner.toml)) | **Moderate–Strong** (recommended for personal/unlocked PCs) | **Yes** (`extends = "user-only"`) | None | Everything in `user-only`, plus machine-wide OneDrive sync block (`DisableFileSyncNGSC=1`), disables Windows Recall & Copilot machine-wide, blocks silent consumer bloatware, disables telemetry & CEIP scheduled tasks, disables SMBv1/LLMNR/mDNS/WPAD/AutoRun, enforces Windows Firewall + Defender Cloud/PUA + Guest/Blank-Password lockdown + Browser privacy baseline, and enables PowerShell ScriptBlock & 4688 command-line auditing. |
+| **`paranoid`** ([`profiles/paranoid.toml`](profiles/paranoid.toml)) | **Maximum (most aggressive)** | **Yes** (`extends = "owner"`) | `--i-know-what-im-doing` & `--allow-irreversible` | Everything in `owner`, plus **irreversibly uninstalls** the OneDrive client, disables the `WSearch` indexer service, enables LSA `RunAsPPL` protection (reboot), enforces VBS/HVCI (reboot + compatible drivers), and switches WSL2 to `strict` isolation (`[interop] enabled=false`, `[automount] enabled=false`). |
+
+To preview and apply the **most aggressive (`paranoid`)** profile (from an elevated Administrator shell):
+
+```cmd
+wb plan --profile paranoid
+wb apply --profile paranoid --apply --i-know-what-im-doing --allow-irreversible
+```
 
 ---
 
