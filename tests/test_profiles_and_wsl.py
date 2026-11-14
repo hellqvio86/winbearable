@@ -68,12 +68,7 @@ class TestProfilesAndWsl(unittest.TestCase):
 
     def test_merge_ini_preserves_comments_and_user_keys(self) -> None:
         """Merging into .wslconfig preserves existing comments and custom keys."""
-        existing = (
-            "# User custom comment\n"
-            "[wsl2]\n"
-            "customKernel=C:\\bzImage\n"
-            "memory=4GB # inline comment\n"
-        )
+        existing = "# User custom comment\n[wsl2]\ncustomKernel=C:\\bzImage\nmemory=4GB # inline comment\n"
         desired = {
             "wsl2": {
                 "memory": "16GB",

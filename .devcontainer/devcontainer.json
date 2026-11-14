@@ -1,0 +1,17 @@
+{
+  "name": "winbearable Dev Container",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "matangover.mypy"
+      ]
+    }
+  },
+  "postCreateCommand": "uv sync && git config core.hooksPath .githooks && chmod +x .githooks/pre-commit"
+}

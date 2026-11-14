@@ -18,10 +18,16 @@ Thank you for contributing to `winbearable`!
    - `requires_admin` boolean and `risk` (`low`, `medium`, `high`)
    - Unit test verifying `detect` -> `apply` -> `detect` -> `revert` -> `detect` against `InMemoryRegistryBackend`
 
-## Development Workflow (`uv`)
+## Mandatory Pre-Commit & Dev Container Workflow (`uv`)
+
+We do **not** run `pytest` on native Windows Python or pay Microsoft for `windows-latest` CI runners. When developing on Windows, open the repository inside the Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) via WSL2/Docker.
+
+**Every contributor and AI agent MUST install and run `.githooks/pre-commit` locally before every commit:**
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
+make hooks         # Install mandatory .githooks/pre-commit hook
+make pre-commit    # Run format check, ruff lint, mypy, pytest (>=80%), TruffleHog, and Trivy
 make lint          # Run ruff check and ruff format --check
 make test          # Run mypy --strict and pytest with >=80% coverage
 make release-check # Run lint, test, TruffleHog, and Trivy

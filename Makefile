@@ -1,4 +1,4 @@
-.PHONY: venv lint test clean format build publish run install version release-check hooks secrets trivy
+.PHONY: venv lint test clean format build publish run install version release-check hooks secrets trivy pre-commit
 
 .venv: pyproject.toml
 	if [ ! -d .venv ]; then uv venv; fi
@@ -14,9 +14,12 @@ format: .venv
 	.venv/bin/ruff format .
 
 test: .venv
-	.venv/bin/mypy src
+	.venv/bin/mypy src tests
 	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
 	.venv/bin/python3 src/generate_badge.py
+
+pre-commit: hooks
+	./.githooks/pre-commit
 
 run: .venv
 	.venv/bin/python3 -m winbearable $(ARGS)
@@ -43,22 +46,22 @@ hooks: ## Install git pre-commit hook
 	@git config core.hooksPath .githooks
 	@echo "Git pre-commit hook installed and core.hooksPath set to .githooks."
 
-secrets: ## Run TruffleHog secret scanning
-	@echo "Running TruffleHog secret scan..."
-	@if command -v trufflehog >/dev/null 2>&1; then \
-		trufflehog --no-update git file://$$(pwd) --only-verified --fail; \
-	elif command -v docker >/dev/null 2>&1; then \
+secrets: ## Run TruffleHog secret scanning via Docker container
+	@echo "Running TruffleHog secret scan (container)..."
+	@if docker info >/dev/null 2>&1; then \
 		docker run --rm -v $$(pwd):/src -w /src trufflesecurity/trufflehog:latest git file:///src --only-verified --fail; \
+	elif command -v sg >/dev/null 2>&1; then \
+		sg docker -c "docker run --rm -v $$(pwd):/src -w /src trufflesecurity/trufflehog:latest git file:///src --only-verified --fail"; \
 	else \
-		echo "ERROR: trufflehog or docker is required!" >&2 && exit 1; \
+		echo "ERROR: docker is required!" >&2 && exit 1; \
 	fi
 
-trivy: ## Run Trivy vulnerability scanning
-	@echo "Running Trivy vulnerability scan..."
-	@if command -v trivy >/dev/null 2>&1; then \
-		trivy fs --severity HIGH,CRITICAL --exit-code 1 .; \
-	elif command -v docker >/dev/null 2>&1; then \
+trivy: ## Run Trivy vulnerability scanning via Docker container
+	@echo "Running Trivy vulnerability scan (container)..."
+	@if docker info >/dev/null 2>&1; then \
 		docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 1 .; \
+	elif command -v sg >/dev/null 2>&1; then \
+		sg docker -c "docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 1 ."; \
 	else \
-		echo "ERROR: trivy or docker is required!" >&2 && exit 1; \
+		echo "ERROR: docker is required!" >&2 && exit 1; \
 	fi

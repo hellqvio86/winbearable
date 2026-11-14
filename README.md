@@ -262,10 +262,24 @@ We don't like Windows enough to maintain legacy workarounds for EOL operating sy
 
 ---
 
-## Development & Test Coverage Gate (`uv`)
+## ⚠️ Disclaimer: Zero Support — You Are On Your Own
+
+**This is free, open-source software provided strictly AS-IS with ZERO support, ZERO warranty, and ZERO liability.**
+
+- **If your PC breaks, you are on your own.** Do not open issues asking for tech support to fix your Windows installation.
+- **Be sensible and inspect the audit log:** Every `wb plan` and `wb apply` prints the exact registry hive, key path, value name, and `current -> target` transition before touching anything, and every applied run is logged with full pre-change snapshots in `%LOCALAPPDATA%\winbearable\state.json` (plus `.reg` hive exports in `%LOCALAPPDATA%\winbearable\backups\<run-id>\` for admin runs).
+- If a tweak causes an issue on your setup, **read your local audit/snapshot log** (`%LOCALAPPDATA%\winbearable\state.json`), see what changed, and revert it with `wb rollback --apply`.
+
+---
+
+## Development, Dev Container & Pre-Commit Gate (`uv`)
+
+We do **not** run `pytest` on native Windows Python or pay Microsoft for `windows-latest` CI runners. All development and test execution (including when developing on a Windows host via WSL2/Docker) runs inside the free, open-source Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or Linux host, and every commit MUST pass the local `.githooks/pre-commit` gate before committing:
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
+make hooks         # Install mandatory .githooks/pre-commit hook
+make pre-commit    # Run format check + ruff lint + mypy + pytest (>=80%) + TruffleHog + Trivy
 make lint          # ruff check + ruff format --check
 make test          # mypy --strict + pytest-cov (enforces >=80% coverage) + badge generation
 make release-check # lint + test + TruffleHog + Trivy

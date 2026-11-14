@@ -51,8 +51,8 @@
 - [x] `pyproject.toml` (`hatchling` + `uv`), Python >= 3.11, stdlib-first (`winreg`, `subprocess`, `tomllib`, `ctypes`)
 - [x] Deps kept minimal: zero mandatory third-party runtime deps; optional `textual` (`winbearable[tui]`)
 - [x] License: MIT
-- [x] `ruff`, `mypy --strict`, `pytest` (80% coverage gate), `.githooks/pre-commit`
-- [x] GitHub Actions on `windows-latest` plus `ubuntu-latest` using `astral-sh/setup-uv`
+- [x] `ruff`, `mypy --strict`, `pytest` (80% coverage gate), mandatory `.githooks/pre-commit` (format + lint + mypy + pytest + TruffleHog + Trivy)
+- [x] GitHub Actions on free `ubuntu-latest` using `astral-sh/setup-uv` + Linux `.devcontainer` for Windows development (zero paid `windows-latest` runners, zero Windows Python needed for `pytest`)
 - [x] `SECURITY.md`, `CONTRIBUTING.md`, issue templates (include "Windows 11 build number" and "managed by MDM? y/n")
 - [x] Release workflow: PyPI via trusted publishing, signed tags, SBOM, `uv tool install winbearable`
 - [x] Document Python-in-user-dir (`uv` standalone binary / `pipx`) alternative for PCs without Python or where AppLocker/WDAC blocks PyInstaller single-file `.exe`
@@ -158,12 +158,12 @@
 
 ## Phase 7: Quality, safety, trust
 
-- [x] Unit tests with a fake in-memory registry/command layer (runs on Linux CI) with **`pytest` coverage gate** (`--cov-fail-under=80`)
-- [x] Integration tests on `windows-latest` that apply and then revert tweaks and compare snapshots
+- [x] Unit tests with a fake in-memory registry/command layer (`FakeWinregModule` + `FakeWindll`, runs on Linux CI & `.devcontainer`) with **`pytest` coverage gate** (`--cov-fail-under=80`)
+- [x] Simulated `win32` apply/revert snapshot tests inside `pytest` (no native Windows Python required)
 - [x] Every tweak has: id, description, source link, tested builds (`[26100, 26200]`), admin flag, risk, explicit registry key path + value name + transition output, and revert support
-- [x] Supply chain: `uv.lock`, Dependabot, TruffleHog + Trivy in CI, zero network calls at runtime
+- [x] Supply chain: `uv.lock`, Dependabot, TruffleHog + Trivy in `.githooks/pre-commit` & CI, zero network calls at runtime
 - [x] `wb` never phones home. No telemetry. State stays local.
-- [x] Clear disclaimer: back up first, you are responsible for your machine and your employer's policy
+- [x] Clear disclaimer: open-source AS-IS with **zero support** — users are on their own if their PC breaks, should inspect the local audit/snapshot log (`state.json` / `.reg` backups), and be sensible
 
 ## Phase 8: Docs and community
 

@@ -8,32 +8,64 @@ cd "${REPO_ROOT}"
 if [[ -d "${HOME}/.local/bin" && ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
     export PATH="${HOME}/.local/bin:${PATH}"
 fi
+if [[ -d "${REPO_ROOT}/.venv/bin" ]]; then
+    export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
+fi
+
+run_docker() {
+    if docker info >/dev/null 2>&1; then
+        docker "$@"
+    elif command -v sg >/dev/null 2>&1; then
+        sg docker -c "docker $*"
+    else
+        docker "$@"
+    fi
+}
 
 echo "=========================================="
-echo "Running pre-commit security checks..."
+echo "Running pre-commit quality & security gates..."
 echo "=========================================="
 
-echo "--> [1/2] Running TruffleHog secret scan..."
-if command -v trufflehog >/dev/null 2>&1; then
-    git diff --cached | trufflehog --no-update stdin --only-verified --fail
-    trufflehog --no-update git file://"$REPO_ROOT" --only-verified --fail
-elif command -v docker >/dev/null 2>&1; then
-    docker run --rm -v "$REPO_ROOT":/src -w /src trufflesecurity/trufflehog:latest git file:///src --only-verified --fail
+echo "--> [1/4] Running Ruff lint & format check..."
+if command -v ruff >/dev/null 2>&1; then
+    ruff check .
+    ruff format --check .
+elif command -v uv >/dev/null 2>&1; then
+    uv run ruff check .
+    uv run ruff format --check .
 else
-    echo "ERROR: trufflehog or docker is required for pre-commit checks!" >&2
+    echo "ERROR: ruff or uv (.venv) is required for pre-commit lint/format checks!" >&2
     exit 1
 fi
 
-echo "--> [2/2] Running Trivy vulnerability scan..."
-if command -v trivy >/dev/null 2>&1; then
-    trivy fs --severity HIGH,CRITICAL --exit-code 1 .
-elif command -v docker >/dev/null 2>&1; then
-    docker run --rm -v "$REPO_ROOT":/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 1 .
+echo "--> [2/4] Running Mypy strict type check & Pytest suite..."
+if command -v mypy >/dev/null 2>&1 && command -v pytest >/dev/null 2>&1; then
+    mypy src tests
+    pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
+elif command -v uv >/dev/null 2>&1; then
+    uv run mypy src tests
+    uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
 else
-    echo "ERROR: trivy or docker is required for pre-commit checks!" >&2
+    echo "ERROR: mypy/pytest or uv (.venv) is required for pre-commit test checks!" >&2
+    exit 1
+fi
+
+echo "--> [3/4] Running TruffleHog secret scan (container)..."
+if command -v docker >/dev/null 2>&1; then
+    run_docker run --rm -v "$REPO_ROOT":/src -w /src trufflesecurity/trufflehog:latest git file:///src --only-verified --fail
+else
+    echo "ERROR: docker is required to run TruffleHog container!" >&2
+    exit 1
+fi
+
+echo "--> [4/4] Running Trivy vulnerability scan (container)..."
+if command -v docker >/dev/null 2>&1; then
+    run_docker run --rm -v "$REPO_ROOT":/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 1 .
+else
+    echo "ERROR: docker is required to run Trivy container!" >&2
     exit 1
 fi
 
 echo "=========================================="
-echo "All pre-commit security checks passed!"
+echo "All pre-commit format, lint, test & container security checks passed!"
 echo "=========================================="

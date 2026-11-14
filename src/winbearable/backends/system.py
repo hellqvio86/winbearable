@@ -141,9 +141,7 @@ class InMemorySystemBackend:
         self.wsl_installed = wsl_installed
         self.wsl_version = wsl_version
         self.wsl_distros = wsl_distros
-        self.total_memory_bytes = (
-            total_memory_bytes if total_memory_bytes is not None else total_memory_gb * GIB_BYTES
-        )
+        self.total_memory_bytes = total_memory_bytes if total_memory_bytes is not None else total_memory_gb * GIB_BYTES
         self.onedrive_uninstalled = False
         self.wsl_commands_executed: list[tuple[list[str], str | None]] = []
         self.wsl_etc_conf: dict[str, str] = {}
@@ -429,9 +427,7 @@ class NativeSystemBackend:
     def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd(
-            ["dism.exe", "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}"]
-        )
+        res = self._run_native_cmd(["dism.exe", "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}"])
         if res.returncode != 0:
             return None
         return "state : enabled" in res.stdout.lower()

@@ -1052,8 +1052,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         category="hardening",
         title="Restrict Blank Passwords & Disable Remote Assistance Solicited Help",
         description=(
-            "Restricts local accounts with blank passwords to console logon only "
-            "and disables Remote Assistance."
+            "Restricts local accounts with blank passwords to console logon only and disables Remote Assistance."
         ),
         source_url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/accounts-limit-local-account-use-of-blank-passwords-to-console-logon-only",
         risk=RiskLevel.LOW,
@@ -1086,8 +1085,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         category="hardening",
         title="Enforce Edge & Chrome Browser Privacy Baseline (No Password Sync, Strict Tracking)",
         description=(
-            "Disables built-in browser password manager & cloud sync and enforces "
-            "strict tracking prevention in Edge."
+            "Disables built-in browser password manager & cloud sync and enforces strict tracking prevention in Edge."
         ),
         source_url="https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies",
         risk=RiskLevel.LOW,

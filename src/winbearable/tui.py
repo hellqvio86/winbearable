@@ -50,8 +50,7 @@ def launch_tui(
 
     if not is_textual_available():
         sys.stderr.write(
-            "Textual TUI requires the optional 'tui' extra.\n"
-            "Install it with: uv tool install 'winbearable[tui]'\n"
+            "Textual TUI requires the optional 'tui' extra.\nInstall it with: uv tool install 'winbearable[tui]'\n"
         )
         return 1
 

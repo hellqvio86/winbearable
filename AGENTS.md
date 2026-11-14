@@ -1,19 +1,46 @@
 # AI Assistant & Agent Instruction Guide (`AGENTS.md`)
 
-This document defines the architecture, invariants, and development workflow for AI coding assistants working on `winbearable` (`wb`).
+This document defines the architecture, invariants, and **mandatory pre-commit workflow** for AI coding assistants working on `winbearable` (`wb`).
+
+## 🚨 MANDATORY RULE: Run `.githooks/pre-commit` Locally Before EVERY Commit
+
+**Never push broken code to GitHub Actions to "see if CI passes."** Every formatting, lint, type, unit test, and security error MUST be caught and fixed locally before running `git commit`:
+
+1. Ensure git hooks are active:
+   ```bash
+   make hooks
+   ```
+2. Run the full pre-commit quality and security gate locally before EVERY commit:
+   ```bash
+   ./.githooks/pre-commit
+   ```
+   This hook runs:
+   - `ruff check .` and `ruff format --check .`
+   - `mypy src tests` (strict mode)
+   - `pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80`
+   - `trufflehog` verified secret scan
+   - `trivy fs --severity HIGH,CRITICAL` vulnerability scan
+3. **Never pass `--no-verify` to `git commit`.**
+4. **No Windows Python / No Paid Microsoft CI Runners for Tests:**
+   - Do not run `pytest` on native Windows Python or add `windows-latest` runners to GitHub Actions (which burn 2x billing minutes and send money to Microsoft).
+   - All development and `pytest` runs on Windows happen inside the Linux **Dev Container** (`.devcontainer/devcontainer.json`, using free open-source `ghcr.io/astral-sh/uv:python3.13-bookworm-slim`) or WSL2, and CI runs exclusively on free Linux (`ubuntu-latest`).
+
+---
 
 ## Core Architectural Invariants
 
 1. **100% Native Python — Zero PowerShell Wrappers:**
    - Never invoke `powershell.exe` or `pwsh.exe`.
-   - Use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, and direct native executables (`wsl.exe`, `sc.exe`, `taskkill.exe`) with `shell=False` argument lists.
+   - Use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, and direct native executables (`wsl.exe`, `sc.exe`, `schtasks.exe`, `dism.exe`, `reg.exe`, `taskkill.exe`) with `shell=False` argument lists.
 2. **Dry-Run by Default:**
-   - `wb plan`, `wb apply` (without `--apply`), `wb rollback` (without `--apply`), and `wb wsl apply` (without `--apply`) must never mutate registry keys, files, processes, or services.
+   - `wb plan`, `wb apply` (without `--apply`), `wb rollback` (without `--apply`), and `wb wsl apply/install/export/import/baseline` (without `--apply`) must never mutate registry keys, files, processes, or services.
 3. **High-Risk Guardrail:**
    - Any tweak with `RiskLevel.HIGH` (such as `hardening.enable_vbs_hvci`) must raise `HighRiskConfirmationError` when `dry_run=False` unless `--i-know-what-im-doing` (`allow_high_risk=True`) is passed.
 4. **Policy-Conflict Honesty (`BLOCKED_BY_POLICY`):**
    - Never attempt to bypass MDM, Group Policy, AppLocker, WDAC, or Defender Tamper Protection. When a policy key conflicts with a tweak, return `TweakStatus.BLOCKED_BY_POLICY` and skip it.
-5. **Single-Source Constants (`src/winbearable/const.py`):**
+5. **Zero Support / User Responsibility:**
+   - This is free open-source software with **zero support**. Users are on their own if they break their PC and are expected to inspect the local audit/snapshot log (`%LOCALAPPDATA%\winbearable\state.json` and `%LOCALAPPDATA%\winbearable\backups\*.reg`) and be sensible.
+6. **Single-Source Constants (`src/winbearable/const.py`):**
    - Package version (`__version__`) and module-level constants belong in `src/winbearable/const.py`.
 
 ## Diagnostic & CLI Commands
@@ -35,11 +62,14 @@ wb apply --profile user-only --apply --json
 wb rollback --apply --json
 ```
 
-## Development & Quality Gate (`uv`)
+## Development & Quality Gate (`uv` / Dev Container)
 
 ```bash
 make venv          # Create .venv and install dependencies with uv
+make hooks         # Configure git core.hooksPath to .githooks
+make format        # Format code with ruff format
 make lint          # ruff check + ruff format --check
 make test          # mypy --strict + pytest-cov (>=80%) + badge generation
+make pre-commit    # Run full .githooks/pre-commit (lint + test + trufflehog + trivy)
 make release-check # lint + test + TruffleHog + Trivy
 ```

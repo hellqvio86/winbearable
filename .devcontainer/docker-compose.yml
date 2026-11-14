@@ -1,0 +1,8 @@
+services:
+  app:
+    image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+    volumes:
+      - ..:/workspace:cached
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
+    command: sleep infinity

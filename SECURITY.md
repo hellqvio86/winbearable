@@ -8,11 +8,13 @@
 - **Zero PowerShell wrappers:** All registry reads/writes use Python's standard library `winreg` module, and external commands (`wsl.exe`, `sc.exe`, `taskkill.exe`) use structured argument lists (`shell=False`) with zero command string interpolation.
 - **No telemetry or phone-home:** `winbearable` makes zero outbound network requests at runtime and stores rollback state locally in `%LOCALAPPDATA%\winbearable\state.json`.
 - **Dry-run by default:** Nothing is modified unless `--apply` is explicitly passed. High-risk tweaks additionally require `--i-know-what-im-doing`.
+- **Zero Support / User Responsibility:** This project is open-source software provided strictly AS-IS with zero support. Users are responsible for their own machines, inspecting the local audit/snapshot log (`%LOCALAPPDATA%\winbearable\state.json`), and complying with their organization's policies.
 
 ## Supported Versions
 
 | Version | Supported |
 | :--- | :--- |
+| `0.2.x` | Yes |
 | `0.1.x` | Yes |
 
 ## Reporting a Vulnerability

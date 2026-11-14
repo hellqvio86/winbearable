@@ -1,5 +1,13 @@
 # Frequently Asked Questions (FAQ)
 
+## 0. What if my PC breaks? Do you offer support?
+
+**No. Zero support. You are on your own.**
+
+`winbearable` is free, open-source software provided strictly **AS-IS**. Be sensible before applying tweaks:
+1. Always run `wb plan` first and read the exact registry keys, services, and tasks that will be changed.
+2. If something behaves unexpectedly after applying a profile, **inspect your local audit log** (`%LOCALAPPDATA%\winbearable\state.json` and `%LOCALAPPDATA%\winbearable\backups\<run-id>\*.reg`) to see every exact modification that was made, and revert it with `wb rollback --apply`.
+
 ## 1. Will `winbearable` break Windows Update?
 
 **No.** Unlike destructive "debloat" scripts that rip out `wuauserv`, `UsoSvc`, `CryptSvc`, or component store packages via wildcard PowerShell commands, `winbearable` never disables Windows Update services or deletes system servicing components. All tweaks use documented Windows registry keys (`HKCU` user preferences or `HKLM\SOFTWARE\Policies` policy keys) and can be reverted at any time via `wb rollback --apply`.

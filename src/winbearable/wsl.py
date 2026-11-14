@@ -37,9 +37,7 @@ def format_host_memory_gib(host_memory_bytes: int) -> str:
 def merge_ini_preserving_comments(existing_text: str, desired_sections: dict[str, dict[str, str]]) -> str:
     """Merge desired INI sections/keys into existing_text while preserving comments and custom keys."""
     lines = existing_text.splitlines() if existing_text else []
-    remaining_sections: dict[str, dict[str, str]] = {
-        sec: dict(kv_map) for sec, kv_map in desired_sections.items()
-    }
+    remaining_sections: dict[str, dict[str, str]] = {sec: dict(kv_map) for sec, kv_map in desired_sections.items()}
 
     output_lines: list[str] = []
     current_section: str | None = None
@@ -90,9 +88,7 @@ def merge_ini_preserving_comments(existing_text: str, desired_sections: dict[str
 
 def build_wslconfig_sections(spec: WslConfigSpec, host_memory_bytes: int) -> dict[str, dict[str, str]]:
     """Build desired [wsl2] and [experimental] sections for %UserProfile%\\.wslconfig (75% host RAM)."""
-    sized_memory_gb = (
-        spec.memory_gb if spec.memory_gb is not None else calculate_wsl_memory_gib(host_memory_bytes)
-    )
+    sized_memory_gb = spec.memory_gb if spec.memory_gb is not None else calculate_wsl_memory_gib(host_memory_bytes)
     swap_gb = max(2, sized_memory_gb // 4)
 
     wsl2_sec: dict[str, str] = {

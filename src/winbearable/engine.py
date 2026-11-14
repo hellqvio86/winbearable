@@ -270,8 +270,7 @@ def apply_profile(
     ]
     if not dry_run and drifted_high_risk and not allow_high_risk:
         raise HighRiskConfirmationError(
-            f"Refusing to apply high-risk tweak(s) ({', '.join(drifted_high_risk)}) "
-            "without --i-know-what-im-doing."
+            f"Refusing to apply high-risk tweak(s) ({', '.join(drifted_high_risk)}) without --i-know-what-im-doing."
         )
 
     applied_ids: list[str] = []

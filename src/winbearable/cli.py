@@ -305,9 +305,7 @@ def run_cli(
                         )
                         for snap in rec.registry_snapshots:
                             target_desc = (
-                                f"{snap.previous_data!r} ({snap.previous_type})"
-                                if snap.value_existed
-                                else "<deleted>"
+                                f"{snap.previous_data!r} ({snap.previous_type})" if snap.value_existed else "<deleted>"
                             )
                             sys.stdout.write(
                                 f"  Registry restore: {snap.full_key_path} "
