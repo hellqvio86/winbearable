@@ -8,16 +8,14 @@ JSON_SCHEMA_VERSION = "1.0"
 APP_NAME = "winbearable"
 CLI_NAME = "wb"
 
-# Windows Build Numbers — Latest Windows 11 Only (24H2 / 25H2+)
-# We do not support Windows 10 or older Windows 11 builds.
+# Windows Build Numbers — Maintainer's Current Windows 11 Build Only (26300+)
+# Everything below 26300 is unsupported.
 BUILD_WIN11_24H2 = 26100
 BUILD_WIN11_25H2 = 26200
-MIN_SUPPORTED_BUILD = BUILD_WIN11_24H2
+BUILD_WIN11_CURRENT = 26300
+MIN_SUPPORTED_BUILD = BUILD_WIN11_CURRENT
 
-DEFAULT_TESTED_BUILDS: tuple[int, ...] = (
-    BUILD_WIN11_24H2,
-    BUILD_WIN11_25H2,
-)
+DEFAULT_TESTED_BUILDS: tuple[int, ...] = (MIN_SUPPORTED_BUILD,)
 
 # Registry Hives
 HIVE_HKCU = "HKCU"

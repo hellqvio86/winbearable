@@ -6,9 +6,9 @@ from pathlib import Path
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
 from winbearable.const import (
-    BUILD_WIN11_24H2,
     HIVE_HKCU,
     HIVE_HKLM,
+    MIN_SUPPORTED_BUILD,
     ONEDRIVE_PROCESS_NAME,
     REG_DWORD,
     REG_SZ,
@@ -51,7 +51,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             }
         )
         system = InMemorySystemBackend(
-            windows_build=BUILD_WIN11_24H2,
+            windows_build=MIN_SUPPORTED_BUILD,
             is_admin=False,
             running_processes={ONEDRIVE_PROCESS_NAME},
         )
@@ -133,7 +133,7 @@ class TestEngineAndTweaks(unittest.TestCase):
                 ): (0, REG_DWORD),
             }
         )
-        system = InMemorySystemBackend(windows_build=BUILD_WIN11_24H2, is_admin=False)
+        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
         env = system.detect_environment(registry)
         tweak = get_tweak("search.disable_bing")
 
@@ -161,7 +161,7 @@ class TestEngineAndTweaks(unittest.TestCase):
     def test_admin_tweak_skipped_when_unprivileged(self) -> None:
         """Admin tweaks report REQUIRES_ADMIN and are skipped when running without elevation."""
         registry = InMemoryRegistryBackend()
-        system = InMemorySystemBackend(windows_build=BUILD_WIN11_24H2, is_admin=False)
+        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
         env = system.detect_environment(registry)
 
         owner_profile = load_profile("owner")
@@ -227,7 +227,7 @@ class TestEngineAndTweaks(unittest.TestCase):
     def test_vscode_winget_install_and_rollback(self) -> None:
         """apps.install_vscode installs Microsoft.VisualStudioCode + Remote-WSL and uninstalls on rollback."""
         registry = InMemoryRegistryBackend()
-        system = InMemorySystemBackend(windows_build=BUILD_WIN11_24H2, is_admin=False)
+        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
         env = system.detect_environment(registry)
         profile = ProfileSpec(
             name="vscode-test",
@@ -259,7 +259,7 @@ class TestEngineAndTweaks(unittest.TestCase):
     def test_high_risk_requires_explicit_confirmation(self) -> None:
         """High-risk tweaks (e.g. VBS/HVCI) refuse to apply without allow_high_risk=True."""
         registry = InMemoryRegistryBackend()
-        system = InMemorySystemBackend(windows_build=BUILD_WIN11_24H2, is_admin=True)
+        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
         env = system.detect_environment(registry)
         paranoid_profile = load_profile("paranoid")
 
@@ -300,7 +300,7 @@ class TestEngineAndTweaks(unittest.TestCase):
                 (HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\WSearch", "Start"): (2, REG_DWORD),
             }
         )
-        system = InMemorySystemBackend(windows_build=BUILD_WIN11_24H2, is_admin=True)
+        system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
         env = system.detect_environment(registry)
 
         all_tweaks = get_all_tweaks()
@@ -444,7 +444,7 @@ class TestEngineAndTweaks(unittest.TestCase):
     def test_p2_1_separated_audit_dimensions_and_cis_provenance(self) -> None:
         """UI-only profiles cannot raise security score, and CIS controls carry traceable mappings."""
         reg = InMemoryRegistryBackend()
-        sys_b = InMemorySystemBackend(windows_build=BUILD_WIN11_24H2, is_admin=False)
+        sys_b = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
         env = sys_b.detect_environment(reg)
 
         before = calculate_hardening_score(env, reg, sys_b)

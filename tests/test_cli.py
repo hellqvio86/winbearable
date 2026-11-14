@@ -55,7 +55,7 @@ class TestCli(unittest.TestCase):
         code, stdout, _ = self._invoke(["doctor", "--json"])
         self.assertEqual(code, 0)
         payload = json.loads(stdout)
-        self.assertEqual(payload["environment"]["windows_build"], 26100)
+        self.assertEqual(payload["environment"]["windows_build"], 26300)
         self.assertIn("audit", payload)
 
         code_human, stdout_human, _ = self._invoke(["doctor"])

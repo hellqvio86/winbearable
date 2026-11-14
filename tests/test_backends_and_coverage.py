@@ -1507,7 +1507,7 @@ class TestBackendsAndCoverage(unittest.TestCase):
         from winbearable.tui import apply_from_tui
 
         reg = InMemoryRegistryBackend()
-        sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26100)
+        sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
         env = sys_b.detect_environment(reg)
         audit = calculate_hardening_score(env, reg, sys_b)
         self.assertIn("confidence", audit["dimensions"]["security"])

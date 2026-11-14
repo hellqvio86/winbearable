@@ -14,7 +14,6 @@ from typing import Any, Protocol
 from ..const import (
     APPLOCKER_POLICIES_KEY,
     BITLOCKER_STATUS_KEY,
-    BUILD_WIN11_24H2,
     CLOUD_DOMAIN_JOIN_KEY,
     DEFAULT_CMD_TIMEOUT,
     DEFENDER_KEY,
@@ -23,6 +22,7 @@ from ..const import (
     ENV_CMD_TIMEOUT,
     HIVE_HKLM,
     MDM_ENROLLMENTS_KEY,
+    MIN_SUPPORTED_BUILD,
     NT_CURRENT_VERSION_KEY,
     ONEDRIVE_SETUP_CANDIDATES,
     REG_DWORD,
@@ -593,7 +593,7 @@ class InMemorySystemBackend:
     def __init__(
         self,
         is_windows: bool = True,
-        windows_build: int = BUILD_WIN11_24H2,
+        windows_build: int = MIN_SUPPORTED_BUILD,
         display_version: str = "24H2",
         edition: str = "Professional",
         is_admin: bool = False,

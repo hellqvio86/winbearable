@@ -320,13 +320,12 @@ When running inside **WSL2**, you can audit your live Windows host and see which
 
 ## Windows Build Support Policy
 
-We don't like Windows enough to maintain legacy workarounds for EOL operating systems. **Only the latest Windows 11 releases (24H2 / 25H2+, build `>= 26100`) are supported.**
+We don't like Windows enough to maintain legacy workarounds for older builds. **Only the maintainer's current Windows 11 build (`>= 26300`) is supported.**
 
 | Build Number | OS Release | Support Status |
 | :--- | :--- | :--- |
-| `26200+` | Windows 11 25H2 | **Supported** |
-| `26100` | Windows 11 24H2 | **Supported** |
-| `< 26100` | Older Windows 11 / Windows 10 | **Unsupported (`unsupported_build`)** |
+| `26300+` | Windows 11 (maintainer build) | **Supported** |
+| `< 26300` | Older Windows 11 / Windows 10 | **Unsupported (`unsupported_build`)** |
 
 ---
 
