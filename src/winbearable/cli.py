@@ -287,11 +287,30 @@ def run_cli(
             if args.json:
                 _print_json(payload)
             else:
+                linux_info = wsl_info.get("linux", {}) if isinstance(wsl_info, dict) else {}
+
+                def _fmt_linux_block(li: dict[str, Any]) -> str:
+                    if not li or not li.get("is_linux"):
+                        return ""
+                    return (
+                        f"Linux Side (WSL2={li.get('is_wsl2')}, Distro={li.get('distro') or 'unknown'}):\n"
+                        f"  /etc/wsl.conf: exists={li.get('wsl_conf_exists')} "
+                        f"| interop={li.get('interop_enabled')} "
+                        f"| automount={li.get('automount_enabled')} "
+                        f"| appendWindowsPath={li.get('append_windows_path')} "
+                        f"| systemd_conf={li.get('systemd_configured')}\n"
+                        f"  systemd running={li.get('systemd_running')} "
+                        f"| sysctl baseline file={li.get('sysctl_baseline_file_exists')} "
+                        f"| sysctl applied={li.get('sysctl_baseline_applied')} "
+                        f"| git cred isolated={li.get('git_credential_helper_isolated')}\n"
+                    )
+
                 if not (env.is_windows or env.host_auditable):
                     sys.stdout.write(
                         f"winbearable v{__version__} — Doctor Report\n"
-                        f"OS: {env.os_name} (not running on Windows and WSL2 interop unavailable — "
-                        "run `wb doctor` from Windows Terminal)\n"
+                        f"OS: {env.os_name} (Windows host audit unavailable — WSL2 interop disabled or not on Windows; "
+                        "run `wb doctor` from Windows Terminal for Windows host checks)\n"
+                        f"{_fmt_linux_block(linux_info)}"
                     )
                 else:
                     distros_str = ", ".join(env.wsl_distros) or "none"
@@ -318,6 +337,7 @@ def run_cli(
                         f"| Secure Boot: {_fmt_obs('secure_boot_enabled', env.secure_boot_enabled)} "
                         f"| BitLocker: {_fmt_obs('bitlocker_protected', env.bitlocker_protected)}\n"
                         f"WSL Installed: {env.wsl_installed} (Version: {env.wsl_version}, Distros: {distros_str})\n"
+                        f"{_fmt_linux_block(linux_info)}"
                         f"Security Controls: {sec.get('passed', 0)}/{sec.get('total_applicable', 0)} "
                         f"({sec.get('score_percent', 0.0)}%) | "
                         f"Privacy: {priv.get('passed', 0)}/{priv.get('total_applicable', 0)} | "

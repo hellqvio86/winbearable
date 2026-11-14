@@ -289,6 +289,8 @@ When running inside **WSL2**, you can audit your live Windows host and see which
 
    When WSL2→Windows interop is enabled (`[interop] enabled = true`, which `user-only` and `owner` preserve), `wb` automatically queries the Windows host registry read-only via `/mnt/c/Windows/System32/reg.exe` so `wb doctor`, `wb status`, and `wb plan` reflect live Windows posture. Applying or rolling back (`--apply`) is still intentionally blocked from Linux and must be run from Windows.
 
+   `wb doctor` also audits the **Linux side** directly from Linux (`/etc/wsl.conf`, `systemd` status, `/etc/sysctl.d/99-winbearable-wsl.conf` and live `/proc/sys` kernel parameters, and `git` credential helper isolation) — even when Windows interop is disabled.
+
 2. **Via `wb.exe` from WSL2 bash:**
 
    ```bash
@@ -296,7 +298,7 @@ When running inside **WSL2**, you can audit your live Windows host and see which
    wb.exe status --profile owner
    ```
 
-> **Note for `paranoid` users:** The `paranoid` profile sets `[interop] enabled = false` in `.wslconfig` to block Linux→Windows binary execution. After applying `paranoid`, run `wb doctor` and `wb status --profile paranoid` from **Windows Terminal** (PowerShell / Command Prompt) instead of inside WSL2.
+> **Note for `paranoid` users:** The `paranoid` profile sets `[interop] enabled = false` in `.wslconfig` to block Linux→Windows binary execution. After applying `paranoid`, `wb doctor` inside WSL2 still audits the Linux side, while Windows-host checks (`wb doctor` and `wb status --profile paranoid`) should be run from **Windows Terminal** (PowerShell / Command Prompt).
 
 ---
 

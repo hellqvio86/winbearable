@@ -989,6 +989,77 @@ class TestBackendsAndCoverage(unittest.TestCase):
             self.assertTrue(env.host_auditable)
             self.assertEqual(env.os_name, "Linux (WSL2 -> Windows host)")
 
+    def test_audit_linux_side_and_wsl_doctor(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from winbearable.wsl import audit_linux_side
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wsl_conf = root / "wsl.conf"
+            wsl_conf.write_text(
+                "[automount]\nenabled = false\n[interop]\nenabled = false\n"
+                "appendWindowsPath = false\n[boot]\nsystemd = true\n",
+                encoding="utf-8",
+            )
+            sysctl_conf = root / "99-winbearable-wsl.conf"
+            sysctl_conf.write_text("kernel.kptr_restrict = 2\n", encoding="utf-8")
+
+            proc_sys = root / "proc_sys"
+            (proc_sys / "kernel").mkdir(parents=True)
+            (proc_sys / "net" / "ipv4" / "conf" / "all").mkdir(parents=True)
+            (proc_sys / "net" / "ipv4" / "conf" / "default").mkdir(parents=True)
+            (proc_sys / "kernel" / "kptr_restrict").write_text("2\n", encoding="utf-8")
+            (proc_sys / "kernel" / "dmesg_restrict").write_text("1\n", encoding="utf-8")
+            (proc_sys / "net" / "ipv4" / "conf" / "all" / "rp_filter").write_text("1\n", encoding="utf-8")
+            (proc_sys / "net" / "ipv4" / "conf" / "default" / "rp_filter").write_text("1\n", encoding="utf-8")
+
+            systemd_dir = root / "systemd"
+            systemd_dir.mkdir()
+            git_cfg = root / "gitconfig"
+            git_cfg.write_text("[user]\nname = test\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu"}):
+                linux_ok = audit_linux_side(
+                    wsl_conf_path=wsl_conf,
+                    sysctl_conf_path=sysctl_conf,
+                    proc_sys_root=proc_sys,
+                    systemd_marker_path=systemd_dir,
+                    git_config_path=git_cfg,
+                    platform_override="linux",
+                )
+            self.assertTrue(linux_ok["is_linux"])
+            self.assertTrue(linux_ok["is_wsl2"])
+            self.assertEqual(linux_ok["distro"], "Ubuntu")
+            self.assertFalse(linux_ok["automount_enabled"])
+            self.assertFalse(linux_ok["interop_enabled"])
+            self.assertFalse(linux_ok["append_windows_path"])
+            self.assertTrue(linux_ok["systemd_configured"])
+            self.assertTrue(linux_ok["systemd_running"])
+            self.assertTrue(linux_ok["sysctl_baseline_file_exists"])
+            self.assertTrue(linux_ok["sysctl_baseline_applied"])
+            self.assertTrue(linux_ok["git_credential_helper_isolated"])
+
+            # Verify Windows credential helper leakage & missing sysctl detection
+            git_cfg.write_text(
+                "[credential]\nhelper = /mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe\n",
+                encoding="utf-8",
+            )
+            (proc_sys / "kernel" / "kptr_restrict").write_text("0\n", encoding="utf-8")
+            linux_bad = audit_linux_side(
+                wsl_conf_path=wsl_conf,
+                sysctl_conf_path=sysctl_conf,
+                proc_sys_root=proc_sys,
+                systemd_marker_path=systemd_dir,
+                git_config_path=git_cfg,
+                platform_override="linux",
+            )
+            self.assertFalse(linux_bad["sysctl_baseline_applied"])
+            self.assertFalse(linux_bad["git_credential_helper_isolated"])
+
 
 if __name__ == "__main__":
     unittest.main()

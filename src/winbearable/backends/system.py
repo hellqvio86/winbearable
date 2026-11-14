@@ -848,9 +848,13 @@ class NativeSystemBackend:
             run_cmd=self._run_native_cmd if is_win else None,
         )
 
-        wsl_installed = wsl_interop_audit
+        wsl_installed = wsl_interop_audit or (self._platform == "linux" and is_wsl2())
         wsl_version: str | None = None
         wsl_distros: list[str] = []
+        if self._platform == "linux" and is_wsl2():
+            distro_name = os.environ.get("WSL_DISTRO_NAME", "").strip()
+            if distro_name:
+                wsl_distros = [distro_name]
 
         if is_win:
             ver_res = self._run_native_cmd(["wsl.exe", "--version"])

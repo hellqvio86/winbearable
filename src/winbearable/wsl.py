@@ -4,10 +4,13 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from .backends.registry import is_wsl2
 from .backends.system import GIB_BYTES, SystemBackend
 from .models import EnvironmentInfo, WslConfigSpec
 
@@ -264,8 +267,129 @@ def plan_or_apply_wsl(
     }
 
 
+def _parse_bool_flag(raw: str | None) -> bool | None:
+    if raw is None or raw == "":
+        return None
+    low = raw.strip().lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    return None
+
+
+def _read_proc_sys_value(proc_sys_root: Path, rel_path: str) -> str | None:
+    target = proc_sys_root / rel_path
+    try:
+        if not target.is_file():
+            return None
+        return target.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+
+
+def _read_git_system_credential_helpers(git_config_path: Path | None = None) -> list[str]:
+    if git_config_path is not None:
+        if not git_config_path.is_file():
+            return []
+        sections = _parse_ini_sections(git_config_path.read_text(encoding="utf-8", errors="replace"))
+        helper = sections.get("credential", {}).get("helper", "").strip()
+        return [helper] if helper else []
+    git_exe = shutil.which("git")
+    if git_exe is None:
+        return []
+    try:
+        res = subprocess.run(
+            [git_exe, "config", "--system", "--get-all", "credential.helper"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+            shell=False,
+        )
+        if res.returncode != 0:
+            return []
+        return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def audit_linux_side(
+    wsl_conf_path: Path | None = None,
+    sysctl_conf_path: Path | None = None,
+    proc_sys_root: Path | None = None,
+    systemd_marker_path: Path | None = None,
+    git_config_path: Path | None = None,
+    platform_override: str | None = None,
+) -> dict[str, Any]:
+    """Audit Linux-side WSL2 settings: /etc/wsl.conf, sysctl baseline, systemd, and git credential isolation."""
+    target_platform = platform_override or sys.platform
+    is_linux = target_platform == "linux"
+    if not is_linux:
+        return {
+            "is_linux": False,
+            "is_wsl2": False,
+            "distro": None,
+            "wsl_conf_exists": False,
+            "automount_enabled": None,
+            "interop_enabled": None,
+            "append_windows_path": None,
+            "systemd_configured": None,
+            "systemd_running": False,
+            "sysctl_baseline_file_exists": False,
+            "sysctl_baseline_applied": False,
+            "sysctl_values": {},
+            "git_system_credential_helper": [],
+            "git_credential_helper_isolated": True,
+        }
+
+    wsl_conf = wsl_conf_path or Path("/etc/wsl.conf")
+    has_wsl_conf = wsl_conf.is_file()
+    conf_sections = _parse_ini_sections(wsl_conf.read_text(encoding="utf-8", errors="replace")) if has_wsl_conf else {}
+    automount_sec = conf_sections.get("automount", {})
+    interop_sec = conf_sections.get("interop", {})
+    boot_sec = conf_sections.get("boot", {})
+
+    sysctl_conf = sysctl_conf_path or Path("/etc/sysctl.d/99-winbearable-wsl.conf")
+    proc_root = proc_sys_root or Path("/proc/sys")
+    systemd_marker = systemd_marker_path or Path("/run/systemd/system")
+
+    expected_sysctl = {
+        "kernel.kptr_restrict": ("kernel/kptr_restrict", "2"),
+        "kernel.dmesg_restrict": ("kernel/dmesg_restrict", "1"),
+        "net.ipv4.conf.all.rp_filter": ("net/ipv4/conf/all/rp_filter", "1"),
+        "net.ipv4.conf.default.rp_filter": ("net/ipv4/conf/default/rp_filter", "1"),
+    }
+    sysctl_values = {key: _read_proc_sys_value(proc_root, rel_path) for key, (rel_path, _) in expected_sysctl.items()}
+    sysctl_applied = all(sysctl_values.get(key) == expected for key, (_, expected) in expected_sysctl.items())
+
+    git_helpers = _read_git_system_credential_helpers(git_config_path)
+    git_isolated = not any(token in helper.lower() for helper in git_helpers for token in ("wincred", "gcm", ".exe"))
+
+    return {
+        "is_linux": True,
+        "is_wsl2": is_wsl2()
+        if platform_override is None
+        else ("WSL_DISTRO_NAME" in os.environ or "WSL_INTEROP" in os.environ),
+        "distro": os.environ.get("WSL_DISTRO_NAME"),
+        "wsl_conf_path": str(wsl_conf),
+        "wsl_conf_exists": has_wsl_conf,
+        "automount_enabled": _parse_bool_flag(automount_sec.get("enabled")),
+        "interop_enabled": _parse_bool_flag(interop_sec.get("enabled")),
+        "append_windows_path": _parse_bool_flag(interop_sec.get("appendWindowsPath")),
+        "systemd_configured": _parse_bool_flag(boot_sec.get("systemd")),
+        "systemd_running": systemd_marker.is_dir(),
+        "sysctl_baseline_file_exists": sysctl_conf.is_file(),
+        "sysctl_baseline_applied": sysctl_applied,
+        "sysctl_values": sysctl_values,
+        "git_system_credential_helper": git_helpers,
+        "git_credential_helper_isolated": git_isolated,
+    }
+
+
 def audit_wsl(env: EnvironmentInfo, wslconfig_path: Path | None = None) -> dict[str, Any]:
-    """Audit host WSL2 status, distros, and .wslconfig presence."""
+    """Audit host WSL2 status, distros, .wslconfig presence, and Linux-side configuration."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     has_wslconfig = target_wslconfig.is_file()
     wslconfig_text = target_wslconfig.read_text(encoding="utf-8") if has_wslconfig else ""
@@ -281,6 +405,7 @@ def audit_wsl(env: EnvironmentInfo, wslconfig_path: Path | None = None) -> dict[
         "mirrored_networking": wsl2_sec.get("networkingMode", "").lower() == "mirrored",
         "firewall_enabled": wsl2_sec.get("firewall", "").lower() == "true",
         "dns_tunneling": wsl2_sec.get("dnsTunneling", "").lower() == "true",
+        "linux": audit_linux_side(),
     }
 
 
