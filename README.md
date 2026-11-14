@@ -210,15 +210,6 @@ make release-check # lint + test + TruffleHog + Trivy
 
 ---
 
-## 💖 Support & Donate
-
-If `winbearable` made your forced Windows + WSL2 setup bearable, consider supporting the project:
-
-- **GitHub Sponsors:** [github.com/sponsors/hellqvio86](https://github.com/sponsors/hellqvio86)
-- **Buy Me a Coffee:** [buymeacoffee.com/olofhellqvc](https://www.buymeacoffee.com/olofhellqvc)
-
----
-
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
