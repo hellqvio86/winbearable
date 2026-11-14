@@ -430,7 +430,7 @@ class NativeSystemBackend:
         if self._platform != "win32":
             return False
         res = self._run_native_cmd(
-            ["dism.exe", "/Online", f"/Get-FeatureInfo", f"/FeatureName:{feature_name}"]
+            ["dism.exe", "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}"]
         )
         if res.returncode != 0:
             return None
