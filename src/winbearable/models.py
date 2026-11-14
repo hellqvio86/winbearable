@@ -24,6 +24,10 @@ def _decode_registry_data(raw: Any) -> RegistryValueData:
     return None
 
 
+class UnsupportedPlatformError(RuntimeError):
+    """Raised when a Windows-only mutating command is invoked on a non-Windows host."""
+
+
 class RiskLevel(StrEnum):
     """Risk classification for a tweak."""
 
@@ -559,6 +563,7 @@ class RunRecord:
     feature_snapshots: tuple[OptionalFeatureSnapshot, ...] = ()
     installed_winget_packages: tuple[str, ...] = ()
     installed_vscode_extensions: tuple[str, ...] = ()
+    completed_operations: tuple[str, ...] = ()
     state: TransactionState = TransactionState.COMMITTED
     error: str | None = None
 
@@ -575,6 +580,7 @@ class RunRecord:
             "feature_snapshots": [snap.to_dict() for snap in self.feature_snapshots],
             "installed_winget_packages": list(self.installed_winget_packages),
             "installed_vscode_extensions": list(self.installed_vscode_extensions),
+            "completed_operations": list(self.completed_operations),
             "state": str(self.state),
             "error": self.error,
         }
@@ -588,6 +594,7 @@ class RunRecord:
         feat_snaps = tuple(OptionalFeatureSnapshot.from_dict(item) for item in payload.get("feature_snapshots", []))
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
         vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
+        completed_ops = tuple(str(item) for item in payload.get("completed_operations", []))
         raw_state = payload.get("state", TransactionState.COMMITTED)
         raw_error = payload.get("error")
         return cls(
@@ -601,6 +608,7 @@ class RunRecord:
             feature_snapshots=feat_snaps,
             installed_winget_packages=winget_pkgs,
             installed_vscode_extensions=vscode_exts,
+            completed_operations=completed_ops,
             state=TransactionState(str(raw_state)),
             error=str(raw_error) if raw_error is not None else None,
         )

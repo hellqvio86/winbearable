@@ -540,8 +540,11 @@ class SystemBackend(Protocol):
     def stop_process(self, process_name: str, force: bool = False) -> bool:
         """Terminate running process gracefully via taskkill.exe, using /F only when force=True."""
 
+    def is_onedrive_installed(self) -> bool:
+        """Return True if OneDrive client binary or process is present on the system."""
+
     def uninstall_onedrive_client(self) -> bool:
-        """Invoke OneDriveSetup.exe /uninstall directly with shell=False."""
+        """Invoke OneDriveSetup.exe /uninstall directly with shell=False and verify removal."""
 
     def is_winget_package_installed(self, package_id: str) -> bool:
         """Return True if the specified winget package ID is installed."""
@@ -559,6 +562,9 @@ class SystemBackend(Protocol):
 
     def is_vscode_extension_installed(self, extension_id: str) -> bool:
         """Return True if the specified VS Code extension is installed."""
+
+    def install_vscode_extension(self, extension_id: str) -> bool:
+        """Install a VS Code extension natively via code.cmd."""
 
     def uninstall_vscode_extension(self, extension_id: str) -> bool:
         """Uninstall a VS Code extension natively via code.cmd."""
@@ -698,6 +704,9 @@ class InMemorySystemBackend:
             return True
         return False
 
+    def is_onedrive_installed(self) -> bool:
+        return not self.onedrive_uninstalled
+
     def uninstall_onedrive_client(self) -> bool:
         self.onedrive_uninstalled = True
         return True
@@ -724,6 +733,10 @@ class InMemorySystemBackend:
 
     def is_vscode_extension_installed(self, extension_id: str) -> bool:
         return extension_id in self.installed_vscode_extensions
+
+    def install_vscode_extension(self, extension_id: str) -> bool:
+        self.installed_vscode_extensions.add(extension_id)
+        return True
 
     def uninstall_vscode_extension(self, extension_id: str) -> bool:
         if extension_id in self.installed_vscode_extensions:
@@ -1011,13 +1024,30 @@ class NativeSystemBackend:
         force_res = self._run_native_cmd(["taskkill.exe", "/F", "/IM", process_name], timeout=30.0)
         return force_res.returncode == 0 and not self.is_process_running(process_name)
 
+    def is_onedrive_installed(self) -> bool:
+        if self._platform != "win32":
+            return False
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        prog_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        binary_candidates = [
+            Path(local_app) / "Microsoft" / "OneDrive" / "OneDrive.exe" if local_app else None,
+            Path(prog_files) / "Microsoft OneDrive" / "OneDrive.exe",
+            Path(prog_x86) / "Microsoft OneDrive" / "OneDrive.exe",
+        ]
+        if any(cand is not None and cand.is_file() for cand in binary_candidates):
+            return True
+        return self.is_process_running("OneDrive.exe")
+
     def uninstall_onedrive_client(self) -> bool:
         if self._platform != "win32":
             return False
         for candidate in self._setup_candidates:
             if Path(candidate).is_file():
                 res = self._run_native_cmd([candidate, "/uninstall"])
-                return res.returncode == 0
+                if res.returncode != 0:
+                    return False
+                return not self.is_onedrive_installed()
         return False
 
     def is_winget_package_installed(self, package_id: str) -> bool:
@@ -1073,11 +1103,16 @@ class NativeSystemBackend:
         if not self.is_winget_package_installed(package_id):
             return False
         for ext in vscode_extensions:
-            ext_res = self._run_native_cmd(["code.cmd", "--install-extension", ext, "--force"], timeout=120.0)
-            if ext_res.returncode != 0:
+            if not self.install_vscode_extension(ext):
                 return False
         self._winget_installed_cache[package_id.lower()] = True
         return True
+
+    def install_vscode_extension(self, extension_id: str) -> bool:
+        if self._platform != "win32":
+            return False
+        ext_res = self._run_native_cmd(["code.cmd", "--install-extension", extension_id, "--force"], timeout=120.0)
+        return ext_res.returncode == 0
 
     def uninstall_winget_package(self, package_id: str) -> bool:
         if self._platform != "win32":

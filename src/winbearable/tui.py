@@ -9,7 +9,14 @@ from typing import Any
 from .backends.registry import RegistryBackend
 from .backends.system import SystemBackend
 from .engine import ApplySummary, apply_profile, evaluate_profile
-from .models import EnvironmentInfo, ProfileSpec, RiskLevel, TweakCheckResult, TweakStatus
+from .models import (
+    EnvironmentInfo,
+    ProfileSpec,
+    RiskLevel,
+    TweakCheckResult,
+    TweakStatus,
+    UnsupportedPlatformError,
+)
 from .state import StateStore
 
 
@@ -44,6 +51,10 @@ def apply_from_tui(
     allow_high_risk: bool = False,
 ) -> ApplySummary:
     """Apply drifted tweaks in the profile from the TUI, recording rollback state."""
+    if not env.is_windows:
+        raise UnsupportedPlatformError(
+            f"Applying tweaks from the TUI is only supported on Windows (current OS: {env.os_name})."
+        )
     return apply_profile(
         profile=profile,
         env=env,
@@ -239,6 +250,9 @@ def _build_textual_app(  # pragma: no cover
 
     def _action_request_apply(self: Any) -> None:
         if self._busy:
+            return
+        if not env.is_windows:
+            self._set_status("Applying tweaks from the TUI is only supported on Windows (read-only mode).")
             return
         drifted = [item for item in self._evaluations if item.status == TweakStatus.DRIFTED]
         if not drifted:

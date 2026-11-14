@@ -484,18 +484,23 @@ def import_wsl_distro(
     }
 
 
+def _is_windows_credential_helper(helper: str) -> bool:
+    low = helper.strip().lower()
+    return any(token in low for token in ("wincred", "gcm", ".exe", "/mnt/c/"))
+
+
 def apply_wsl_linux_baseline(
     system: SystemBackend,
     distro: str,
     dotfiles_repo: str | None = None,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """Configure Linux-side sysctl baseline, isolate git credential helper, and optional chezmoi dotfiles."""
+    """Configure Linux-side sysctl baseline, isolate Windows git credential helper, and optional chezmoi dotfiles."""
     sysctl_path = "/etc/sysctl.d/99-winbearable-wsl.conf"
     steps: list[str] = [
         f"Write {sysctl_path} (kptr_restrict=2, dmesg_restrict=1, rp_filter=1)",
         "Reload sysctl settings via sysctl --system",
-        "Isolate git credential helper from Windows Credential Manager",
+        "Remove Windows git credential helpers from system config (preserving native Linux helpers)",
     ]
     if dotfiles_repo:
         steps.append(f"Apply dotfiles via chezmoi init --apply {dotfiles_repo}")
@@ -510,11 +515,34 @@ def apply_wsl_linux_baseline(
         r2 = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sysctl", "--system"])
         if r2.returncode != 0:
             raise WslOperationError(f"Failed to reload sysctl in '{distro}': {r2.stderr}")
-        r3 = system.run_wsl_command(
-            ["-d", distro, "-u", "root", "--", "git", "config", "--system", "--unset-all", "credential.helper"]
+        r3_get = system.run_wsl_command(
+            ["-d", distro, "-u", "root", "--", "git", "config", "--system", "--get-all", "credential.helper"]
         )
-        if r3.returncode not in (0, 5):  # git config --unset-all returns 5 if key was absent
-            raise WslOperationError(f"Failed to isolate git credential.helper in '{distro}': {r3.stderr}")
+        if r3_get.returncode == 0:
+            for helper in [line.strip() for line in r3_get.stdout.splitlines() if line.strip()]:
+                if _is_windows_credential_helper(helper):
+                    r3_unset = system.run_wsl_command(
+                        [
+                            "-d",
+                            distro,
+                            "-u",
+                            "root",
+                            "--",
+                            "git",
+                            "config",
+                            "--system",
+                            "--unset",
+                            "credential.helper",
+                            helper,
+                        ]
+                    )
+                    if r3_unset.returncode not in (0, 5):
+                        raise WslOperationError(
+                            f"Failed to remove Windows git credential.helper '{helper}' in '{distro}': "
+                            f"{r3_unset.stderr}"
+                        )
+        elif r3_get.returncode not in (1, 5):
+            raise WslOperationError(f"Failed to inspect git credential.helper in '{distro}': {r3_get.stderr}")
         if dotfiles_repo:
             r4 = system.run_wsl_command(["-d", distro, "--", "chezmoi", "init", "--apply", dotfiles_repo])
             if r4.returncode != 0:

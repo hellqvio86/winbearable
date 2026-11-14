@@ -22,7 +22,7 @@ from .engine import (
     evaluate_profile,
     rollback_runs,
 )
-from .models import EnvironmentInfo, TweakStatus, WslConfigSpec
+from .models import EnvironmentInfo, TweakStatus, UnsupportedPlatformError, WslConfigSpec
 from .profiles import (
     ProfileValidationError,
     generate_init_profile_toml,
@@ -40,10 +40,6 @@ from .wsl import (
     install_wsl_distro,
     plan_or_apply_wsl,
 )
-
-
-class UnsupportedPlatformError(RuntimeError):
-    """Raised when a Windows-only mutating command is invoked on a non-Windows host."""
 
 
 def _require_windows_for_mutation(env: EnvironmentInfo, action: str) -> None:

@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -43,13 +44,14 @@ class StateStore:
 
     def __init__(self, state_path: Path | None = None) -> None:
         self.state_path = state_path or resolve_state_path()
+        self._tx_rlock = threading.RLock()
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _file_lock(self, suffix: str) -> Iterator[None]:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.state_path.parent, 0o700)
-        lock_path = self.state_path.with_suffix(".lock")
+        lock_path = self.state_path.with_suffix(suffix)
         with open(lock_path, "a+", encoding="utf-8") as lock_file:
             if sys.platform == "win32":
                 import msvcrt
@@ -69,6 +71,17 @@ class StateStore:
                     yield
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._file_lock(".lock"):
+            yield
+
+    @contextmanager
+    def transaction_lock(self) -> Iterator[None]:
+        """Serialize mutating apply/rollback transactions across threads and processes."""
+        with self._tx_rlock, self._file_lock(".tx.lock"):
+            yield
 
     def _load_runs_unlocked(self) -> list[RunRecord]:
         if not self.state_path.is_file():

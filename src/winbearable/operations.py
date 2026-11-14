@@ -202,6 +202,32 @@ class ProcessStopOperationAdapter:
         return ops, drifted, []
 
 
+class OneDriveOperationAdapter:
+    """Adapter for OneDrive client uninstallation and independent presence verification."""
+
+    kind = "onedrive_uninstall"
+
+    def inspect(
+        self,
+        tweak: TweakDefinition,
+        registry: RegistryBackend,
+        system: SystemBackend,
+    ) -> tuple[list[PlannedOperation], list[str], list[str]]:
+        if not tweak.uninstall_onedrive:
+            return [], [], []
+        installed = system.is_onedrive_installed()
+        op = PlannedOperation(
+            operation_type=self.kind,
+            target="OneDriveSetup.exe /uninstall",
+            action="uninstall",
+            before_state="present" if installed else "uninstalled",
+            after_state="uninstalled",
+            reversible=False,
+        )
+        drifted = ["OneDrive client: installed -> uninstalled"] if installed else []
+        return [op], drifted, []
+
+
 # Explicit dependency-ordered adapter chain
 OPERATION_ADAPTERS: tuple[OperationAdapter, ...] = (
     ServiceOperationAdapter(),
@@ -209,6 +235,7 @@ OPERATION_ADAPTERS: tuple[OperationAdapter, ...] = (
     FeatureOperationAdapter(),
     WingetOperationAdapter(),
     ProcessStopOperationAdapter(),
+    OneDriveOperationAdapter(),
 )
 
 

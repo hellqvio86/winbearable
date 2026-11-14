@@ -315,7 +315,10 @@ class TestBackendsAndCoverage(unittest.TestCase):
                     self.assertFalse(win_sys.stop_process("OneDrive.exe", force=False))
                 with patch.object(win_sys, "is_process_running", side_effect=[True, False]):
                     self.assertTrue(win_sys.stop_process("OneDrive.exe", force=True))
-                self.assertTrue(win_sys.uninstall_onedrive_client())
+                with patch.object(win_sys, "is_onedrive_installed", return_value=False):
+                    self.assertTrue(win_sys.uninstall_onedrive_client())
+                with patch.object(win_sys, "is_onedrive_installed", return_value=True):
+                    self.assertFalse(win_sys.uninstall_onedrive_client())
                 self.assertTrue(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
                 self.assertTrue(
                     win_sys.install_winget_package(
@@ -1059,6 +1062,95 @@ class TestBackendsAndCoverage(unittest.TestCase):
             )
             self.assertFalse(linux_bad["sysctl_baseline_applied"])
             self.assertFalse(linux_bad["git_credential_helper_isolated"])
+
+    def test_review_fixes_tui_exitcode_journal_wsl_winget_git(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from winbearable.backends.system import CommandResult
+        from winbearable.engine import apply_profile
+        from winbearable.models import ProfileSpec, TweakStatus, UnsupportedPlatformError, WslConfigSpec
+        from winbearable.state import StateStore
+        from winbearable.tui import apply_from_tui
+        from winbearable.wsl import apply_wsl_linux_baseline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = StateStore(root / "state.json")
+            reg = InMemoryRegistryBackend()
+
+            # 1. TUI & apply_profile block non-Windows mutations
+            linux_sys = InMemorySystemBackend(is_windows=False)
+            linux_env = linux_sys.detect_environment(reg)
+            profile = ProfileSpec(
+                name="test",
+                description="test",
+                wsl=WslConfigSpec(enabled=True, mode="strict"),
+                tweaks={"privacy.disable_advertising_id": True},
+            )
+            with self.assertRaises(UnsupportedPlatformError):
+                apply_from_tui(profile, linux_env, reg, linux_sys, store)
+
+            # 2. TweakStatus.ERROR is included in failed_ids
+            win_sys = InMemorySystemBackend(is_windows=True, is_admin=True, wsl_installed=True, wsl_distros=("Ubuntu",))
+            win_env = win_sys.detect_environment(reg)
+            with patch.object(reg, "get_value", side_effect=PermissionError("Access denied")):
+                err_summary = apply_profile(profile, win_env, reg, win_sys, store, dry_run=True)
+            self.assertIn("privacy.disable_advertising_id", err_summary.failed_ids)
+            self.assertEqual(err_summary.results[0].status, TweakStatus.ERROR)
+
+            # 3 & 4. Per-op checkpoints recorded & WSL strict mode applied to distros
+            wslcfg = root / ".wslconfig"
+            summary = apply_profile(
+                profile,
+                win_env,
+                reg,
+                win_sys,
+                store,
+                dry_run=False,
+                wslconfig_path=wslcfg,
+            )
+            self.assertFalse(summary.failed_ids)
+            self.assertIsNotNone(summary.wsl_result)
+            assert summary.wsl_result is not None
+            self.assertEqual(summary.wsl_result["distros_applied"][0]["distro"], "Ubuntu")
+            self.assertTrue(summary.wsl_result["distros_applied"][0]["distro_changed"])
+            runs = store.load_runs()
+            self.assertTrue(runs[-1].completed_operations)
+
+            # 5. Winget package recorded for rollback even if VS Code extension install fails
+            ext_profile = ProfileSpec(
+                name="dev",
+                description="dev",
+                wsl=WslConfigSpec(enabled=False),
+                tweaks={"apps.install_vscode": True},
+            )
+            with patch.object(win_sys, "install_vscode_extension", return_value=False):
+                winget_fail = apply_profile(ext_profile, win_env, reg, win_sys, store, dry_run=False)
+            self.assertIn("apps.install_vscode", winget_fail.failed_ids)
+            # Compensation should have uninstalled Microsoft.VisualStudioCode after failure
+            self.assertFalse(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
+
+            # 7. WSL git baseline removes Windows helpers only, preserving Linux helpers
+            unset_calls: list[list[str]] = []
+
+            def fake_wsl_cmd(args: list[str], input_text: str | None = None) -> CommandResult:
+                if "--get-all" in args:
+                    return CommandResult(
+                        args=tuple(args),
+                        returncode=0,
+                        stdout="/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe\nlibsecret\n",
+                        stderr="",
+                    )
+                if "--unset" in args:
+                    unset_calls.append(args)
+                return CommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
+
+            with patch.object(win_sys, "run_wsl_command", side_effect=fake_wsl_cmd):
+                apply_wsl_linux_baseline(win_sys, distro="Ubuntu", dry_run=False)
+            self.assertEqual(len(unset_calls), 1)
+            self.assertIn("git-credential-manager.exe", unset_calls[0][-1])
 
 
 if __name__ == "__main__":

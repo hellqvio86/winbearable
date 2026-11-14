@@ -3,6 +3,7 @@
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from .models import (
     TweakCheckResult,
     TweakDefinition,
     TweakStatus,
+    UnsupportedPlatformError,
 )
 from .operations import format_registry_op, inspect_non_registry_operations
 from .state import StateStore
@@ -242,18 +244,6 @@ def detect_tweak(
     planned_ops.extend(non_reg_ops)
     drifted_reasons.extend(non_reg_drifted)
 
-    if tweak.uninstall_onedrive:
-        planned_ops.append(
-            PlannedOperation(
-                operation_type="onedrive_uninstall",
-                target="OneDriveSetup.exe /uninstall",
-                action="uninstall",
-                before_state="present" if drifted_reasons else "uninstalled",
-                after_state="uninstalled",
-                reversible=False,
-            )
-        )
-
     ops_tuple = tuple(planned_ops)
 
     if not drifted_reasons and not unverified_reasons:
@@ -426,13 +416,20 @@ def _execute_tweak_mutations(
     newly_installed_winget: list[str],
     newly_installed_extensions: list[str],
     force_kill_processes: bool = False,
+    checkpoint_cb: Callable[[str], None] | None = None,
 ) -> None:
     """Apply all operations for a single tweak, raising RuntimeError on any failure."""
+
+    def _ckpt(op_desc: str) -> None:
+        if checkpoint_cb is not None:
+            checkpoint_cb(op_desc)
+
     for proc_name in tweak.stop_processes:
         if system.is_process_running(proc_name) and not system.stop_process(proc_name, force=force_kill_processes):
             raise RuntimeError(
                 f"Failed to stop process '{proc_name}' gracefully (pass --force-kill to force termination)."
             )
+        _ckpt(f"{tweak.tweak_id}:process_stop:{proc_name}")
 
     for reg_spec in tweak.registry_specs:
         subtree = (reg_spec.hive, reg_spec.key_path)
@@ -457,39 +454,48 @@ def _execute_tweak_mutations(
                 value_type=reg_spec.value_type,
                 view=reg_spec.view,
             )
+        _ckpt(f"{tweak.tweak_id}:registry:{reg_spec.hive}\\{reg_spec.key_path}\\{reg_spec.value_name}")
 
     for svc_spec in tweak.service_specs:
         if not system.set_service_start_type(registry, svc_spec.service_name, svc_spec.start_type):
             raise RuntimeError(
                 f"Failed to configure service '{svc_spec.service_name}' start_type={svc_spec.start_type}."
             )
+        _ckpt(f"{tweak.tweak_id}:service:{svc_spec.service_name}")
 
     for task_spec in tweak.task_specs:
         if not system.set_scheduled_task_enabled(task_spec.task_path, task_spec.enabled):
             raise RuntimeError(f"Failed to set scheduled task '{task_spec.task_path}' enabled={task_spec.enabled}.")
+        _ckpt(f"{tweak.tweak_id}:task:{task_spec.task_path}")
 
     for feat_spec in tweak.feature_specs:
         if not system.set_optional_feature_enabled(feat_spec.feature_name, feat_spec.enabled):
             raise RuntimeError(
                 f"Failed to set optional feature '{feat_spec.feature_name}' enabled={feat_spec.enabled}."
             )
+        _ckpt(f"{tweak.tweak_id}:feature:{feat_spec.feature_name}")
 
     for winget_spec in tweak.winget_specs:
         if not system.is_winget_package_installed(winget_spec.package_id):
-            missing_exts = [
-                ext for ext in winget_spec.vscode_extensions if not system.is_vscode_extension_installed(ext)
-            ]
             if not system.install_winget_package(
                 package_id=winget_spec.package_id,
                 scope=winget_spec.scope,
-                vscode_extensions=winget_spec.vscode_extensions,
+                vscode_extensions=(),
             ):
                 raise RuntimeError(f"Failed to install winget package '{winget_spec.package_id}'.")
             newly_installed_winget.append(winget_spec.package_id)
-            newly_installed_extensions.extend(missing_exts)
+            _ckpt(f"{tweak.tweak_id}:winget:{winget_spec.package_id}")
+        for ext in winget_spec.vscode_extensions:
+            if not system.is_vscode_extension_installed(ext):
+                if not system.install_vscode_extension(ext):
+                    raise RuntimeError(f"Failed to install VS Code extension '{ext}' for '{winget_spec.package_id}'.")
+                newly_installed_extensions.append(ext)
+                _ckpt(f"{tweak.tweak_id}:vscode_ext:{ext}")
 
-    if tweak.uninstall_onedrive and not system.uninstall_onedrive_client():
-        raise RuntimeError("Failed to uninstall OneDrive client.")
+    if tweak.uninstall_onedrive:
+        if not system.uninstall_onedrive_client():
+            raise RuntimeError("Failed to uninstall OneDrive client.")
+        _ckpt(f"{tweak.tweak_id}:onedrive_uninstall")
 
     post_check = detect_tweak(tweak, env, registry, system)
     if post_check.status != TweakStatus.APPLIED:
@@ -511,6 +517,8 @@ def apply_profile(
     wslconfig_path: Path | None = None,
 ) -> ApplySummary:
     """Plan or apply a profile with a write-ahead transaction journal and rollback on failure."""
+    if not dry_run and not env.is_windows:
+        raise UnsupportedPlatformError(f"Applying tweaks is only supported on Windows (current OS: {env.os_name}).")
     evaluations = evaluate_profile(profile, env, registry, system)
 
     drifted_high_risk = [
@@ -547,82 +555,94 @@ def apply_profile(
             skipped_admin_ids.append(res.tweak_id)
         elif res.status == TweakStatus.UNSUPPORTED_BUILD:
             skipped_build_ids.append(res.tweak_id)
+        elif res.status == TweakStatus.ERROR:
+            failed_ids.append(res.tweak_id)
         elif res.status == TweakStatus.DRIFTED and dry_run:
             applied_ids.append(res.tweak_id)
 
     run_id: str | None = None
     if not dry_run and drifted_indices:
-        run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
-        backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
-        reg_snapshots, svc_snapshots, task_snapshots, feat_snapshots = _collect_pre_apply_snapshots(
-            evaluations, registry, system
-        )
-        newly_installed_winget: list[str] = []
-        newly_installed_extensions: list[str] = []
-        exported_subtrees: set[tuple[str, str]] = set()
-        now_iso = datetime.now(tz=UTC).isoformat()
-
-        def _make_record(state: TransactionState, error: str | None = None) -> RunRecord:
-            return RunRecord(
-                run_id=run_id_candidate,
-                timestamp=now_iso,
-                profile_name=profile.name,
-                applied_tweaks=tuple(applied_ids),
-                registry_snapshots=tuple(reg_snapshots),
-                service_snapshots=tuple(svc_snapshots),
-                task_snapshots=tuple(task_snapshots),
-                feature_snapshots=tuple(feat_snapshots),
-                installed_winget_packages=tuple(newly_installed_winget),
-                installed_vscode_extensions=tuple(newly_installed_extensions),
-                state=state,
-                error=error,
+        with state_store.transaction_lock():
+            run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+            backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
+            reg_snapshots, svc_snapshots, task_snapshots, feat_snapshots = _collect_pre_apply_snapshots(
+                evaluations, registry, system
             )
+            newly_installed_winget: list[str] = []
+            newly_installed_extensions: list[str] = []
+            completed_ops: list[str] = []
+            exported_subtrees: set[tuple[str, str]] = set()
+            now_iso = datetime.now(tz=UTC).isoformat()
 
-        # Write-ahead journal: persist full pre-change snapshots before any mutation.
-        state_store.upsert_run(_make_record(TransactionState.PLANNED))
-        state_store.upsert_run(_make_record(TransactionState.APPLYING))
-
-        for idx in drifted_indices:
-            res = evaluations[idx]
-            tweak = get_tweak(res.tweak_id)
-            try:
-                _execute_tweak_mutations(
-                    tweak=tweak,
-                    env=env,
-                    registry=registry,
-                    system=system,
-                    backup_dir=backup_dir,
-                    exported_subtrees=exported_subtrees,
-                    newly_installed_winget=newly_installed_winget,
-                    newly_installed_extensions=newly_installed_extensions,
-                    force_kill_processes=force_kill_processes,
+            def _make_record(state: TransactionState, error: str | None = None) -> RunRecord:
+                return RunRecord(
+                    run_id=run_id_candidate,
+                    timestamp=now_iso,
+                    profile_name=profile.name,
+                    applied_tweaks=tuple(applied_ids),
+                    registry_snapshots=tuple(reg_snapshots),
+                    service_snapshots=tuple(svc_snapshots),
+                    task_snapshots=tuple(task_snapshots),
+                    feature_snapshots=tuple(feat_snapshots),
+                    installed_winget_packages=tuple(newly_installed_winget),
+                    installed_vscode_extensions=tuple(newly_installed_extensions),
+                    completed_operations=tuple(completed_ops),
+                    state=state,
+                    error=error,
                 )
-            except Exception as exc:
-                err_msg = str(exc)
-                failed_ids.append(res.tweak_id)
-                final_results[idx] = TweakCheckResult(
-                    tweak_id=res.tweak_id,
-                    title=res.title,
-                    category=res.category,
-                    risk=res.risk,
-                    requires_admin=res.requires_admin,
-                    status=TweakStatus.ERROR,
-                    detail=err_msg,
-                    source_url=res.source_url,
-                    registry_changes=res.registry_changes,
-                    cis_id=res.cis_id,
-                )
-                comp_errors = _compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
-                full_error = err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
-                state_store.upsert_run(_make_record(TransactionState.FAILED, error=full_error))
-                run_id = run_id_candidate
-                break
 
-            applied_ids.append(res.tweak_id)
+            def _record_op_checkpoint(op_desc: str) -> None:
+                completed_ops.append(op_desc)
+                state_store.upsert_run(_make_record(TransactionState.APPLYING))
+
+            # Write-ahead journal: persist full pre-change snapshots before any mutation.
+            state_store.upsert_run(_make_record(TransactionState.PLANNED))
             state_store.upsert_run(_make_record(TransactionState.APPLYING))
-        else:
-            state_store.upsert_run(_make_record(TransactionState.COMMITTED))
-            run_id = run_id_candidate
+
+            for idx in drifted_indices:
+                res = evaluations[idx]
+                tweak = get_tweak(res.tweak_id)
+                try:
+                    _execute_tweak_mutations(
+                        tweak=tweak,
+                        env=env,
+                        registry=registry,
+                        system=system,
+                        backup_dir=backup_dir,
+                        exported_subtrees=exported_subtrees,
+                        newly_installed_winget=newly_installed_winget,
+                        newly_installed_extensions=newly_installed_extensions,
+                        force_kill_processes=force_kill_processes,
+                        checkpoint_cb=_record_op_checkpoint,
+                    )
+                except Exception as exc:
+                    err_msg = str(exc)
+                    failed_ids.append(res.tweak_id)
+                    final_results[idx] = TweakCheckResult(
+                        tweak_id=res.tweak_id,
+                        title=res.title,
+                        category=res.category,
+                        risk=res.risk,
+                        requires_admin=res.requires_admin,
+                        status=TweakStatus.ERROR,
+                        detail=err_msg,
+                        source_url=res.source_url,
+                        registry_changes=res.registry_changes,
+                        cis_id=res.cis_id,
+                    )
+                    comp_errors = _compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
+                    full_error = (
+                        err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
+                    )
+                    state_store.upsert_run(_make_record(TransactionState.FAILED, error=full_error))
+                    run_id = run_id_candidate
+                    break
+
+                applied_ids.append(res.tweak_id)
+                state_store.upsert_run(_make_record(TransactionState.APPLYING))
+            else:
+                state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                run_id = run_id_candidate
 
     wsl_result: dict[str, Any] | None = None
     if profile.wsl.enabled and not failed_ids:
@@ -630,12 +650,34 @@ def apply_profile(
             wsl_result = {"enabled": True, "skipped": True, "reason": "WSL2 is not installed on host."}
         else:
             try:
-                wsl_result = plan_or_apply_wsl(
-                    spec=profile.wsl,
-                    system=system,
-                    wslconfig_path=wslconfig_path,
-                    dry_run=dry_run,
-                )
+                distros = list(env.wsl_distros)
+                if distros:
+                    distro_results: list[dict[str, Any]] = []
+                    first_res = plan_or_apply_wsl(
+                        spec=profile.wsl,
+                        system=system,
+                        distro=distros[0],
+                        wslconfig_path=wslconfig_path,
+                        dry_run=dry_run,
+                    )
+                    distro_results.append({"distro": distros[0], "distro_changed": first_res["distro_changed"]})
+                    for extra_distro in distros[1:]:
+                        extra_res = plan_or_apply_wsl(
+                            spec=profile.wsl,
+                            system=system,
+                            distro=extra_distro,
+                            wslconfig_path=wslconfig_path,
+                            dry_run=dry_run,
+                        )
+                        distro_results.append({"distro": extra_distro, "distro_changed": extra_res["distro_changed"]})
+                    wsl_result = {**first_res, "distros_applied": distro_results}
+                else:
+                    wsl_result = plan_or_apply_wsl(
+                        spec=profile.wsl,
+                        system=system,
+                        wslconfig_path=wslconfig_path,
+                        dry_run=dry_run,
+                    )
             except PermissionError as exc:
                 if wslconfig_path is not None:
                     raise
@@ -678,6 +720,26 @@ def rollback_runs(
     dry_run: bool = True,
 ) -> list[RunRecord]:
     """Revert the latest run (or all runs back to to_run_id inclusive)."""
+    from contextlib import nullcontext
+
+    lock_ctx = state_store.transaction_lock() if not dry_run else nullcontext()
+    with lock_ctx:
+        return _rollback_runs_impl(
+            state_store=state_store,
+            registry=registry,
+            system=system,
+            to_run_id=to_run_id,
+            dry_run=dry_run,
+        )
+
+
+def _rollback_runs_impl(
+    state_store: StateStore,
+    registry: RegistryBackend,
+    system: SystemBackend,
+    to_run_id: str | None = None,
+    dry_run: bool = True,
+) -> list[RunRecord]:
     all_runs = state_store.load_runs()
     if not all_runs:
         if to_run_id is not None:
