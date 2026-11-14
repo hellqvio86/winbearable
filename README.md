@@ -268,11 +268,11 @@ Built-in profiles form a strict **aggressiveness & privilege ladder**:
 | **`owner`** ([`profiles/owner.toml`](profiles/owner.toml)) | **Moderate–Strong** (recommended for personal/unlocked PCs) | **Yes** (`extends = "user-only"`) | None | Everything in `user-only`, plus machine-wide OneDrive sync block (`DisableFileSyncNGSC=1`), disables Windows Recall & Copilot machine-wide, blocks silent consumer bloatware, disables telemetry & CEIP scheduled tasks, disables SMBv1/LLMNR/mDNS/WPAD/AutoRun, enforces Windows Firewall + Defender Cloud/PUA + Guest/Blank-Password lockdown + Browser privacy baseline, and enables PowerShell ScriptBlock & 4688 command-line auditing. |
 | **`paranoid`** ([`profiles/paranoid.toml`](profiles/paranoid.toml)) | **Maximum (most aggressive)** | **Yes** (`extends = "owner"`) | `--i-know-what-im-doing` & `--allow-irreversible` | Everything in `owner`, plus **irreversibly uninstalls** the OneDrive client, disables the `WSearch` indexer service, enables LSA `RunAsPPL` protection (reboot), enforces VBS/HVCI (reboot + compatible drivers), and switches WSL2 to `strict` isolation (`[interop] enabled=false`, `[automount] enabled=false`). |
 
-To preview and apply the **most aggressive (`paranoid`)** profile (from an elevated Administrator shell):
+To preview and apply the **most aggressive (`paranoid`)** profile (from an elevated Administrator shell, or with `--elevate` to trigger a native UAC prompt):
 
 ```cmd
 wb plan --profile paranoid
-wb apply --profile paranoid --apply --i-know-what-im-doing --allow-irreversible
+wb apply --profile paranoid --apply --elevate --i-know-what-im-doing --allow-irreversible
 ```
 
 ### Running Audits & Status Checks from WSL2

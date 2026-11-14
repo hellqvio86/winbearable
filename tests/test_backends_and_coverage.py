@@ -1152,6 +1152,103 @@ class TestBackendsAndCoverage(unittest.TestCase):
             self.assertEqual(len(unset_calls), 1)
             self.assertIn("git-credential-manager.exe", unset_calls[0][-1])
 
+    def test_uac_elevation_and_cli_relay(self) -> None:
+        import ctypes
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from winbearable.cli import run_cli
+        from winbearable.state import StateStore
+        from winbearable.uac import (
+            ERROR_CANCELLED,
+            UacCancelledError,
+            build_elevated_cmdline_args,
+            run_elevated_wb,
+        )
+
+        # 1. Argument rewriting strips --elevate and prior --uac-output
+        args = build_elevated_cmdline_args(
+            ["apply", "--profile", "owner", "--apply", "--elevate", "--uac-output", "old.txt"],
+            Path("new.txt"),
+        )
+        self.assertEqual(args, ["apply", "--profile", "owner", "--apply", "--uac-output", "new.txt"])
+
+        # 2. Successful ShellExecuteExW("runas") + output relay
+        class FakeShell32:
+            def __init__(self, succeed: bool = True) -> None:
+                self.succeed = succeed
+                self.last_verb: str | None = None
+
+            def ShellExecuteExW(self, sei_ptr: object) -> int:
+                sei = sei_ptr._obj  # type: ignore[attr-defined]
+                self.last_verb = sei.lpVerb
+                if not self.succeed:
+                    return 0
+                # Extract --uac-output path from lpParameters and write simulated output
+                out_marker = '--uac-output "'
+                if out_marker in sei.lpParameters:
+                    out_p = sei.lpParameters.split(out_marker, 1)[1].split('"', 1)[0]
+                else:
+                    out_p = sei.lpParameters.rsplit(" ", 1)[-1]
+                Path(out_p).write_text("Elevated OK\n", encoding="utf-8")
+                sei.hProcess = 1234
+                return 1
+
+        class FakeKernel32:
+            def __init__(self, err: int = 0) -> None:
+                self.err = err
+                self.closed = False
+
+            def GetLastError(self) -> int:
+                return self.err
+
+            def WaitForSingleObject(self, handle: int, timeout: int) -> int:
+                return 0
+
+            def GetExitCodeProcess(self, handle: int, code_ptr: object) -> int:
+                code_ptr._obj.value = 0  # type: ignore[attr-defined]
+                return 1
+
+            def CloseHandle(self, handle: int) -> int:
+                self.closed = True
+                return 1
+
+        class FakeWinDLL:
+            def __init__(self, succeed: bool = True, err: int = 0) -> None:
+                self.shell32 = FakeShell32(succeed=succeed)
+                self.kernel32 = FakeKernel32(err=err)
+
+        fake_dll = FakeWinDLL(succeed=True)
+        code, out = run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=fake_dll)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "Elevated OK\n")
+        self.assertEqual(fake_dll.shell32.last_verb, "runas")
+        self.assertTrue(fake_dll.kernel32.closed)
+
+        # 3. Cancelled UAC (ERROR_CANCELLED = 1223) raises UacCancelledError
+        cancelled_dll = FakeWinDLL(succeed=False, err=ERROR_CANCELLED)
+        with (
+            patch.object(ctypes, "get_last_error", return_value=ERROR_CANCELLED, create=True),
+            self.assertRaises(UacCancelledError),
+        ):
+            run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=cancelled_dll)
+
+        # 4. CLI --elevate triggers run_elevated_wb when non-admin on Windows
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = InMemoryRegistryBackend()
+            non_admin_win = InMemorySystemBackend(is_windows=True, is_admin=False)
+            store = StateStore(Path(tmp) / "state.json")
+            with patch("winbearable.cli.run_elevated_wb", return_value=(0, "ELEVATED DONE\n")) as mock_uac:
+                rc = run_cli(
+                    ["apply", "--profile", "owner", "--apply", "--elevate"],
+                    registry=reg,
+                    system=non_admin_win,
+                    state_store=store,
+                )
+            self.assertEqual(rc, 0)
+            mock_uac.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

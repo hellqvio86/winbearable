@@ -1,6 +1,8 @@
 """Command-line interface for winbearable (`wb` and `winbearable`)."""
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -31,6 +33,7 @@ from .profiles import (
 )
 from .state import StateStore, StateStoreError
 from .tui import launch_tui
+from .uac import UacCancelledError, UacElevationError, run_elevated_wb
 from .wsl import (
     WslOperationError,
     apply_wsl_linux_baseline,
@@ -123,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"winbearable {__version__}")
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks on unexpected errors")
+    parser.add_argument("--uac-output", dest="uac_output", default=None, help=argparse.SUPPRESS)
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -162,12 +166,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow force-killing processes if graceful termination fails",
     )
+    apply_parser.add_argument(
+        "--elevate",
+        action="store_true",
+        help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
+    )
     apply_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb rollback
     rollback_parser = subparsers.add_parser("rollback", help="Revert changes from the last run (or --to <run-id>)")
     rollback_parser.add_argument("--to", dest="to_run_id", default=None, help="Target run ID to revert back to")
     rollback_parser.add_argument("--apply", action="store_true", help="Actually execute rollback")
+    rollback_parser.add_argument(
+        "--elevate",
+        action="store_true",
+        help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
+    )
     rollback_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb init
@@ -238,6 +252,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _relay_elevated_uac(raw_argv: list[str]) -> int:
+    exit_code, output_text = run_elevated_wb(raw_argv)
+    if output_text:
+        sys.stdout.write(output_text)
+        if not output_text.endswith("\n"):
+            sys.stdout.write("\n")
+    return exit_code
+
+
 def run_cli(
     argv: list[str] | None = None,
     registry: RegistryBackend | None = None,
@@ -245,13 +268,38 @@ def run_cli(
     state_store: StateStore | None = None,
 ) -> int:
     """Execute the `wb` CLI and return an exit code."""
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     if not args.command:
         parser.print_help()
         return 0
 
+    uac_out_path = Path(args.uac_output) if args.uac_output else None
+    uac_buf = io.StringIO() if uac_out_path is not None else None
+    out_cm: contextlib.AbstractContextManager[Any] = (
+        contextlib.redirect_stdout(uac_buf) if uac_buf is not None else contextlib.nullcontext()
+    )
+    err_cm: contextlib.AbstractContextManager[Any] = (
+        contextlib.redirect_stderr(uac_buf) if uac_buf is not None else contextlib.nullcontext()
+    )
+
+    with out_cm, err_cm:
+        try:
+            return _run_cli_body(args, raw_argv, registry, system, state_store)
+        finally:
+            if uac_out_path is not None and uac_buf is not None:
+                uac_out_path.write_text(uac_buf.getvalue(), encoding="utf-8")
+
+
+def _run_cli_body(
+    args: argparse.Namespace,
+    raw_argv: list[str],
+    registry: RegistryBackend | None,
+    system: SystemBackend | None,
+    state_store: StateStore | None,
+) -> int:
     reg_backend = registry or create_default_registry_backend()
     sys_backend = system or create_default_system_backend()
     store = state_store or StateStore()
@@ -382,6 +430,22 @@ def run_cli(
             if args.apply:
                 _require_windows_for_mutation(env, "wb apply --apply")
             profile = load_profile(args.profile)
+            if args.apply and not env.is_admin and not args.uac_output:
+                if args.elevate:
+                    return _relay_elevated_uac(raw_argv)
+                if not args.json and sys.stdin.isatty():
+                    preview_eval = evaluate_profile(profile, env, reg_backend, sys_backend)
+                    admin_needed = [item for item in preview_eval if item.status == TweakStatus.REQUIRES_ADMIN]
+                    if admin_needed:
+                        answer = input(
+                            f"{len(admin_needed)} tweak(s) require Administrator privileges. "
+                            "Request UAC elevation now? [Y/n] "
+                        )
+                        if answer.strip().lower() in {"", "y", "yes"}:
+                            try:
+                                return _relay_elevated_uac(raw_argv)
+                            except UacCancelledError:
+                                sys.stderr.write("UAC elevation cancelled; continuing with non-admin tweaks only.\n")
             summary = apply_profile(
                 profile=profile,
                 env=env,
@@ -402,6 +466,8 @@ def run_cli(
         if args.command == "rollback":
             if args.apply:
                 _require_windows_for_mutation(env, "wb rollback --apply")
+                if args.elevate and not env.is_admin and not args.uac_output:
+                    return _relay_elevated_uac(raw_argv)
             reverted = rollback_runs(
                 state_store=store,
                 registry=reg_backend,
@@ -566,6 +632,8 @@ def run_cli(
         HighRiskConfirmationError,
         IrreversibleActionError,
         UnsupportedPlatformError,
+        UacCancelledError,
+        UacElevationError,
         WslOperationError,
         StateStoreError,
         KeyError,
