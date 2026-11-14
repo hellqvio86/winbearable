@@ -15,6 +15,7 @@ from .const import APP_NAME, ENV_STATE_PATH
 from .models import RunRecord, TransactionState
 
 STATE_SCHEMA_VERSION = 1
+DEFAULT_MAX_RUN_HISTORY = 100
 
 
 class StateStoreError(ValueError):
@@ -113,7 +114,27 @@ class StateStore:
         except (KeyError, TypeError, ValueError) as exc:
             raise StateStoreError(f"Malformed run record in {self.state_path}: {exc}") from exc
 
+    def _prune_old_runs(self, runs: list[RunRecord], max_runs: int = DEFAULT_MAX_RUN_HISTORY) -> list[RunRecord]:
+        if len(runs) <= max_runs:
+            return runs
+        incomplete_states = {
+            TransactionState.PLANNED,
+            TransactionState.APPLYING,
+            TransactionState.ROLLING_BACK,
+            TransactionState.FAILED,
+        }
+        prunable_count = len(runs) - max_runs
+        kept: list[RunRecord] = []
+        pruned = 0
+        for run in runs:
+            if pruned < prunable_count and run.state not in incomplete_states:
+                pruned += 1
+                continue
+            kept.append(run)
+        return kept
+
     def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
+        runs = self._prune_old_runs(runs)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.state_path.parent, 0o700)
@@ -142,6 +163,23 @@ class StateStore:
             if os.path.exists(temp_path_str):
                 os.unlink(temp_path_str)
             raise
+
+    def restore_from_backup(self) -> bool:
+        """Validate and restore state.json from state.json.bak if available."""
+        bak_path = self.state_path.with_suffix(".json.bak")
+        if not bak_path.is_file():
+            return False
+        with self._locked():
+            raw_text = bak_path.read_text(encoding="utf-8")
+            payload: Any = json.loads(raw_text)
+            if not isinstance(payload, dict) or payload.get("version") != STATE_SCHEMA_VERSION:
+                raise StateStoreError(f"Backup file at {bak_path} has invalid schema or version.")
+            runs_raw = payload.get("runs")
+            if not isinstance(runs_raw, list):
+                raise StateStoreError(f"Backup file at {bak_path} has invalid 'runs' list.")
+            runs = [RunRecord.from_dict(item) for item in runs_raw]
+            self._save_runs_unlocked(runs)
+            return True
 
     def load_runs(self) -> list[RunRecord]:
         """Load all recorded runs in chronological order."""

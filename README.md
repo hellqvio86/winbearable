@@ -266,6 +266,10 @@ wb recover --apply      # Idempotently compensate and mark ROLLED_BACK
 
 (`wb rollback --incomplete --apply` is an equivalent alias.)
 
+- **Corrupted `state.json`:** `StateStore` automatically maintains `state.json.bak` on every atomic write and rotates old completed runs above 100 entries (while never pruning incomplete transactions).
+- **Subprocess timeouts:** Set `WB_CMD_TIMEOUT=<seconds>` to override the default command timeout for slow `winget`/`dism`/`wsl` operations.
+- **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py` on the maintainer's Windows installation.
+
 ---
 
 ## Built-in TOML Profiles

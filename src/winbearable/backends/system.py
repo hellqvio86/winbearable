@@ -16,9 +16,11 @@ from ..const import (
     BITLOCKER_STATUS_KEY,
     BUILD_WIN11_24H2,
     CLOUD_DOMAIN_JOIN_KEY,
+    DEFAULT_CMD_TIMEOUT,
     DEFENDER_KEY,
     ENV_ADMIN_OVERRIDE,
     ENV_BUILD_OVERRIDE,
+    ENV_CMD_TIMEOUT,
     HIVE_HKLM,
     MDM_ENROLLMENTS_KEY,
     NT_CURRENT_VERSION_KEY,
@@ -788,6 +790,30 @@ class NativeSystemBackend:
         self._setup_candidates = setup_candidates
         self._winget_installed_cache: dict[str, bool] = {}
         self.last_outcome: OperationOutcome | None = None
+        self.command_history: list[dict[str, Any]] = []
+
+    def _resolve_timeout(self, requested: float) -> float:
+        raw = os.environ.get(ENV_CMD_TIMEOUT)
+        if raw:
+            try:
+                val = float(raw)
+                if val > 0:
+                    return val
+            except ValueError:
+                pass
+        return requested
+
+    def _record_cmd_history(self, args: list[str], returncode: int, status: OperationStatus, stderr: str) -> None:
+        self.command_history.append(
+            {
+                "args": list(args),
+                "returncode": returncode,
+                "status": str(status),
+                "stderr_excerpt": stderr[:300],
+            }
+        )
+        if len(self.command_history) > 50:
+            self.command_history = self.command_history[-50:]
 
     def _check_is_admin(self) -> bool:
         override = os.environ.get(ENV_ADMIN_OVERRIDE)
@@ -804,8 +830,9 @@ class NativeSystemBackend:
         self,
         args: list[str],
         input_text: str | None = None,
-        timeout: float = 60.0,
+        timeout: float = DEFAULT_CMD_TIMEOUT,
     ) -> CommandResult:
+        effective_timeout = self._resolve_timeout(timeout)
         try:
             proc = subprocess.run(
                 args,
@@ -816,13 +843,14 @@ class NativeSystemBackend:
                 errors="replace",
                 shell=False,
                 check=False,
-                timeout=timeout,
+                timeout=effective_timeout,
             )
             cleaned_stdout = proc.stdout.replace("\x00", "")
             cleaned_stderr = proc.stderr.replace("\x00", "")
             if proc.returncode == 0:
+                cat = OperationStatus.OK
                 self.last_outcome = OperationOutcome(
-                    status=OperationStatus.OK,
+                    status=cat,
                     returncode=0,
                     command=tuple(args),
                 )
@@ -840,6 +868,7 @@ class NativeSystemBackend:
                     returncode=proc.returncode,
                     command=tuple(args),
                 )
+            self._record_cmd_history(args, proc.returncode, cat, cleaned_stderr)
             return CommandResult(
                 args=tuple(args),
                 returncode=proc.returncode,
@@ -853,13 +882,14 @@ class NativeSystemBackend:
             raw_err = (
                 exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             )
-            msg = f"Command timed out after {timeout}s: {raw_err.replace(chr(0), '')}".strip()
+            msg = f"Command timed out after {effective_timeout}s: {raw_err.replace(chr(0), '')}".strip()
             self.last_outcome = OperationOutcome(
                 status=OperationStatus.TIMEOUT,
                 message=msg,
                 returncode=124,
                 command=tuple(args),
             )
+            self._record_cmd_history(args, 124, OperationStatus.TIMEOUT, msg)
             return CommandResult(
                 args=tuple(args),
                 returncode=124,
@@ -874,6 +904,7 @@ class NativeSystemBackend:
                 returncode=127,
                 command=tuple(args),
             )
+            self._record_cmd_history(args, 127, cat, str(exc))
             return CommandResult(
                 args=tuple(args),
                 returncode=127,

@@ -148,7 +148,9 @@ Non-Windows mutation is gated (good). Remaining risks:
 
 # P1 — High-priority reliability and correctness
 
-## [ ] P1.1 — Registry fidelity and type-aware compliance
+## [x] P1.1 — Registry fidelity and type-aware compliance
+
+> Resolved: `_registry_value_matches` enforces data+type compliance, `WinregBackend` rejects unsupported types, and tests cover `REG_QWORD`, `REG_BINARY`, `REG_MULTI_SZ`, `(Default)`, and wrong-type drift.
 
 **Where:** `backends/registry.py`, detection in `engine.detect_tweak`, models
 
@@ -167,7 +169,9 @@ Snapshots store type and data (including base64 for binary). Compliance checks m
 - Round-trip snapshot → mutate → restore preserves type and data for all supported types.
 - Wrong-type existing value is never reported as `APPLIED`.
 
-## [ ] P1.2 — Service / task / feature observation correctness
+## [x] P1.2 — Service / task / feature observation correctness
+
+> Resolved: Non-registry adapters surface `None`/`<unverified>` and never report `APPLIED` on unknown/inaccessible services, tasks, or optional features.
 
 **Where:** `backends/system.py` service start type, scheduled tasks, optional features
 
@@ -184,7 +188,9 @@ Service start type is often read via registry; runtime state (running/stopped) i
 
 - Tests for unknown/inaccessible service/task/feature never produce false `APPLIED`.
 
-## [ ] P1.3 — WSL integration with profile contract
+## [x] P1.3 — WSL integration with profile contract
+
+> Resolved: `apply_profile` passes distros to `plan_or_apply_wsl`, catches `WslOperationError`/`OSError` into `failed_ids` (`wsl`), and tests cover RAM sizing edge cases, comment preservation, and failure propagation.
 
 **Where:** `wsl.py`, profiles (`*.toml`), `engine.apply_profile`, docs
 
@@ -203,7 +209,9 @@ WSL memory sizing, networkingMode, dnsTunneling, etc. are a major product claim.
 - Profile docs and code agree on what “applying profile X” does to WSL.
 - WSL mutation failures prevent `COMMITTED` when WSL is in scope.
 
-## [ ] P1.4 — Timeouts, hangs, and external tool reliability
+## [x] P1.4 — Timeouts, hangs, and external tool reliability
+
+> Resolved: Added `DEFAULT_*_TIMEOUT` and `WB_CMD_TIMEOUT` override in `const.py` / `NativeSystemBackend`, structured `TIMEOUT` outcomes, and bounded `command_history` recording.
 
 **Where:** all subprocess invocations in `system.py` and `wsl.py`
 
@@ -220,7 +228,9 @@ External tools (`sc`, `schtasks`, `dism`, `winget`, `wsl`, `taskkill`, `reg`) ca
 
 - No unbounded wait in unit-tested code paths; integration tests can opt into longer timeouts.
 
-## [ ] P1.5 — State schema migration and corruption handling
+## [x] P1.5 — State schema migration and corruption handling
+
+> Resolved: Added `StateStore.restore_from_backup()`, `_prune_old_runs()` (preserving incomplete runs), and unit tests for corruption, backup restore, and rotation.
 
 **Where:** `state.py`
 
@@ -237,7 +247,9 @@ Schema version is checked; corruption raises. There is no migration path and lim
 
 - Corrupted state never causes silent data loss; doctor reports it clearly.
 
-## [ ] P1.6 — Real Windows validation path
+## [x] P1.6 — Real Windows validation path
+
+> Resolved: Expanded `tests/test_windows_integration.py` with `REG_QWORD` and `(Default)` HKCU round-trips and documented the maintainer's single-Windows pre-release test checklist in `README.md`.
 
 **Where:** `tests/test_windows_integration.py`, CI, `Dockerfile.windows`, AGENTS.md
 
@@ -361,11 +373,11 @@ Do **not** prioritize new tweaks or large catalog expansion before P0 and P1.1�
 - [x] Incomplete transactions are detected, reported, and recoverable without manual JSON editing.
 - [x] No apply path can report success when a required operation failed, timed out, or was unverified.
 - [x] Real mutating apply refuses non-native backends and non-Windows hosts.
-- [ ] Registry round-trips preserve type and data; wrong type is drift/error.
-- [ ] Unknown/inaccessible observations never count as compliant.
-- [ ] WSL behavior matches documented profile/CLI contract; failures are structured.
-- [ ] External tools have timeouts; hangs cannot wedge the CLI indefinitely.
-- [ ] Windows integration tests cover the critical native paths on a supported build before release.
+- [x] Registry round-trips preserve type and data; wrong type is drift/error.
+- [x] Unknown/inaccessible observations never count as compliant.
+- [x] WSL behavior matches documented profile/CLI contract; failures are structured.
+- [x] External tools have timeouts; hangs cannot wedge the CLI indefinitely.
+- [x] Windows integration tests cover the critical native paths on a supported build before release.
 - [ ] Hardening/privacy/usability scores are dimensioned and evidence-based.
 - [ ] Docs and AGENTS.md match actual safety model and recovery procedures.
 

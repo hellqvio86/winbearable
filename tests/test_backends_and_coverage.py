@@ -1399,6 +1399,103 @@ class TestBackendsAndCoverage(unittest.TestCase):
             assert native_sys.last_outcome is not None
             self.assertEqual(native_sys.last_outcome.status, OperationStatus.ACCESS_DENIED)
 
+    def test_p1_registry_observations_wsl_timeouts_and_state_rotation(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from winbearable.const import (
+            ENV_CMD_TIMEOUT,
+            HIVE_HKCU,
+            REG_BINARY,
+            REG_MULTI_SZ,
+            REG_QWORD,
+            REG_SZ,
+        )
+        from winbearable.engine import apply_profile, detect_tweak
+        from winbearable.models import ProfileSpec, RunRecord, TransactionState, TweakStatus, WslConfigSpec
+        from winbearable.state import StateStore, StateStoreError
+        from winbearable.tweaks import get_tweak
+        from winbearable.wsl import WslOperationError, calculate_wsl_memory_gib, merge_ini_preserving_comments
+
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(is_windows=True, is_admin=True)
+        env = sys_b.detect_environment(reg)
+
+        # P1.1: Round-trip snapshot -> mutate -> restore for QWORD, BINARY, MULTI_SZ, and (Default)
+        for val_name, orig_val, orig_type, new_val in (
+            ("q", 2**40 + 3, REG_QWORD, 99),
+            ("b", b"\x01\x02", REG_BINARY, b"\xff"),
+            ("m", ["a", "b"], REG_MULTI_SZ, ["c"]),
+            ("", "orig-default", REG_SZ, "changed"),
+        ):
+            reg.set_value(HIVE_HKCU, r"Software\P1Test", val_name, orig_val, orig_type)
+            snap = reg.snapshot_value(HIVE_HKCU, r"Software\P1Test", val_name)
+            reg.set_value(HIVE_HKCU, r"Software\P1Test", val_name, new_val, orig_type)
+            reg.restore_snapshot(snap)
+            self.assertEqual(reg.get_value(HIVE_HKCU, r"Software\P1Test", val_name), (orig_val, orig_type))
+
+        # Wrong type on existing value is DRIFTED, never APPLIED
+        tweak_adv = get_tweak("privacy.disable_advertising_id")
+        reg.set_value(
+            HIVE_HKCU,
+            tweak_adv.registry_specs[0].key_path,
+            tweak_adv.registry_specs[0].value_name,
+            "0",
+            REG_SZ,
+        )
+        self.assertEqual(detect_tweak(tweak_adv, env, reg, sys_b).status, TweakStatus.DRIFTED)
+
+        # P1.2: Unknown/inaccessible task or feature never counts as APPLIED
+        tweak_tasks = get_tweak("telemetry.disable_scheduled_tasks")
+        with patch.object(sys_b, "is_scheduled_task_enabled", return_value=None):
+            self.assertNotEqual(detect_tweak(tweak_tasks, env, reg, sys_b).status, TweakStatus.APPLIED)
+
+        # P1.3: WSL memory edge cases, comment preservation, and failure propagation into failed_ids
+        self.assertEqual(calculate_wsl_memory_gib(1 * 1024**3), 1)
+        self.assertEqual(calculate_wsl_memory_gib(3 * 1024**3), 3)
+        self.assertEqual(calculate_wsl_memory_gib(17 * 1024**3), 13)
+        merged = merge_ini_preserving_comments("# keep comment\n[wsl2]\nmemory=4GB\n", {"wsl2": {"memory": "8GB"}})
+        self.assertIn("# keep comment", merged)
+        self.assertIn("memory=8GB", merged)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = StateStore(root / "state.json")
+            wsl_prof = ProfileSpec(name="w", description="w", wsl=WslConfigSpec(enabled=True), tweaks={})
+            with patch("winbearable.engine.plan_or_apply_wsl", side_effect=WslOperationError("wsl boom")):
+                wsl_fail = apply_profile(wsl_prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True)
+            self.assertIn("wsl", wsl_fail.failed_ids)
+            self.assertIn("wsl boom", str(wsl_fail.wsl_result))
+
+            # P1.4: WB_CMD_TIMEOUT env override and command_history
+            native_sys = NativeSystemBackend(platform_override="linux")
+            with patch.dict(os.environ, {ENV_CMD_TIMEOUT: "12.5"}):
+                self.assertEqual(native_sys._resolve_timeout(60.0), 12.5)
+            native_sys._record_cmd_history(["reg.exe", "query"], 0, "ok", "")  # type: ignore[arg-type]
+            self.assertEqual(len(native_sys.command_history), 1)
+
+            # P1.5: Backup restore on corruption & rotation preserving incomplete runs
+            rec_ok = RunRecord("r1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED)
+            rec_ok2 = RunRecord("r2", "2026-11-14T00:01:00Z", "p", (), state=TransactionState.COMMITTED)
+            store.save_runs([rec_ok])
+            store.save_runs([rec_ok, rec_ok2])  # creates .json.bak with [rec_ok]
+            store.state_path.write_text("{corrupt", encoding="utf-8")
+            with self.assertRaises(StateStoreError):
+                store.load_runs()
+            self.assertTrue(store.restore_from_backup())
+            self.assertEqual(len(store.load_runs()), 1)
+
+            many = [
+                RunRecord(f"c{i}", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED)
+                for i in range(105)
+            ]
+            inc = RunRecord("inc1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.APPLYING)
+            pruned = store._prune_old_runs([inc, *many], max_runs=100)
+            self.assertEqual(len(pruned), 100)
+            self.assertIn("inc1", [r.run_id for r in pruned])
+
 
 if __name__ == "__main__":
     unittest.main()

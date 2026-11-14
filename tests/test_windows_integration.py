@@ -15,7 +15,7 @@ import pytest
 from winbearable.backends.registry import WinregBackend
 from winbearable.backends.system import NativeSystemBackend
 from winbearable.cli import run_cli
-from winbearable.const import HIVE_HKCU, REG_BINARY, REG_DWORD, REG_MULTI_SZ, REG_SZ
+from winbearable.const import HIVE_HKCU, REG_BINARY, REG_DWORD, REG_MULTI_SZ, REG_QWORD, REG_SZ
 
 _RUN_WIN_INTEGRATION = sys.platform == "win32" and os.environ.get("WINBEARABLE_RUN_WINDOWS_INTEGRATION") == "1"
 
@@ -38,11 +38,15 @@ class TestWindowsIntegration(unittest.TestCase):
 
         try:
             backend.set_value(HIVE_HKCU, sub_path, "DwordVal", 42, REG_DWORD)
+            backend.set_value(HIVE_HKCU, sub_path, "QwordVal", 2**40 + 7, REG_QWORD)
+            backend.set_value(HIVE_HKCU, sub_path, "", "default-val", REG_SZ)
             backend.set_value(HIVE_HKCU, sub_path, "StrVal", "hello", REG_SZ)
             backend.set_value(HIVE_HKCU, sub_path, "BinVal", b"\x01\x02\x03", REG_BINARY)
             backend.set_value(HIVE_HKCU, sub_path, "MultiVal", ["one", "two"], REG_MULTI_SZ)
 
             self.assertEqual(backend.get_value(HIVE_HKCU, sub_path, "DwordVal"), (42, REG_DWORD))
+            self.assertEqual(backend.get_value(HIVE_HKCU, sub_path, "QwordVal"), (2**40 + 7, REG_QWORD))
+            self.assertEqual(backend.get_value(HIVE_HKCU, sub_path, ""), ("default-val", REG_SZ))
             self.assertEqual(backend.get_value(HIVE_HKCU, sub_path, "StrVal"), ("hello", REG_SZ))
             self.assertEqual(backend.get_value(HIVE_HKCU, sub_path, "BinVal"), (b"\x01\x02\x03", REG_BINARY))
             self.assertEqual(backend.get_value(HIVE_HKCU, sub_path, "MultiVal"), (["one", "two"], REG_MULTI_SZ))

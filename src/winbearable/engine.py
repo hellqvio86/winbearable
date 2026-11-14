@@ -33,7 +33,7 @@ from .models import (
 from .operations import format_registry_op, inspect_non_registry_operations
 from .state import StateStore, StateStoreError
 from .tweaks import get_all_tweaks, get_tweak
-from .wsl import plan_or_apply_wsl
+from .wsl import WslOperationError, plan_or_apply_wsl
 
 
 class HighRiskConfirmationError(RuntimeError):
@@ -739,6 +739,9 @@ def apply_profile(
                 if wslconfig_path is not None:
                     raise
                 wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
+            except (WslOperationError, OSError) as exc:
+                failed_ids.append("wsl")
+                wsl_result = {"enabled": True, "error": str(exc)}
 
     digest_payload = json.dumps(
         [
