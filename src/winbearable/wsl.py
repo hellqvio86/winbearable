@@ -315,6 +315,54 @@ def _read_git_system_credential_helpers(git_config_path: Path | None = None) -> 
         return []
 
 
+def _audit_credential_hygiene(
+    git_helpers: list[str],
+    ssh_dir: Path | None = None,
+    env_vars: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Inspect git credential helpers, ~/.ssh permissions, and Windows SSH agent leakage."""
+    issues: list[str] = []
+    win_helpers = [h for h in git_helpers if _is_windows_credential_helper(h)]
+    if win_helpers:
+        issues.append(f"Windows git credential helper configured: {', '.join(win_helpers)}")
+
+    target_env = env_vars if env_vars is not None else dict(os.environ)
+    ssh_leak = False
+    for var_name in ("SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND"):
+        val = target_env.get(var_name, "")
+        if val and ("/mnt/c/" in val.lower() or ".exe" in val.lower()):
+            ssh_leak = True
+            issues.append(f"{var_name} points to Windows host binary/socket: {val}")
+
+    target_ssh = ssh_dir or (Path.home() / ".ssh")
+    ssh_dir_mode: str | None = None
+    insecure_keys: list[str] = []
+    if target_ssh.is_dir():
+        dir_mode = target_ssh.stat().st_mode & 0o777
+        ssh_dir_mode = oct(dir_mode)
+        if dir_mode & 0o077:
+            issues.append(f"{target_ssh} permissions are {ssh_dir_mode} (expected 0o700)")
+        for entry in sorted(target_ssh.iterdir()):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if name.endswith(".pub") or name in {"known_hosts", "known_hosts.old", "config", "authorized_keys"}:
+                continue
+            key_mode = entry.stat().st_mode & 0o777
+            if key_mode & 0o077:
+                insecure_keys.append(f"{name} ({oct(key_mode)})")
+                issues.append(f"Private key {entry} has overly permissive mode {oct(key_mode)} (expected 0o600)")
+
+    return {
+        "clean": len(issues) == 0,
+        "issues": issues,
+        "windows_git_helpers": win_helpers,
+        "ssh_agent_windows_leak": ssh_leak,
+        "ssh_dir_mode": ssh_dir_mode,
+        "ssh_insecure_keys": insecure_keys,
+    }
+
+
 def audit_linux_side(
     wsl_conf_path: Path | None = None,
     sysctl_conf_path: Path | None = None,
@@ -322,8 +370,10 @@ def audit_linux_side(
     systemd_marker_path: Path | None = None,
     git_config_path: Path | None = None,
     platform_override: str | None = None,
+    ssh_dir: Path | None = None,
+    env_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Audit Linux-side WSL2 settings: /etc/wsl.conf, sysctl baseline, systemd, and git credential isolation."""
+    """Audit Linux-side WSL2 settings: /etc/wsl.conf, sysctl baseline, systemd, and credential hygiene."""
     target_platform = platform_override or sys.platform
     is_linux = target_platform == "linux"
     if not is_linux:
@@ -342,6 +392,14 @@ def audit_linux_side(
             "sysctl_values": {},
             "git_system_credential_helper": [],
             "git_credential_helper_isolated": True,
+            "credential_hygiene": {
+                "clean": True,
+                "issues": [],
+                "windows_git_helpers": [],
+                "ssh_agent_windows_leak": False,
+                "ssh_dir_mode": None,
+                "ssh_insecure_keys": [],
+            },
         }
 
     wsl_conf = wsl_conf_path or Path("/etc/wsl.conf")
@@ -360,12 +418,18 @@ def audit_linux_side(
         "kernel.dmesg_restrict": ("kernel/dmesg_restrict", "1"),
         "net.ipv4.conf.all.rp_filter": ("net/ipv4/conf/all/rp_filter", "1"),
         "net.ipv4.conf.default.rp_filter": ("net/ipv4/conf/default/rp_filter", "1"),
+        "kernel.yama.ptrace_scope": ("kernel/yama/ptrace_scope", "1"),
+        "fs.protected_hardlinks": ("fs/protected_hardlinks", "1"),
+        "fs.protected_symlinks": ("fs/protected_symlinks", "1"),
+        "vm.swappiness": ("vm/swappiness", "10"),
+        "kernel.unprivileged_bpf_disabled": ("kernel/unprivileged_bpf_disabled", "1"),
     }
     sysctl_values = {key: _read_proc_sys_value(proc_root, rel_path) for key, (rel_path, _) in expected_sysctl.items()}
     sysctl_applied = all(sysctl_values.get(key) == expected for key, (_, expected) in expected_sysctl.items())
 
     git_helpers = _read_git_system_credential_helpers(git_config_path)
-    git_isolated = not any(token in helper.lower() for helper in git_helpers for token in ("wincred", "gcm", ".exe"))
+    credential_hygiene = _audit_credential_hygiene(git_helpers, ssh_dir=ssh_dir, env_vars=env_vars)
+    git_isolated = len(credential_hygiene["windows_git_helpers"]) == 0
 
     return {
         "is_linux": True,
@@ -385,6 +449,7 @@ def audit_linux_side(
         "sysctl_values": sysctl_values,
         "git_system_credential_helper": git_helpers,
         "git_credential_helper_isolated": git_isolated,
+        "credential_hygiene": credential_hygiene,
     }
 
 
@@ -414,6 +479,11 @@ kernel.kptr_restrict = 2
 kernel.dmesg_restrict = 1
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
+kernel.yama.ptrace_scope = 1
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+vm.swappiness = 10
+kernel.unprivileged_bpf_disabled = 1
 """
 
 
@@ -493,15 +563,24 @@ def apply_wsl_linux_baseline(
     system: SystemBackend,
     distro: str,
     dotfiles_repo: str | None = None,
+    dev_packages: bool = False,
+    auto_patch: bool = True,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """Configure Linux-side sysctl baseline, isolate Windows git credential helper, and optional chezmoi dotfiles."""
+    """Configure sysctl baseline, isolate Windows git credential helper, auto-patch, and optional packages/dotfiles."""
     sysctl_path = "/etc/sysctl.d/99-winbearable-wsl.conf"
     steps: list[str] = [
-        f"Write {sysctl_path} (kptr_restrict=2, dmesg_restrict=1, rp_filter=1)",
+        (
+            f"Write {sysctl_path} (kptr_restrict=2, dmesg_restrict=1, rp_filter=1, "
+            "ptrace_scope=1, protected links, swappiness=10, bpf_disabled=1)"
+        ),
         "Reload sysctl settings via sysctl --system",
         "Remove Windows git credential helpers from system config (preserving native Linux helpers)",
     ]
+    if auto_patch:
+        steps.append("Enable automatic security updates (unattended-upgrades; opt-out via --no-auto-patch)")
+    if dev_packages:
+        steps.append("Install minimal dev packages (git, curl, jq, build-essential/base-devel)")
     if dotfiles_repo:
         steps.append(f"Apply dotfiles via chezmoi init --apply {dotfiles_repo}")
 
@@ -543,6 +622,30 @@ def apply_wsl_linux_baseline(
                         )
         elif r3_get.returncode not in (1, 5):
             raise WslOperationError(f"Failed to inspect git credential.helper in '{distro}': {r3_get.stderr}")
+        if auto_patch:
+            patch_cmd = (
+                "if command -v apt-get >/dev/null; then "
+                "DEBIAN_FRONTEND=noninteractive apt-get update && "
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades && "
+                'printf \'APT::Periodic::Update-Package-Lists "1";\\n'
+                'APT::Periodic::Unattended-Upgrade "1";\\n\' '
+                "> /etc/apt/apt.conf.d/20auto-upgrades; "
+                "elif command -v dnf >/dev/null; then "
+                "dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer || true; fi"
+            )
+            r_patch = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sh", "-c", patch_cmd])
+            if r_patch.returncode != 0:
+                raise WslOperationError(f"Failed to enable auto-patching in '{distro}': {r_patch.stderr}")
+        if dev_packages:
+            pkg_cmd = (
+                "command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get update && "
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y git curl jq build-essential || "
+                "(command -v dnf >/dev/null && dnf install -y git curl jq gcc gcc-c++ make) || "
+                "(command -v pacman >/dev/null && pacman -Sy --noconfirm git curl jq base-devel)"
+            )
+            r_pkg = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sh", "-c", pkg_cmd])
+            if r_pkg.returncode != 0:
+                raise WslOperationError(f"Failed to install dev packages in '{distro}': {r_pkg.stderr}")
         if dotfiles_repo:
             r4 = system.run_wsl_command(["-d", distro, "--", "chezmoi", "init", "--apply", dotfiles_repo])
             if r4.returncode != 0:
@@ -553,6 +656,8 @@ def apply_wsl_linux_baseline(
         "distro": distro,
         "sysctl_path": sysctl_path,
         "sysctl_content": WSL_LINUX_SYSCTL_CONF,
+        "auto_patch": auto_patch,
+        "dev_packages": dev_packages,
         "dotfiles_repo": dotfiles_repo,
         "steps": steps,
     }

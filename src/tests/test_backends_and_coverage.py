@@ -1029,11 +1029,18 @@ class TestBackendsAndCoverage(unittest.TestCase):
             sysctl_conf.write_text("kernel.kptr_restrict = 2\n", encoding="utf-8")
 
             proc_sys = root / "proc_sys"
-            (proc_sys / "kernel").mkdir(parents=True)
+            (proc_sys / "kernel" / "yama").mkdir(parents=True)
+            (proc_sys / "fs").mkdir(parents=True)
+            (proc_sys / "vm").mkdir(parents=True)
             (proc_sys / "net" / "ipv4" / "conf" / "all").mkdir(parents=True)
             (proc_sys / "net" / "ipv4" / "conf" / "default").mkdir(parents=True)
             (proc_sys / "kernel" / "kptr_restrict").write_text("2\n", encoding="utf-8")
             (proc_sys / "kernel" / "dmesg_restrict").write_text("1\n", encoding="utf-8")
+            (proc_sys / "kernel" / "yama" / "ptrace_scope").write_text("1\n", encoding="utf-8")
+            (proc_sys / "kernel" / "unprivileged_bpf_disabled").write_text("1\n", encoding="utf-8")
+            (proc_sys / "fs" / "protected_hardlinks").write_text("1\n", encoding="utf-8")
+            (proc_sys / "fs" / "protected_symlinks").write_text("1\n", encoding="utf-8")
+            (proc_sys / "vm" / "swappiness").write_text("10\n", encoding="utf-8")
             (proc_sys / "net" / "ipv4" / "conf" / "all" / "rp_filter").write_text("1\n", encoding="utf-8")
             (proc_sys / "net" / "ipv4" / "conf" / "default" / "rp_filter").write_text("1\n", encoding="utf-8")
 
@@ -1771,6 +1778,100 @@ class TestBackendsAndCoverage(unittest.TestCase):
             )
             assert existing_val is not None
             self.assertEqual(existing_val[1], REG_DWORD)
+
+    def test_p1_linux_sysctl_credential_hygiene_refugee_summary_and_autopatch(self) -> None:
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+
+        from winbearable.cli import run_cli
+        from winbearable.wsl import WSL_LINUX_SYSCTL_CONF, apply_wsl_linux_baseline, audit_linux_side
+
+        for key in (
+            "kernel.yama.ptrace_scope = 1",
+            "fs.protected_hardlinks = 1",
+            "fs.protected_symlinks = 1",
+            "vm.swappiness = 10",
+            "kernel.unprivileged_bpf_disabled = 1",
+        ):
+            self.assertIn(key, WSL_LINUX_SYSCTL_CONF)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc_sys = root / "proc_sys"
+            (proc_sys / "kernel" / "yama").mkdir(parents=True)
+            (proc_sys / "fs").mkdir(parents=True)
+            (proc_sys / "vm").mkdir(parents=True)
+            (proc_sys / "net" / "ipv4" / "conf" / "all").mkdir(parents=True)
+            (proc_sys / "net" / "ipv4" / "conf" / "default").mkdir(parents=True)
+            (proc_sys / "kernel" / "kptr_restrict").write_text("2\n", encoding="utf-8")
+            (proc_sys / "kernel" / "dmesg_restrict").write_text("1\n", encoding="utf-8")
+            (proc_sys / "kernel" / "yama" / "ptrace_scope").write_text("1\n", encoding="utf-8")
+            (proc_sys / "kernel" / "unprivileged_bpf_disabled").write_text("1\n", encoding="utf-8")
+            (proc_sys / "fs" / "protected_hardlinks").write_text("1\n", encoding="utf-8")
+            (proc_sys / "fs" / "protected_symlinks").write_text("1\n", encoding="utf-8")
+            (proc_sys / "vm" / "swappiness").write_text("10\n", encoding="utf-8")
+            (proc_sys / "net" / "ipv4" / "conf" / "all" / "rp_filter").write_text("1\n", encoding="utf-8")
+            (proc_sys / "net" / "ipv4" / "conf" / "default" / "rp_filter").write_text("1\n", encoding="utf-8")
+
+            git_cfg = root / "gitconfig"
+            git_cfg.write_text(
+                "[credential]\n\thelper = /mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe\n",
+                encoding="utf-8",
+            )
+            ssh_dir = root / ".ssh"
+            ssh_dir.mkdir()
+            audit_res = audit_linux_side(
+                wsl_conf_path=root / "wsl.conf",
+                sysctl_conf_path=root / "99.conf",
+                proc_sys_root=proc_sys,
+                systemd_marker_path=root / "systemd",
+                git_config_path=git_cfg,
+                platform_override="linux",
+                ssh_dir=ssh_dir,
+                env_vars={"SSH_AUTH_SOCK": "/mnt/c/temp/ssh.sock"},
+            )
+            self.assertTrue(audit_res["sysctl_baseline_applied"])
+            hyg = audit_res["credential_hygiene"]
+            self.assertFalse(hyg["clean"])
+            self.assertTrue(hyg["ssh_agent_windows_leak"])
+            self.assertEqual(len(hyg["windows_git_helpers"]), 1)
+
+        # Auto-patch is enabled by default, opt-out via auto_patch=False; dev_packages is opt-in
+        sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+        reg = InMemoryRegistryBackend()
+        default_base = apply_wsl_linux_baseline(sys_b, "Ubuntu", dry_run=True)
+        self.assertTrue(default_base["auto_patch"])
+        self.assertFalse(default_base["dev_packages"])
+        self.assertTrue(any("unattended-upgrades" in s for s in default_base["steps"]))
+        opt_out_base = apply_wsl_linux_baseline(sys_b, "Ubuntu", auto_patch=False, dev_packages=True, dry_run=True)
+        self.assertFalse(opt_out_base["auto_patch"])
+        self.assertTrue(opt_out_base["dev_packages"])
+        self.assertFalse(any("unattended-upgrades" in s for s in opt_out_base["steps"]))
+        self.assertTrue(any("dev packages" in s for s in opt_out_base["steps"]))
+
+        # Doctor JSON exposes refugee_summary
+        from winbearable.state import StateStore
+
+        buf = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as tmp_doc,
+            patch.dict(os.environ, {"USERPROFILE": tmp_doc}),
+            redirect_stdout(buf),
+        ):
+            code = run_cli(
+                ["doctor", "--json"],
+                registry=reg,
+                system=sys_b,
+                state_store=StateStore(Path(tmp_doc) / "state.json"),
+            )
+        self.assertEqual(code, 0)
+        import json as json_mod
+
+        doc_payload = json_mod.loads(buf.getvalue())
+        self.assertIn("refugee_summary", doc_payload)
+        self.assertIn("mirrored_firewall_note", doc_payload["refugee_summary"])
 
 
 if __name__ == "__main__":

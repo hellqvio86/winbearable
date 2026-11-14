@@ -14,7 +14,7 @@ from .backends import (
     create_default_registry_backend,
     create_default_system_backend,
 )
-from .const import DEFAULT_WSL_MODE, JSON_SCHEMA_VERSION, WSL_MODES, __version__
+from .const import DEFAULT_WSL_MODE, JSON_SCHEMA_VERSION, MIN_SUPPORTED_BUILD, WSL_MODES, __version__
 from .engine import (
     ApplySummary,
     HighRiskConfirmationError,
@@ -276,6 +276,16 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_base_p = wsl_sub.add_parser("baseline", help="Apply Linux-side sysctl, git cred isolation & dotfiles baseline")
     wsl_base_p.add_argument("--distro", required=True, help="Target WSL distro name")
     wsl_base_p.add_argument("--dotfiles-repo", default=None, help="Optional chezmoi dotfiles repository URL")
+    wsl_base_p.add_argument(
+        "--dev-packages",
+        action="store_true",
+        help="Opt-in: install minimal dev packages (git, curl, jq, compiler toolchain)",
+    )
+    wsl_base_p.add_argument(
+        "--no-auto-patch",
+        action="store_true",
+        help="Opt-out: do not configure automatic security updates (unattended-upgrades)",
+    )
     wsl_base_p.add_argument("--apply", action="store_true", help="Execute Linux-side baseline commands")
     wsl_base_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
@@ -353,11 +363,37 @@ def _run_cli_body(
             incomplete_runs = store.get_incomplete_runs()
             raw_history = getattr(sys_backend, "command_history", ())
             last_outcome = getattr(sys_backend, "last_outcome", None)
+            linux_info = wsl_info.get("linux", {}) if isinstance(wsl_info, dict) else {}
+            policy_blocked = [
+                r["tweak_id"] for r in audit.get("results", []) if r.get("status") == str(TweakStatus.BLOCKED_BY_POLICY)
+            ]
+            mirrored = bool(wsl_info.get("mirrored_networking")) if isinstance(wsl_info, dict) else False
+            refugee_summary = {
+                "windows_build_supported": env.windows_build >= MIN_SUPPORTED_BUILD if env.windows_build else False,
+                "secure_boot_enabled": env.secure_boot_enabled,
+                "domain_or_mdm_leftovers": bool(env.domain_joined or env.entra_joined or env.mdm_enrolled),
+                "wsl_installed": env.wsl_installed,
+                "wsl_distros": list(env.wsl_distros),
+                "interop_enabled": linux_info.get("interop_enabled"),
+                "append_windows_path": linux_info.get("append_windows_path"),
+                "mirrored_networking": mirrored,
+                "mirrored_firewall_note": (
+                    "Host Windows Firewall is the primary boundary under mirrored networking; "
+                    "in-distro ufw/nftables is secondary."
+                    if mirrored
+                    else "Default NAT networking."
+                ),
+                "sysctl_baseline_compliant": bool(linux_info.get("sysctl_baseline_applied")),
+                "credential_hygiene": linux_info.get("credential_hygiene", {}),
+                "incomplete_runs_count": len(incomplete_runs),
+                "policy_blocked_tweaks": policy_blocked,
+            }
             payload = {
                 "version": __version__,
                 "environment": env.to_dict(),
                 "wsl": wsl_info,
                 "audit": audit,
+                "refugee_summary": refugee_summary,
                 "incomplete_runs": [run.to_dict() for run in incomplete_runs],
                 "command_history": list(raw_history)[-10:] if isinstance(raw_history, list) else [],
                 "last_outcome": last_outcome.to_dict() if last_outcome is not None else None,
@@ -365,7 +401,6 @@ def _run_cli_body(
             if args.json:
                 _print_json(payload)
             else:
-                linux_info = wsl_info.get("linux", {}) if isinstance(wsl_info, dict) else {}
 
                 def _fmt_linux_block(li: dict[str, Any]) -> str:
                     if not li or not li.get("is_linux"):
@@ -423,6 +458,12 @@ def _run_cli_body(
                         f"Usability {usab.get('passed', 0)}/{usab.get('total_applicable', 0)} | "
                         f"Developer {dev.get('passed', 0)}/{dev.get('total_applicable', 0)}\n"
                         f"CIS Technical Checks (partial): {audit['cis_passed']}/{audit['cis_total']}\n"
+                        f"Linux Refugee Summary: "
+                        f"build_supported={refugee_summary['windows_build_supported']} "
+                        f"| enterprise_leftovers={refugee_summary['domain_or_mdm_leftovers']} "
+                        f"| policy_blocked={len(policy_blocked)} "
+                        f"| mirrored={mirrored}\n"
+                        f"  Firewall Note: {refugee_summary['mirrored_firewall_note']}\n"
                     )
                 if incomplete_runs:
                     sys.stdout.write(
@@ -469,6 +510,10 @@ def _run_cli_body(
                     sys.stdout.write(
                         "Note: non-compensable side effects (process stops / uninstalls) cannot be rolled back.\n"
                     )
+                if profile.wsl.enabled:
+                    sys.stdout.write(
+                        "Note: Linux-side sysctl/git baseline requires running `wb wsl baseline --apply` separately.\n"
+                    )
             return 1 if summary.failed_ids else 0
 
         if args.command == "apply":
@@ -509,6 +554,10 @@ def _run_cli_body(
                 if any(not op.reversible for r in summary.results for op in r.operations):
                     sys.stdout.write(
                         "Note: non-compensable side effects (process stops / uninstalls) cannot be rolled back.\n"
+                    )
+                if profile.wsl.enabled:
+                    sys.stdout.write(
+                        "Note: Linux-side sysctl/git baseline requires running `wb wsl baseline --apply` separately.\n"
                     )
             return 1 if summary.failed_ids else 0
 
@@ -653,6 +702,8 @@ def _run_cli_body(
                 system=sys_backend,
                 distro=args.distro,
                 dotfiles_repo=args.dotfiles_repo,
+                dev_packages=bool(args.dev_packages),
+                auto_patch=not bool(args.no_auto_patch),
                 dry_run=not args.apply,
             )
             if args.json:
