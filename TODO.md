@@ -107,7 +107,7 @@
 > - Verify a failed VS Code extension install is not silently counted as a complete VS Code tweak.
 > - Verify backup export failure is surfaced before a destructive operation proceeds when backup is required.
 >
-> ## [ ] P0.4 — Make rollback cover every side effect, or explicitly declare it irreversible
+> ## [x] P0.4 — Make rollback cover every side effect, or explicitly declare it irreversible
 >
 > **Where:** `src/winbearable/engine.py:306-380`, `src/winbearable/engine.py:411-453`, `src/winbearable/models.py:242-408`
 >
@@ -141,7 +141,7 @@
 > - A rollback test covers a profile containing registry, service, task, feature, process, winget, and OneDrive actions.
 > - Rollback reports partial failure and retains recoverable state instead of silently deleting history.
 >
-> ## [ ] P0.5 — Do not force-kill user processes as an unqualified low-risk action
+> ## [x] P0.5 — Do not force-kill user processes as an unqualified low-risk action
 >
 > **Where:** `src/winbearable/backends/system.py:451-461`, `src/winbearable/engine.py:306-310`, `src/winbearable/tweaks/catalog.py` (`stop_processes`)
 >

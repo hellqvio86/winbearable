@@ -16,6 +16,7 @@ from .const import DEFAULT_WSL_MODE, WSL_MODES, __version__
 from .engine import (
     ApplySummary,
     HighRiskConfirmationError,
+    IrreversibleActionError,
     apply_profile,
     calculate_hardening_score,
     evaluate_profile,
@@ -68,7 +69,10 @@ def _format_summary_markdown(summary: ApplySummary) -> str:
     ]
     for item in summary.results:
         admin_col = "yes" if item.requires_admin else "no"
-        lines.append(f"| `{item.status}` | `{item.tweak_id}` | `{item.risk}` | {admin_col} | {item.detail} |")
+        irrev_tag = " [IRREVERSIBLE]" if item.irreversible else ""
+        lines.append(
+            f"| `{item.status}` | `{item.tweak_id}`{irrev_tag} | `{item.risk}` | {admin_col} | {item.detail} |"
+        )
 
     lines.append("")
     lines.append(
@@ -116,6 +120,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="allow_high_risk",
         action="store_true",
         help="Confirm application of high-risk tweaks (e.g. VBS/HVCI)",
+    )
+    apply_parser.add_argument(
+        "--allow-irreversible",
+        dest="allow_irreversible",
+        action="store_true",
+        help="Confirm application of irreversible tweaks (e.g. OneDrive uninstall)",
+    )
+    apply_parser.add_argument(
+        "--force-kill",
+        dest="force_kill",
+        action="store_true",
+        help="Allow force-killing processes if graceful termination fails",
     )
     apply_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
@@ -305,6 +321,8 @@ def run_cli(
                 state_store=store,
                 dry_run=not args.apply,
                 allow_high_risk=bool(args.allow_high_risk),
+                allow_irreversible=bool(args.allow_irreversible),
+                force_kill_processes=bool(args.force_kill),
             )
             if args.json:
                 _print_json(summary.to_dict())
@@ -477,6 +495,7 @@ def run_cli(
     except (
         ProfileValidationError,
         HighRiskConfirmationError,
+        IrreversibleActionError,
         UnsupportedPlatformError,
         WslOperationError,
         StateStoreError,

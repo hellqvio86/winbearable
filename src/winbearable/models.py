@@ -197,6 +197,7 @@ class TweakDefinition:
     cis_id: str | None = None
     requires_reboot: bool = False
     requires_explorer_restart: bool = False
+    irreversible: bool = False
 
 
 @dataclass(frozen=True)
@@ -257,6 +258,7 @@ class TweakCheckResult:
     registry_changes: tuple[RegistryChangeDetail, ...] = ()
     cis_id: str | None = None
     pending_restart: bool = False
+    irreversible: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize check result to a JSON-compatible dictionary."""
@@ -271,6 +273,7 @@ class TweakCheckResult:
             "source_url": self.source_url,
             "cis_id": self.cis_id,
             "pending_restart": self.pending_restart,
+            "irreversible": self.irreversible,
             "registry_changes": [change.to_dict() for change in self.registry_changes],
         }
 
@@ -408,6 +411,7 @@ class RunRecord:
     task_snapshots: tuple[ScheduledTaskSnapshot, ...] = ()
     feature_snapshots: tuple[OptionalFeatureSnapshot, ...] = ()
     installed_winget_packages: tuple[str, ...] = ()
+    installed_vscode_extensions: tuple[str, ...] = ()
     state: TransactionState = TransactionState.COMMITTED
     error: str | None = None
 
@@ -423,6 +427,7 @@ class RunRecord:
             "task_snapshots": [snap.to_dict() for snap in self.task_snapshots],
             "feature_snapshots": [snap.to_dict() for snap in self.feature_snapshots],
             "installed_winget_packages": list(self.installed_winget_packages),
+            "installed_vscode_extensions": list(self.installed_vscode_extensions),
             "state": str(self.state),
             "error": self.error,
         }
@@ -435,6 +440,7 @@ class RunRecord:
         task_snaps = tuple(ScheduledTaskSnapshot.from_dict(item) for item in payload.get("task_snapshots", []))
         feat_snaps = tuple(OptionalFeatureSnapshot.from_dict(item) for item in payload.get("feature_snapshots", []))
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
+        vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
         raw_state = payload.get("state", TransactionState.COMMITTED)
         raw_error = payload.get("error")
         return cls(
@@ -447,6 +453,7 @@ class RunRecord:
             task_snapshots=task_snaps,
             feature_snapshots=feat_snaps,
             installed_winget_packages=winget_pkgs,
+            installed_vscode_extensions=vscode_exts,
             state=TransactionState(str(raw_state)),
             error=str(raw_error) if raw_error is not None else None,
         )

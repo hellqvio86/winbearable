@@ -33,6 +33,10 @@ class HighRiskConfirmationError(RuntimeError):
     """Raised when applying a high-risk tweak without --i-know-what-im-doing."""
 
 
+class IrreversibleActionError(RuntimeError):
+    """Raised when applying an irreversible tweak without --allow-irreversible."""
+
+
 @dataclass(frozen=True)
 class ApplySummary:
     """Summary of a plan or apply run."""
@@ -236,6 +240,7 @@ def detect_tweak(
             registry_changes=tuple(reg_details),
             cis_id=tweak.cis_id,
             pending_restart=(tweak.requires_reboot or tweak.requires_explorer_restart),
+            irreversible=tweak.irreversible,
         )
 
     if tweak.requires_admin and not env.is_admin:
@@ -278,6 +283,7 @@ def detect_tweak(
         source_url=tweak.source_url,
         registry_changes=tuple(reg_details),
         cis_id=tweak.cis_id,
+        irreversible=tweak.irreversible,
     )
 
 
@@ -378,6 +384,9 @@ def _compensate_run_record(
             feat_snap.feature_name, feat_snap.previous_enabled
         ):
             errors.append(f"feature {feat_snap.feature_name}")
+    for ext_id in reversed(run_record.installed_vscode_extensions):
+        if not system.uninstall_vscode_extension(ext_id):
+            errors.append(f"vscode_extension {ext_id}")
     for pkg_id in reversed(run_record.installed_winget_packages):
         if not system.uninstall_winget_package(pkg_id):
             errors.append(f"winget {pkg_id}")
@@ -392,11 +401,15 @@ def _execute_tweak_mutations(
     backup_dir: Path,
     exported_subtrees: set[tuple[str, str]],
     newly_installed_winget: list[str],
+    newly_installed_extensions: list[str],
+    force_kill_processes: bool = False,
 ) -> None:
     """Apply all operations for a single tweak, raising RuntimeError on any failure."""
     for proc_name in tweak.stop_processes:
-        if system.is_process_running(proc_name) and not system.stop_process(proc_name):
-            raise RuntimeError(f"Failed to stop process '{proc_name}'.")
+        if system.is_process_running(proc_name) and not system.stop_process(proc_name, force=force_kill_processes):
+            raise RuntimeError(
+                f"Failed to stop process '{proc_name}' gracefully (pass --force-kill to force termination)."
+            )
 
     for reg_spec in tweak.registry_specs:
         subtree = (reg_spec.hive, reg_spec.key_path)
@@ -439,6 +452,9 @@ def _execute_tweak_mutations(
 
     for winget_spec in tweak.winget_specs:
         if not system.is_winget_package_installed(winget_spec.package_id):
+            missing_exts = [
+                ext for ext in winget_spec.vscode_extensions if not system.is_vscode_extension_installed(ext)
+            ]
             if not system.install_winget_package(
                 package_id=winget_spec.package_id,
                 scope=winget_spec.scope,
@@ -446,6 +462,7 @@ def _execute_tweak_mutations(
             ):
                 raise RuntimeError(f"Failed to install winget package '{winget_spec.package_id}'.")
             newly_installed_winget.append(winget_spec.package_id)
+            newly_installed_extensions.extend(missing_exts)
 
     if tweak.uninstall_onedrive and not system.uninstall_onedrive_client():
         raise RuntimeError("Failed to uninstall OneDrive client.")
@@ -465,6 +482,8 @@ def apply_profile(
     state_store: StateStore,
     dry_run: bool = True,
     allow_high_risk: bool = False,
+    allow_irreversible: bool = False,
+    force_kill_processes: bool = False,
     wslconfig_path: Path | None = None,
 ) -> ApplySummary:
     """Plan or apply a profile with a write-ahead transaction journal and rollback on failure."""
@@ -476,6 +495,14 @@ def apply_profile(
     if not dry_run and drifted_high_risk and not allow_high_risk:
         raise HighRiskConfirmationError(
             f"Refusing to apply high-risk tweak(s) ({', '.join(drifted_high_risk)}) without --i-know-what-im-doing."
+        )
+
+    drifted_irreversible = [
+        res.tweak_id for res in evaluations if res.status == TweakStatus.DRIFTED and res.irreversible
+    ]
+    if not dry_run and drifted_irreversible and not allow_irreversible:
+        raise IrreversibleActionError(
+            f"Refusing to apply irreversible tweak(s) ({', '.join(drifted_irreversible)}) without --allow-irreversible."
         )
 
     applied_ids: list[str] = []
@@ -507,6 +534,7 @@ def apply_profile(
             evaluations, registry, system
         )
         newly_installed_winget: list[str] = []
+        newly_installed_extensions: list[str] = []
         exported_subtrees: set[tuple[str, str]] = set()
         now_iso = datetime.now(tz=UTC).isoformat()
 
@@ -521,6 +549,7 @@ def apply_profile(
                 task_snapshots=tuple(task_snapshots),
                 feature_snapshots=tuple(feat_snapshots),
                 installed_winget_packages=tuple(newly_installed_winget),
+                installed_vscode_extensions=tuple(newly_installed_extensions),
                 state=state,
                 error=error,
             )
@@ -541,6 +570,8 @@ def apply_profile(
                     backup_dir=backup_dir,
                     exported_subtrees=exported_subtrees,
                     newly_installed_winget=newly_installed_winget,
+                    newly_installed_extensions=newly_installed_extensions,
+                    force_kill_processes=force_kill_processes,
                 )
             except Exception as exc:
                 err_msg = str(exc)

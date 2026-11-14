@@ -17,6 +17,7 @@ from winbearable.const import (
 )
 from winbearable.engine import (
     HighRiskConfirmationError,
+    IrreversibleActionError,
     apply_profile,
     calculate_hardening_score,
     detect_tweak,
@@ -274,6 +275,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             state_store=self.state_store,
             dry_run=False,
             allow_high_risk=True,
+            allow_irreversible=True,
         )
         self.assertIn("hardening.enable_vbs_hvci", summary.applied_ids)
         self.assertTrue(system.onedrive_uninstalled)
@@ -310,6 +312,7 @@ class TestEngineAndTweaks(unittest.TestCase):
             state_store=self.state_store,
             dry_run=False,
             allow_high_risk=True,
+            allow_irreversible=True,
         )
 
         after_score = calculate_hardening_score(env, registry, system)
@@ -368,6 +371,51 @@ class TestEngineAndTweaks(unittest.TestCase):
         self.assertEqual(runs[0].state, TransactionState.FAILED)
         self.assertIsNotNone(runs[0].error)
         self.assertEqual(len(self.state_store.get_incomplete_runs()), 1)
+
+    def test_p0_4_and_p0_5_irreversible_extensions_and_graceful_process_stop(self) -> None:
+        """Cover P0.4 (irreversible guard, VS Code extension rollback) and P0.5 (graceful vs force kill)."""
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(is_admin=True, running_processes={ONEDRIVE_PROCESS_NAME})
+        sys_b.stubborn_processes.add(ONEDRIVE_PROCESS_NAME)
+        env = sys_b.detect_environment(reg)
+
+        # P0.4: Irreversible tweak refused without allow_irreversible=True
+        irrev_profile = ProfileSpec(
+            name="irrev",
+            description="Irreversible test",
+            tweaks={"onedrive.uninstall": True},
+        )
+        with self.assertRaises(IrreversibleActionError):
+            apply_profile(irrev_profile, env, reg, sys_b, self.state_store, dry_run=False)
+
+        # P0.5: Stubborn process refuses graceful stop without force_kill_processes=True
+        proc_profile = ProfileSpec(
+            name="proc-stop",
+            description="Process stop test",
+            tweaks={"onedrive.disable_tray_autorun": True},
+        )
+        reg.set_value(HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive", "OneDrive.exe", REG_SZ)
+        fail_summary = apply_profile(proc_profile, env, reg, sys_b, self.state_store, dry_run=False)
+        self.assertEqual(fail_summary.failed_ids, ("onedrive.disable_tray_autorun",))
+        self.assertTrue(sys_b.is_process_running(ONEDRIVE_PROCESS_NAME))
+
+        # With force_kill_processes=True it succeeds
+        ok_summary = apply_profile(
+            proc_profile, env, reg, sys_b, self.state_store, dry_run=False, force_kill_processes=True
+        )
+        self.assertEqual(ok_summary.failed_ids, ())
+        self.assertFalse(sys_b.is_process_running(ONEDRIVE_PROCESS_NAME))
+
+        # P0.4: VS Code extension installed by run is removed on rollback
+        ext_profile = ProfileSpec(
+            name="vscode",
+            description="VS Code extension rollback test",
+            tweaks={"apps.install_vscode": True},
+        )
+        apply_profile(ext_profile, env, reg, sys_b, self.state_store, dry_run=False)
+        self.assertTrue(sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
+        rollback_runs(self.state_store, reg, sys_b, dry_run=False)
+        self.assertFalse(sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
 
 
 if __name__ == "__main__":

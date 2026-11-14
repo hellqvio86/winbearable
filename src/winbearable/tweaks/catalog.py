@@ -176,6 +176,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         ),
         stop_processes=(ONEDRIVE_PROCESS_NAME,),
         uninstall_onedrive=True,
+        irreversible=True,
     ),
     # -------------------------------------------------------------------------
     # Search & Start Menu (Per-User & Admin)

@@ -91,8 +91,8 @@ class SystemBackend(Protocol):
     def is_process_running(self, process_name: str) -> bool:
         """Return True if a process with the given image name is active."""
 
-    def stop_process(self, process_name: str) -> bool:
-        """Terminate running process by image name via taskkill.exe (no PowerShell)."""
+    def stop_process(self, process_name: str, force: bool = False) -> bool:
+        """Terminate running process gracefully via taskkill.exe, using /F only when force=True."""
 
     def uninstall_onedrive_client(self) -> bool:
         """Invoke OneDriveSetup.exe /uninstall directly with shell=False."""
@@ -110,6 +110,12 @@ class SystemBackend(Protocol):
 
     def uninstall_winget_package(self, package_id: str) -> bool:
         """Uninstall a winget package natively via winget.exe."""
+
+    def is_vscode_extension_installed(self, extension_id: str) -> bool:
+        """Return True if the specified VS Code extension is installed."""
+
+    def uninstall_vscode_extension(self, extension_id: str) -> bool:
+        """Uninstall a VS Code extension natively via code.cmd."""
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
         """Execute wsl.exe with structured argv and shell=False."""
@@ -144,6 +150,7 @@ class InMemorySystemBackend:
         self.edition = edition
         self.is_admin = is_admin
         self.running_processes: set[str] = set(running_processes or set())
+        self.stubborn_processes: set[str] = set()
         self.installed_winget_packages: set[str] = set(installed_winget_packages or set())
         self.installed_vscode_extensions: set[str] = set()
         self.scheduled_tasks: dict[str, bool] = dict(
@@ -245,7 +252,9 @@ class InMemorySystemBackend:
     def is_process_running(self, process_name: str) -> bool:
         return process_name in self.running_processes
 
-    def stop_process(self, process_name: str) -> bool:
+    def stop_process(self, process_name: str, force: bool = False) -> bool:
+        if process_name in self.stubborn_processes and not force:
+            return False
         if process_name in self.running_processes:
             self.running_processes.remove(process_name)
             return True
@@ -272,6 +281,15 @@ class InMemorySystemBackend:
     def uninstall_winget_package(self, package_id: str) -> bool:
         if package_id in self.installed_winget_packages:
             self.installed_winget_packages.remove(package_id)
+            return True
+        return False
+
+    def is_vscode_extension_installed(self, extension_id: str) -> bool:
+        return extension_id in self.installed_vscode_extensions
+
+    def uninstall_vscode_extension(self, extension_id: str) -> bool:
+        if extension_id in self.installed_vscode_extensions:
+            self.installed_vscode_extensions.remove(extension_id)
             return True
         return False
 
@@ -542,11 +560,17 @@ class NativeSystemBackend:
         res = self._run_native_cmd(["tasklist.exe", "/FI", f"IMAGENAME eq {process_name}", "/NH"])
         return process_name.lower() in res.stdout.lower()
 
-    def stop_process(self, process_name: str) -> bool:
+    def stop_process(self, process_name: str, force: bool = False) -> bool:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd(["taskkill.exe", "/F", "/IM", process_name])
-        return res.returncode == 0
+        # Try graceful close first without /F
+        res = self._run_native_cmd(["taskkill.exe", "/IM", process_name], timeout=30.0)
+        if res.returncode == 0 and not self.is_process_running(process_name):
+            return True
+        if not force:
+            return False
+        force_res = self._run_native_cmd(["taskkill.exe", "/F", "/IM", process_name], timeout=30.0)
+        return force_res.returncode == 0 and not self.is_process_running(process_name)
 
     def uninstall_onedrive_client(self) -> bool:
         if self._platform != "win32":
@@ -634,6 +658,21 @@ class NativeSystemBackend:
         if ok:
             self._winget_installed_cache[package_id.lower()] = False
         return ok
+
+    def is_vscode_extension_installed(self, extension_id: str) -> bool:
+        if self._platform != "win32":
+            return False
+        res = self._run_native_cmd(["code.cmd", "--list-extensions"], timeout=30.0)
+        if res.returncode != 0:
+            return False
+        target = extension_id.lower()
+        return any(line.strip().lower() == target for line in res.stdout.splitlines())
+
+    def uninstall_vscode_extension(self, extension_id: str) -> bool:
+        if self._platform != "win32":
+            return False
+        res = self._run_native_cmd(["code.cmd", "--uninstall-extension", extension_id], timeout=60.0)
+        return res.returncode == 0
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
         long_ops = {"--install", "--export", "--import"}

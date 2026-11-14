@@ -309,7 +309,12 @@ class TestBackendsAndCoverage(unittest.TestCase):
                 self.assertEqual(env_win.wsl_version, "2.4.0.0")
                 win_sys.set_service_start_type(reg, "WSearch", 4)
                 self.assertTrue(win_sys.is_process_running("OneDrive.exe"))
-                self.assertTrue(win_sys.stop_process("OneDrive.exe"))
+                with patch.object(win_sys, "is_process_running", return_value=False):
+                    self.assertTrue(win_sys.stop_process("OneDrive.exe"))
+                with patch.object(win_sys, "is_process_running", return_value=True):
+                    self.assertFalse(win_sys.stop_process("OneDrive.exe", force=False))
+                with patch.object(win_sys, "is_process_running", side_effect=[True, False]):
+                    self.assertTrue(win_sys.stop_process("OneDrive.exe", force=True))
                 self.assertTrue(win_sys.uninstall_onedrive_client())
                 self.assertTrue(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
                 self.assertTrue(
