@@ -232,3 +232,114 @@ def audit_wsl(env: EnvironmentInfo, wslconfig_path: Path | None = None) -> dict[
         "firewall_enabled": "firewall=true" in wslconfig_text.replace(" ", ""),
         "dns_tunneling": "dnsTunneling=true" in wslconfig_text.replace(" ", ""),
     }
+
+
+WSL_LINUX_SYSCTL_CONF = """# Managed by winbearable (wb wsl baseline)
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+"""
+
+
+def install_wsl_distro(
+    system: SystemBackend,
+    distro: str,
+    web_download: bool = False,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Install a WSL2 distribution via wsl.exe --install (with optional --web-download Store bypass)."""
+    cmd = ["--install", "-d", distro]
+    if web_download:
+        cmd.append("--web-download")
+    returncode = 0
+    if not dry_run:
+        res = system.run_wsl_command(cmd)
+        returncode = res.returncode
+    return {
+        "dry_run": dry_run,
+        "distro": distro,
+        "web_download": web_download,
+        "command": ["wsl.exe", *cmd],
+        "returncode": returncode,
+    }
+
+
+def export_wsl_distro(
+    system: SystemBackend,
+    distro: str,
+    output_file: Path,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Export a WSL2 distribution to a backup tarball via wsl.exe --export."""
+    cmd = ["--export", distro, str(output_file)]
+    returncode = 0
+    if not dry_run:
+        res = system.run_wsl_command(cmd)
+        returncode = res.returncode
+    return {
+        "dry_run": dry_run,
+        "distro": distro,
+        "output_file": str(output_file),
+        "command": ["wsl.exe", *cmd],
+        "returncode": returncode,
+    }
+
+
+def import_wsl_distro(
+    system: SystemBackend,
+    distro: str,
+    install_dir: Path,
+    tarball_file: Path,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Import a WSL2 distribution from a rootfs tarball via wsl.exe --import."""
+    cmd = ["--import", distro, str(install_dir), str(tarball_file), "--version", "2"]
+    returncode = 0
+    if not dry_run:
+        res = system.run_wsl_command(cmd)
+        returncode = res.returncode
+    return {
+        "dry_run": dry_run,
+        "distro": distro,
+        "install_dir": str(install_dir),
+        "tarball_file": str(tarball_file),
+        "command": ["wsl.exe", *cmd],
+        "returncode": returncode,
+    }
+
+
+def apply_wsl_linux_baseline(
+    system: SystemBackend,
+    distro: str,
+    dotfiles_repo: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Configure Linux-side sysctl baseline, isolate git credential helper, and optional chezmoi dotfiles."""
+    sysctl_path = "/etc/sysctl.d/99-winbearable-wsl.conf"
+    steps: list[str] = [
+        f"Write {sysctl_path} (kptr_restrict=2, dmesg_restrict=1, rp_filter=1)",
+        "Isolate git credential helper from Windows Credential Manager",
+    ]
+    if dotfiles_repo:
+        steps.append(f"Apply dotfiles via chezmoi init --apply {dotfiles_repo}")
+
+    if not dry_run:
+        system.run_wsl_command(
+            ["-d", distro, "-u", "root", "--", "tee", sysctl_path],
+            input_text=WSL_LINUX_SYSCTL_CONF,
+        )
+        system.run_wsl_command(
+            ["-d", distro, "-u", "root", "--", "git", "config", "--system", "--unset-all", "credential.helper"]
+        )
+        if dotfiles_repo:
+            system.run_wsl_command(["-d", distro, "--", "chezmoi", "init", "--apply", dotfiles_repo])
+
+    return {
+        "dry_run": dry_run,
+        "distro": distro,
+        "sysctl_path": sysctl_path,
+        "sysctl_content": WSL_LINUX_SYSCTL_CONF,
+        "dotfiles_repo": dotfiles_repo,
+        "steps": steps,
+    }

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 APP_NAME = "winbearable"
 CLI_NAME = "wb"
@@ -52,6 +52,8 @@ CLOUD_DOMAIN_JOIN_KEY = r"SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinI
 MDM_ENROLLMENTS_KEY = r"SOFTWARE\Microsoft\Enrollments"
 DEFENDER_KEY = r"SOFTWARE\Microsoft\Windows Defender"
 SECURE_BOOT_KEY = r"SYSTEM\CurrentControlSet\Control\SecureBoot\State"
+BITLOCKER_STATUS_KEY = r"SYSTEM\CurrentControlSet\Control\BitLockerStatus"
+APPLOCKER_POLICIES_KEY = r"SOFTWARE\Policies\Microsoft\Windows\SrpV2"
 
 # OneDrive CLSID and Paths
 ONEDRIVE_CLSID = "{018D5C66-4533-4307-9B53-224DE2ED1FE6}"

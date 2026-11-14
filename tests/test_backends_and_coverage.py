@@ -31,7 +31,14 @@ from winbearable.const import (
     REG_DWORD,
     REG_SZ,
 )
-from winbearable.models import PolicyConflictPath, RegistrySpec, ServiceSnapshot, ServiceSpec
+from winbearable.models import (
+    OptionalFeatureSnapshot,
+    PolicyConflictPath,
+    RegistrySpec,
+    ScheduledTaskSnapshot,
+    ServiceSnapshot,
+    ServiceSpec,
+)
 from winbearable.profiles import (
     ProfileValidationError,
     get_builtin_profiles_dir,
@@ -214,6 +221,13 @@ class TestBackendsAndCoverage(unittest.TestCase):
         self.assertFalse(linux_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
         self.assertFalse(linux_sys.install_winget_package("Microsoft.VisualStudioCode"))
         self.assertFalse(linux_sys.uninstall_winget_package("Microsoft.VisualStudioCode"))
+        self.assertFalse(linux_sys.is_scheduled_task_enabled(r"\Microsoft\Windows\Task"))
+        self.assertFalse(linux_sys.set_scheduled_task_enabled(r"\Microsoft\Windows\Task", False))
+        self.assertFalse(linux_sys.is_optional_feature_enabled("SMB1Protocol"))
+        self.assertFalse(linux_sys.set_optional_feature_enabled("SMB1Protocol", False))
+        self.assertFalse(
+            linux_sys.export_registry_backup("HKLM", "SOFTWARE", Path("/tmp/test.reg"))
+        )
         with patch("os.sysconf", side_effect=[4096, 4194304], create=True):
             self.assertEqual(linux_sys.get_total_memory_bytes(), 16 * GIB_BYTES)
 
@@ -278,6 +292,8 @@ class TestBackendsAndCoverage(unittest.TestCase):
                             "stdout": (
                                 "WSL version: 2.4.0.0\nUbuntu-24.04\nOneDrive.exe 1234\n"
                                 "Microsoft.VisualStudioCode\n"
+                                "Scheduled Task State: Enabled\n"
+                                "State : Enabled\n"
                             ),
                             "stderr": "",
                         },
@@ -302,6 +318,13 @@ class TestBackendsAndCoverage(unittest.TestCase):
                     )
                 )
                 self.assertTrue(win_sys.uninstall_winget_package("Microsoft.VisualStudioCode"))
+                self.assertTrue(win_sys.is_scheduled_task_enabled(r"\Microsoft\Windows\Task"))
+                self.assertTrue(win_sys.set_scheduled_task_enabled(r"\Microsoft\Windows\Task", False))
+                self.assertTrue(win_sys.is_optional_feature_enabled("SMB1Protocol"))
+                self.assertTrue(win_sys.set_optional_feature_enabled("SMB1Protocol", False))
+                self.assertTrue(
+                    win_sys.export_registry_backup("HKLM", "SOFTWARE", Path(tmp_dir) / "backup.reg")
+                )
                 wsl_res = win_sys.run_wsl_command(["--status"])
                 self.assertEqual(wsl_res.returncode, 0)
 
@@ -376,6 +399,22 @@ class TestBackendsAndCoverage(unittest.TestCase):
 
         svc_snap = ServiceSnapshot.from_dict({"service_name": "WSearch", "previous_start_type": 2})
         self.assertEqual(svc_snap.to_dict(), {"service_name": "WSearch", "previous_start_type": 2})
+
+        task_snap = ScheduledTaskSnapshot.from_dict(
+            {"task_path": r"\Microsoft\Windows\Task", "previous_enabled": True}
+        )
+        self.assertEqual(
+            task_snap.to_dict(),
+            {"task_path": r"\Microsoft\Windows\Task", "previous_enabled": True},
+        )
+
+        feat_snap = OptionalFeatureSnapshot.from_dict(
+            {"feature_name": "SMB1Protocol", "previous_enabled": True}
+        )
+        self.assertEqual(
+            feat_snap.to_dict(),
+            {"feature_name": "SMB1Protocol", "previous_enabled": True},
+        )
 
         with self.assertRaises(KeyError):
             get_tweak("unknown.tweak.id")

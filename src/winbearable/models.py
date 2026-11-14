@@ -117,6 +117,22 @@ class ServiceSpec:
 
 
 @dataclass(frozen=True)
+class ScheduledTaskSpec:
+    """Declarative specification for a Windows scheduled task via schtasks.exe."""
+
+    task_path: str
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class OptionalFeatureSpec:
+    """Declarative specification for a Windows optional feature via dism.exe."""
+
+    feature_name: str
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class WingetSpec:
     """Declarative specification for a per-user or machine winget package install."""
 
@@ -141,6 +157,8 @@ class TweakDefinition:
     tested_builds: tuple[int, ...]
     registry_specs: tuple[RegistrySpec, ...] = ()
     service_specs: tuple[ServiceSpec, ...] = ()
+    task_specs: tuple[ScheduledTaskSpec, ...] = ()
+    feature_specs: tuple[OptionalFeatureSpec, ...] = ()
     winget_specs: tuple[WingetSpec, ...] = ()
     stop_processes: tuple[str, ...] = ()
     uninstall_onedrive: bool = False
@@ -165,6 +183,8 @@ class EnvironmentInfo:
     wsl_installed: bool
     wsl_version: str | None
     wsl_distros: tuple[str, ...] = ()
+    bitlocker_protected: bool = False
+    applocker_configured: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize environment info to a JSON-compatible dictionary."""
@@ -180,6 +200,8 @@ class EnvironmentInfo:
             "mdm_enrolled": self.mdm_enrolled,
             "defender_enabled": self.defender_enabled,
             "secure_boot_enabled": self.secure_boot_enabled,
+            "bitlocker_protected": self.bitlocker_protected,
+            "applocker_configured": self.applocker_configured,
             "wsl_installed": self.wsl_installed,
             "wsl_version": self.wsl_version,
             "wsl_distros": list(self.wsl_distros),
@@ -290,6 +312,54 @@ class ServiceSnapshot:
 
 
 @dataclass(frozen=True)
+class ScheduledTaskSnapshot:
+    """Recorded pre-apply state of a Windows scheduled task."""
+
+    task_path: str
+    previous_enabled: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize scheduled task snapshot to a dictionary."""
+        return {
+            "task_path": self.task_path,
+            "previous_enabled": self.previous_enabled,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ScheduledTaskSnapshot":
+        """Deserialize scheduled task snapshot from dictionary."""
+        prev = payload.get("previous_enabled")
+        return cls(
+            task_path=str(payload["task_path"]),
+            previous_enabled=bool(prev) if prev is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class OptionalFeatureSnapshot:
+    """Recorded pre-apply state of a Windows optional feature."""
+
+    feature_name: str
+    previous_enabled: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize optional feature snapshot to a dictionary."""
+        return {
+            "feature_name": self.feature_name,
+            "previous_enabled": self.previous_enabled,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "OptionalFeatureSnapshot":
+        """Deserialize optional feature snapshot from dictionary."""
+        prev = payload.get("previous_enabled")
+        return cls(
+            feature_name=str(payload["feature_name"]),
+            previous_enabled=bool(prev) if prev is not None else None,
+        )
+
+
+@dataclass(frozen=True)
 class RunRecord:
     """A single apply transaction stored in state.json for rollback."""
 
@@ -299,6 +369,8 @@ class RunRecord:
     applied_tweaks: tuple[str, ...]
     registry_snapshots: tuple[RegistryValueSnapshot, ...] = ()
     service_snapshots: tuple[ServiceSnapshot, ...] = ()
+    task_snapshots: tuple[ScheduledTaskSnapshot, ...] = ()
+    feature_snapshots: tuple[OptionalFeatureSnapshot, ...] = ()
     installed_winget_packages: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -310,6 +382,8 @@ class RunRecord:
             "applied_tweaks": list(self.applied_tweaks),
             "registry_snapshots": [snap.to_dict() for snap in self.registry_snapshots],
             "service_snapshots": [snap.to_dict() for snap in self.service_snapshots],
+            "task_snapshots": [snap.to_dict() for snap in self.task_snapshots],
+            "feature_snapshots": [snap.to_dict() for snap in self.feature_snapshots],
             "installed_winget_packages": list(self.installed_winget_packages),
         }
 
@@ -318,6 +392,8 @@ class RunRecord:
         """Deserialize run record from dictionary."""
         reg_snaps = tuple(RegistryValueSnapshot.from_dict(item) for item in payload.get("registry_snapshots", []))
         svc_snaps = tuple(ServiceSnapshot.from_dict(item) for item in payload.get("service_snapshots", []))
+        task_snaps = tuple(ScheduledTaskSnapshot.from_dict(item) for item in payload.get("task_snapshots", []))
+        feat_snaps = tuple(OptionalFeatureSnapshot.from_dict(item) for item in payload.get("feature_snapshots", []))
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
         return cls(
             run_id=str(payload["run_id"]),
@@ -326,6 +402,8 @@ class RunRecord:
             applied_tweaks=tuple(str(item) for item in payload.get("applied_tweaks", [])),
             registry_snapshots=reg_snaps,
             service_snapshots=svc_snaps,
+            task_snapshots=task_snaps,
+            feature_snapshots=feat_snaps,
             installed_winget_packages=winget_pkgs,
         )
 

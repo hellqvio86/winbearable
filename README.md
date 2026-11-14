@@ -228,6 +228,15 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 | `hardening.enable_lsa_protection` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` | `RunAsPPL` | `REG_DWORD` | `1` |
 | `hardening.enable_vbs_hvci` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard` | `EnableVirtualizationBasedSecurity` | `REG_DWORD` | `1` |
 | `hardening.enable_vbs_hvci` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity` | `Enabled` | `REG_DWORD` | `1` |
+| `bloat.disable_consumer_features` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent` | `DisableWindowsConsumerFeatures` | `REG_DWORD` | `1` |
+| `bloat.disable_consumer_features` | Yes | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SilentInstalledAppsEnabled` | `REG_DWORD` | `0` |
+| `telemetry.disable_scheduled_tasks` | Yes | `schtasks.exe /Change /Disable` | `Compatibility Appraiser`, `ProgramDataUpdater`, `Consolidator`, `UsbCeip` | Task | `Disabled` |
+| `hardening.disable_smbv1` | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters` | `SMB1` | `REG_DWORD` | `0` (+ `dism.exe` `SMB1Protocol` disabled) |
+| `hardening.disable_mdns` | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters` | `EnableMDNS` | `REG_DWORD` | `0` |
+| `hardening.enable_firewall_all_profiles` | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\*Profile` | `EnableFirewall` / `DefaultInboundAction` | `REG_DWORD` | `1` / `1` |
+| `hardening.defender_cloud_and_pua` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender` | `PUAProtection` / `SpynetReporting` / `SubmitSamplesConsent` | `REG_DWORD` | `1` / `2` / `1` |
+| `hardening.disable_guest_and_blank_passwords` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` | `LimitBlankPasswordUse` / `EnableGuestAccount` | `REG_DWORD` | `1` / `0` |
+| `hardening.browser_privacy_baseline` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Edge` & `Google\Chrome` | `PasswordManagerEnabled` / `TrackingPrevention` | `REG_DWORD` | `0` / `2` |
 
 ---
 
@@ -236,7 +245,7 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 | Profile | Requires Admin? | What It Configures |
 | :--- | :--- | :--- |
 | [`profiles/user-only.toml`](profiles/user-only.toml) | **No** (`HKCU` / user scope) | Installs Windows-side VS Code + `ms-vscode-remote.remote-wsl`, kills OneDrive tray autorun & Explorer pin, disables Bing web search, Search Highlights, taskbar search box, Start menu ads/recommendations, Widgets/Chat/Task View, restores classic Windows 11 right-click menu, shows file extensions/dotfiles, disables user Copilot, Advertising ID, and WSH. |
-| [`profiles/owner.toml`](profiles/owner.toml) | **Yes** (`extends = "user-only"`) | Adds machine-wide OneDrive sync block (`DisableFileSyncNGSC=1`), disables Windows Recall & Copilot machine-wide, sets minimal telemetry, disables LLMNR, WPAD, AutoRun, and enables PowerShell ScriptBlock & 4688 command-line auditing. |
+| [`profiles/owner.toml`](profiles/owner.toml) | **Yes** (`extends = "user-only"`) | Adds machine-wide OneDrive sync block (`DisableFileSyncNGSC=1`), disables Windows Recall & Copilot machine-wide, blocks silent consumer bloatware, disables telemetry & CEIP scheduled tasks, disables SMBv1/LLMNR/mDNS/WPAD/AutoRun, enforces Windows Firewall + Defender Cloud/PUA + Guest/Blank-Password lockdown + Browser privacy baseline, and enables PowerShell ScriptBlock & 4688 command-line auditing. |
 | [`profiles/paranoid.toml`](profiles/paranoid.toml) | **Yes** (`extends = "owner"`) | Uninstalls the OneDrive client, disables the `WSearch` indexer service, enables LSA `RunAsPPL` protection, enforces VBS/HVCI (`--i-know-what-im-doing`), and switches WSL2 to `strict` isolation (`[interop] enabled=false`, `[automount] enabled=false`). |
 
 ---
@@ -265,6 +274,9 @@ make release-check # lint + test + TruffleHog + Trivy
 ## Documentation
 
 - [Project Roadmap & TODO](TODO.md)
+- [Per-Tweak Catalog Reference](docs/tweaks-reference.md)
+- [Frequently Asked Questions (FAQ)](docs/faq.md)
+- [Ex-Work PC Ownership & Reset Checklist](docs/ex-work-pc-checklist.md)
 - [Linux Person's Windows Cheat Sheet](docs/linux-to-windows-cheatsheet.md)
 - [AI Agent Instructions (`AGENTS.md`)](AGENTS.md)
 - [Security Policy (`SECURITY.md`)](SECURITY.md)

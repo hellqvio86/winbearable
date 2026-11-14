@@ -1,4 +1,4 @@
-"""Native system backend for environment detection, services, processes, winget, and WSL."""
+"""Native system backend for environment detection, services, tasks, features, winget, and WSL."""
 
 import ctypes
 import os
@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..const import (
+    APPLOCKER_POLICIES_KEY,
+    BITLOCKER_STATUS_KEY,
     BUILD_WIN11_24H2,
     CLOUD_DOMAIN_JOIN_KEY,
     DEFENDER_KEY,
@@ -40,7 +42,7 @@ class CommandResult:
 
 
 class SystemBackend(Protocol):
-    """Protocol for native OS inspection, service control, winget apps, and process termination."""
+    """Protocol for native OS inspection, services, tasks, features, winget apps, and processes."""
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         """Inspect host environment using native registry and Win32 APIs."""
@@ -50,6 +52,21 @@ class SystemBackend(Protocol):
 
     def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> None:
         """Configure service Start type natively via registry and sc.exe."""
+
+    def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
+        """Return True if scheduled task is enabled, False if disabled, or None if missing."""
+
+    def set_scheduled_task_enabled(self, task_path: str, enabled: bool) -> bool:
+        """Enable or disable a scheduled task natively via schtasks.exe."""
+
+    def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
+        """Return True if Windows optional feature is enabled, False if disabled."""
+
+    def set_optional_feature_enabled(self, feature_name: str, enabled: bool) -> bool:
+        """Enable or disable a Windows optional feature natively via dism.exe."""
+
+    def export_registry_backup(self, hive: str, key_path: str, output_path: Path) -> bool:
+        """Export a registry subtree to a .reg file via reg.exe export before admin apply."""
 
     def is_process_running(self, process_name: str) -> bool:
         """Return True if a process with the given image name is active."""
@@ -93,6 +110,8 @@ class InMemorySystemBackend:
         is_admin: bool = False,
         running_processes: set[str] | None = None,
         installed_winget_packages: set[str] | None = None,
+        scheduled_tasks: dict[str, bool] | None = None,
+        optional_features: dict[str, bool] | None = None,
         wsl_installed: bool = True,
         wsl_version: str | None = "2.3.26.0",
         wsl_distros: tuple[str, ...] = ("Ubuntu-24.04", "FedoraLinux-42"),
@@ -107,6 +126,18 @@ class InMemorySystemBackend:
         self.running_processes: set[str] = set(running_processes or set())
         self.installed_winget_packages: set[str] = set(installed_winget_packages or set())
         self.installed_vscode_extensions: set[str] = set()
+        self.scheduled_tasks: dict[str, bool] = dict(
+            scheduled_tasks
+            if scheduled_tasks is not None
+            else {
+                r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser": True,
+                r"\Microsoft\Windows\Customer Experience Improvement Program\Consolidator": True,
+            }
+        )
+        self.optional_features: dict[str, bool] = dict(
+            optional_features if optional_features is not None else {"SMB1Protocol": True}
+        )
+        self.exported_backups: list[tuple[str, str, str]] = []
         self.wsl_installed = wsl_installed
         self.wsl_version = wsl_version
         self.wsl_distros = wsl_distros
@@ -139,6 +170,11 @@ class InMemorySystemBackend:
         sb_val = registry.get_value(HIVE_HKLM, SECURE_BOOT_KEY, "UEFISecureBootEnabled")
         secure_boot_enabled = bool(sb_val and sb_val[0] == 1)
 
+        bl_val = registry.get_value(HIVE_HKLM, BITLOCKER_STATUS_KEY, "BootStatus")
+        bitlocker_protected = bool(bl_val and bl_val[0] == 1)
+
+        applocker_configured = len(registry.list_subkeys(HIVE_HKLM, APPLOCKER_POLICIES_KEY)) > 0
+
         return EnvironmentInfo(
             os_name="Windows" if self.is_windows else platform.system(),
             is_windows=self.is_windows,
@@ -154,6 +190,8 @@ class InMemorySystemBackend:
             wsl_installed=self.wsl_installed,
             wsl_version=self.wsl_version,
             wsl_distros=self.wsl_distros,
+            bitlocker_protected=bitlocker_protected,
+            applocker_configured=applocker_configured,
         )
 
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
@@ -166,6 +204,24 @@ class InMemorySystemBackend:
     def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> None:
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
         registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
+
+    def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
+        return self.scheduled_tasks.get(task_path, False)
+
+    def set_scheduled_task_enabled(self, task_path: str, enabled: bool) -> bool:
+        self.scheduled_tasks[task_path] = enabled
+        return True
+
+    def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
+        return self.optional_features.get(feature_name, False)
+
+    def set_optional_feature_enabled(self, feature_name: str, enabled: bool) -> bool:
+        self.optional_features[feature_name] = enabled
+        return True
+
+    def export_registry_backup(self, hive: str, key_path: str, output_path: Path) -> bool:
+        self.exported_backups.append((hive, key_path, str(output_path)))
+        return True
 
     def is_process_running(self, process_name: str) -> bool:
         return process_name in self.running_processes
@@ -301,6 +357,10 @@ class NativeSystemBackend:
         sb_val = registry.get_value(HIVE_HKLM, SECURE_BOOT_KEY, "UEFISecureBootEnabled")
         secure_boot_enabled = bool(sb_val and sb_val[0] == 1)
 
+        bl_val = registry.get_value(HIVE_HKLM, BITLOCKER_STATUS_KEY, "BootStatus")
+        bitlocker_protected = bool(bl_val and bl_val[0] == 1)
+        applocker_configured = len(registry.list_subkeys(HIVE_HKLM, APPLOCKER_POLICIES_KEY)) > 0
+
         wsl_installed = False
         wsl_version: str | None = None
         wsl_distros: list[str] = []
@@ -332,6 +392,8 @@ class NativeSystemBackend:
             wsl_installed=wsl_installed,
             wsl_version=wsl_version,
             wsl_distros=tuple(wsl_distros),
+            bitlocker_protected=bitlocker_protected,
+            applocker_configured=applocker_configured,
         )
 
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
@@ -348,6 +410,47 @@ class NativeSystemBackend:
             start_map = {2: "auto", 3: "demand", 4: "disabled"}
             sc_mode = start_map.get(start_type, "demand")
             self._run_native_cmd(["sc.exe", "config", service_name, f"start={sc_mode}"])
+
+    def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
+        if self._platform != "win32":
+            return False
+        res = self._run_native_cmd(["schtasks.exe", "/Query", "/TN", task_path, "/FO", "LIST", "/V"])
+        if res.returncode != 0:
+            return None
+        return "disabled" not in res.stdout.lower()
+
+    def set_scheduled_task_enabled(self, task_path: str, enabled: bool) -> bool:
+        if self._platform != "win32":
+            return False
+        flag = "/ENABLE" if enabled else "/DISABLE"
+        res = self._run_native_cmd(["schtasks.exe", "/Change", "/TN", task_path, flag])
+        return res.returncode == 0
+
+    def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
+        if self._platform != "win32":
+            return False
+        res = self._run_native_cmd(
+            ["dism.exe", "/Online", f"/Get-FeatureInfo", f"/FeatureName:{feature_name}"]
+        )
+        if res.returncode != 0:
+            return None
+        return "state : enabled" in res.stdout.lower()
+
+    def set_optional_feature_enabled(self, feature_name: str, enabled: bool) -> bool:
+        if self._platform != "win32":
+            return False
+        action = "/Enable-Feature" if enabled else "/Disable-Feature"
+        res = self._run_native_cmd(
+            ["dism.exe", "/Online", action, f"/FeatureName:{feature_name}", "/NoRestart", "/Quiet"]
+        )
+        return res.returncode == 0
+
+    def export_registry_backup(self, hive: str, key_path: str, output_path: Path) -> bool:
+        if self._platform != "win32":
+            return False
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        res = self._run_native_cmd(["reg.exe", "export", f"{hive}\\{key_path}", str(output_path), "/y"])
+        return res.returncode == 0
 
     def is_process_running(self, process_name: str) -> bool:
         if self._platform != "win32":

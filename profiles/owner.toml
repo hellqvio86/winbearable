@@ -16,19 +16,28 @@ auto_proxy = true
 systemd = true
 
 [tweaks]
-# --- OneDrive (Admin Policy) ---
+# --- OneDrive & Consumer Bloat (Admin Policy) ---
 # Source: https://learn.microsoft.com/en-us/sharepoint/use-group-policy
 "onedrive.disable_policy" = true
+# Source: https://learn.microsoft.com/en-us/windows/configuration/provisioning-packages/provisioning-CSP-ref
+"bloat.disable_consumer_features" = true
 
-# --- AI & Telemetry (Admin Policy) ---
+# --- AI & Telemetry (Admin Policy & Scheduled Tasks) ---
 # Source: https://learn.microsoft.com/en-us/windows/privacy/manage-windows-recall
 "ai.disable_copilot_machine" = true
 "ai.disable_recall" = true
 "privacy.telemetry_minimal" = true
+"telemetry.disable_scheduled_tasks" = true
 
 # --- Native Hardening (Admin Policy, CIS Benchmark) ---
+"hardening.disable_smbv1" = true
 "hardening.disable_llmnr" = true
+"hardening.disable_mdns" = true
 "hardening.disable_wpad" = true
 "hardening.disable_autorun" = true
+"hardening.enable_firewall_all_profiles" = true
+"hardening.defender_cloud_and_pua" = true
+"hardening.disable_guest_and_blank_passwords" = true
+"hardening.browser_privacy_baseline" = true
 "hardening.powershell_scriptblock_logging" = true
 "hardening.cmdline_process_audit" = true

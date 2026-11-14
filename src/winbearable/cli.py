@@ -30,7 +30,14 @@ from .profiles import (
 )
 from .state import StateStore
 from .tui import launch_tui
-from .wsl import audit_wsl, plan_or_apply_wsl
+from .wsl import (
+    apply_wsl_linux_baseline,
+    audit_wsl,
+    export_wsl_distro,
+    import_wsl_distro,
+    install_wsl_distro,
+    plan_or_apply_wsl,
+)
 
 
 def _print_json(payload: dict[str, Any]) -> None:
@@ -140,6 +147,35 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_apply_p.add_argument("--wslconfig", default=None, help="Custom .wslconfig path")
     wsl_apply_p.add_argument("--apply", action="store_true", help="Actually write .wslconfig and /etc/wsl.conf")
     wsl_apply_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    wsl_inst_p = wsl_sub.add_parser("install", help="Install a WSL2 distro (with --web-download Store fallback)")
+    wsl_inst_p.add_argument("distro", help="Distro name (e.g. Ubuntu-24.04 or FedoraLinux-42)")
+    wsl_inst_p.add_argument(
+        "--web-download",
+        action="store_true",
+        help="Download directly from GitHub, bypassing Store",
+    )
+    wsl_inst_p.add_argument("--apply", action="store_true", help="Execute installation")
+    wsl_inst_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    wsl_exp_p = wsl_sub.add_parser("export", help="Export a WSL2 distro to a backup tarball")
+    wsl_exp_p.add_argument("distro", help="Distro name to export")
+    wsl_exp_p.add_argument("output", help="Output .tar file path")
+    wsl_exp_p.add_argument("--apply", action="store_true", help="Execute export")
+    wsl_exp_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    wsl_imp_p = wsl_sub.add_parser("import", help="Import a WSL2 distro from a rootfs tarball")
+    wsl_imp_p.add_argument("distro", help="Distro name to register")
+    wsl_imp_p.add_argument("install_dir", help="Target directory for the ext4.vhdx")
+    wsl_imp_p.add_argument("tarball", help="Path to rootfs .tar / .tar.gz archive")
+    wsl_imp_p.add_argument("--apply", action="store_true", help="Execute import")
+    wsl_imp_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    wsl_base_p = wsl_sub.add_parser("baseline", help="Apply Linux-side sysctl, git cred isolation & dotfiles baseline")
+    wsl_base_p.add_argument("--distro", required=True, help="Target WSL distro name")
+    wsl_base_p.add_argument("--dotfiles-repo", default=None, help="Optional chezmoi dotfiles repository URL")
+    wsl_base_p.add_argument("--apply", action="store_true", help="Execute Linux-side baseline commands")
+    wsl_base_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     return parser
 
@@ -306,6 +342,65 @@ def run_cli(
                     f".wslconfig ({wsl_report['wslconfig_path']}): exists={wsl_report['wslconfig_exists']}, "
                     f"mirrored={wsl_report['mirrored_networking']}, firewall={wsl_report['firewall_enabled']}\n"
                 )
+            return 0
+
+        if args.wsl_command == "install":
+            inst_res = install_wsl_distro(
+                system=sys_backend,
+                distro=args.distro,
+                web_download=bool(args.web_download),
+                dry_run=not args.apply,
+            )
+            if args.json:
+                _print_json(inst_res)
+            else:
+                tag = "DRY-RUN" if inst_res["dry_run"] else "EXECUTED"
+                sys.stdout.write(f"[{tag}] {' '.join(inst_res['command'])}\n")
+            return 0
+
+        if args.wsl_command == "export":
+            exp_res = export_wsl_distro(
+                system=sys_backend,
+                distro=args.distro,
+                output_file=Path(args.output),
+                dry_run=not args.apply,
+            )
+            if args.json:
+                _print_json(exp_res)
+            else:
+                tag = "DRY-RUN" if exp_res["dry_run"] else "EXECUTED"
+                sys.stdout.write(f"[{tag}] {' '.join(exp_res['command'])}\n")
+            return 0
+
+        if args.wsl_command == "import":
+            imp_res = import_wsl_distro(
+                system=sys_backend,
+                distro=args.distro,
+                install_dir=Path(args.install_dir),
+                tarball_file=Path(args.tarball),
+                dry_run=not args.apply,
+            )
+            if args.json:
+                _print_json(imp_res)
+            else:
+                tag = "DRY-RUN" if imp_res["dry_run"] else "EXECUTED"
+                sys.stdout.write(f"[{tag}] {' '.join(imp_res['command'])}\n")
+            return 0
+
+        if args.wsl_command == "baseline":
+            base_res = apply_wsl_linux_baseline(
+                system=sys_backend,
+                distro=args.distro,
+                dotfiles_repo=args.dotfiles_repo,
+                dry_run=not args.apply,
+            )
+            if args.json:
+                _print_json(base_res)
+            else:
+                tag = "DRY-RUN" if base_res["dry_run"] else "APPLIED"
+                sys.stdout.write(f"[{tag}] WSL Linux baseline for {args.distro}:\n")
+                for step in base_res["steps"]:
+                    sys.stdout.write(f"  - {step}\n")
             return 0
 
         is_apply = args.wsl_command == "apply" and bool(getattr(args, "apply", False))

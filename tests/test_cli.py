@@ -188,6 +188,73 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code_audit_h, 0)
         self.assertIn("WSL Installed:", stdout_audit_h)
 
+        # wsl install (dry-run and apply, human and JSON)
+        code_inst_dry, stdout_inst_dry, _ = self._invoke(
+            ["wsl", "install", "Ubuntu-24.04", "--web-download"]
+        )
+        self.assertEqual(code_inst_dry, 0)
+        self.assertIn("[DRY-RUN] wsl.exe --install", stdout_inst_dry)
+
+        code_inst_json, stdout_inst_json, _ = self._invoke(
+            ["wsl", "install", "Ubuntu-24.04", "--apply", "--json"]
+        )
+        self.assertEqual(code_inst_json, 0)
+        self.assertFalse(json.loads(stdout_inst_json)["dry_run"])
+
+        # wsl export & import
+        code_exp, stdout_exp, _ = self._invoke(
+            ["wsl", "export", "Ubuntu-24.04", "backup.tar"]
+        )
+        self.assertEqual(code_exp, 0)
+        self.assertIn("[DRY-RUN] wsl.exe --export", stdout_exp)
+
+        code_exp_app, stdout_exp_app, _ = self._invoke(
+            ["wsl", "export", "Ubuntu-24.04", "backup.tar", "--apply", "--json"]
+        )
+        self.assertEqual(code_exp_app, 0)
+        self.assertFalse(json.loads(stdout_exp_app)["dry_run"])
+
+        code_imp, stdout_imp, _ = self._invoke(
+            ["wsl", "import", "Ubuntu-Restored", "C:\\WSL", "backup.tar"]
+        )
+        self.assertEqual(code_imp, 0)
+        self.assertIn("[DRY-RUN] wsl.exe --import", stdout_imp)
+
+        code_imp_app, stdout_imp_app, _ = self._invoke(
+            ["wsl", "import", "Ubuntu-Restored", "C:\\WSL", "backup.tar", "--apply", "--json"]
+        )
+        self.assertEqual(code_imp_app, 0)
+        self.assertFalse(json.loads(stdout_imp_app)["dry_run"])
+
+        # wsl baseline
+        code_base, stdout_base, _ = self._invoke(
+            [
+                "wsl",
+                "baseline",
+                "--distro",
+                "Ubuntu-24.04",
+                "--dotfiles-repo",
+                "https://github.com/example/dotfiles.git",
+            ]
+        )
+        self.assertEqual(code_base, 0)
+        self.assertIn("99-winbearable-wsl.conf", stdout_base)
+
+        code_base_app, stdout_base_app, _ = self._invoke(
+            [
+                "wsl",
+                "baseline",
+                "--distro",
+                "Ubuntu-24.04",
+                "--dotfiles-repo",
+                "https://github.com/example/dotfiles.git",
+                "--apply",
+                "--json",
+            ]
+        )
+        self.assertEqual(code_base_app, 0)
+        self.assertFalse(json.loads(stdout_base_app)["dry_run"])
+
         # tui command when textual is absent
         with patch("winbearable.tui.is_textual_available", return_value=False):
             code_tui, _, stderr_tui = self._invoke(["tui", "--profile", "user-only"])

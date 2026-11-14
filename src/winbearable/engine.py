@@ -10,11 +10,13 @@ from .backends.system import SystemBackend
 from .const import ACTION_DELETE
 from .models import (
     EnvironmentInfo,
+    OptionalFeatureSnapshot,
     ProfileSpec,
     RegistryChangeDetail,
     RegistryValueSnapshot,
     RiskLevel,
     RunRecord,
+    ScheduledTaskSnapshot,
     ServiceSnapshot,
     TweakCheckResult,
     TweakDefinition,
@@ -154,6 +156,20 @@ def detect_tweak(
                 f"{svc_spec.registry_key_path} [Start]: {actual_start} -> {svc_spec.start_type} (REG_DWORD)"
             )
 
+    for task_spec in tweak.task_specs:
+        actual_enabled = system.is_scheduled_task_enabled(task_spec.task_path)
+        if actual_enabled is not None and actual_enabled != task_spec.enabled:
+            drifted_reasons.append(
+                f"schtasks {task_spec.task_path}: enabled={actual_enabled} -> enabled={task_spec.enabled}"
+            )
+
+    for feat_spec in tweak.feature_specs:
+        actual_feat = system.is_optional_feature_enabled(feat_spec.feature_name)
+        if actual_feat is not None and actual_feat != feat_spec.enabled:
+            drifted_reasons.append(
+                f"dism feature {feat_spec.feature_name}: enabled={actual_feat} -> enabled={feat_spec.enabled}"
+            )
+
     for winget_spec in tweak.winget_specs:
         if not system.is_winget_package_installed(winget_spec.package_id):
             ext_str = f" + extensions {list(winget_spec.vscode_extensions)}" if winget_spec.vscode_extensions else ""
@@ -173,6 +189,10 @@ def detect_tweak(
         ]
         for svc_spec in tweak.service_specs:
             compliant_parts.append(f"{svc_spec.registry_key_path} [Start]={svc_spec.start_type}")
+        for task_spec in tweak.task_specs:
+            compliant_parts.append(f"schtasks:{task_spec.task_path}=enabled({task_spec.enabled})")
+        for feat_spec in tweak.feature_specs:
+            compliant_parts.append(f"dism:{feat_spec.feature_name}=enabled({feat_spec.enabled})")
         for winget_spec in tweak.winget_specs:
             compliant_parts.append(f"winget:{winget_spec.package_id}=installed")
         compliant_summary = "; ".join(compliant_parts)
@@ -262,9 +282,17 @@ def apply_profile(
 
     reg_snapshots: list[RegistryValueSnapshot] = []
     svc_snapshots: list[ServiceSnapshot] = []
+    task_snapshots: list[ScheduledTaskSnapshot] = []
+    feat_snapshots: list[OptionalFeatureSnapshot] = []
     newly_installed_winget: list[str] = []
     seen_reg_keys: set[tuple[str, str, str]] = set()
     seen_services: set[str] = set()
+    seen_tasks: set[str] = set()
+    seen_features: set[str] = set()
+    exported_subtrees: set[tuple[str, str]] = set()
+
+    run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+    backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
 
     for res in evaluations:
         if res.status == TweakStatus.APPLIED:
@@ -283,6 +311,16 @@ def apply_profile(
                     system.stop_process(proc_name)
 
                 for reg_spec in tweak.registry_specs:
+                    subtree = (reg_spec.hive, reg_spec.key_path)
+                    if tweak.requires_admin and subtree not in exported_subtrees:
+                        safe_name = reg_spec.key_path.replace("\\", "_")
+                        system.export_registry_backup(
+                            reg_spec.hive,
+                            reg_spec.key_path,
+                            backup_dir / f"{reg_spec.hive}_{safe_name}.reg",
+                        )
+                        exported_subtrees.add(subtree)
+
                     reg_id = (reg_spec.hive, reg_spec.key_path, reg_spec.value_name)
                     if reg_id not in seen_reg_keys:
                         reg_snapshots.append(
@@ -309,6 +347,27 @@ def apply_profile(
                         seen_services.add(svc_spec.service_name)
                     system.set_service_start_type(registry, svc_spec.service_name, svc_spec.start_type)
 
+                for task_spec in tweak.task_specs:
+                    if task_spec.task_path not in seen_tasks:
+                        prev_enabled = system.is_scheduled_task_enabled(task_spec.task_path)
+                        task_snapshots.append(
+                            ScheduledTaskSnapshot(task_path=task_spec.task_path, previous_enabled=prev_enabled)
+                        )
+                        seen_tasks.add(task_spec.task_path)
+                    system.set_scheduled_task_enabled(task_spec.task_path, task_spec.enabled)
+
+                for feat_spec in tweak.feature_specs:
+                    if feat_spec.feature_name not in seen_features:
+                        prev_feat = system.is_optional_feature_enabled(feat_spec.feature_name)
+                        feat_snapshots.append(
+                            OptionalFeatureSnapshot(
+                                feature_name=feat_spec.feature_name,
+                                previous_enabled=prev_feat,
+                            )
+                        )
+                        seen_features.add(feat_spec.feature_name)
+                    system.set_optional_feature_enabled(feat_spec.feature_name, feat_spec.enabled)
+
                 for winget_spec in tweak.winget_specs:
                     if not system.is_winget_package_installed(winget_spec.package_id):
                         system.install_winget_package(
@@ -323,7 +382,7 @@ def apply_profile(
 
     run_id: str | None = None
     if not dry_run and applied_ids:
-        run_id = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+        run_id = run_id_candidate
         record = RunRecord(
             run_id=run_id,
             timestamp=datetime.now(tz=UTC).isoformat(),
@@ -331,6 +390,8 @@ def apply_profile(
             applied_tweaks=tuple(applied_ids),
             registry_snapshots=tuple(reg_snapshots),
             service_snapshots=tuple(svc_snapshots),
+            task_snapshots=tuple(task_snapshots),
+            feature_snapshots=tuple(feat_snapshots),
             installed_winget_packages=tuple(newly_installed_winget),
         )
         state_store.append_run(record)
@@ -380,6 +441,12 @@ def rollback_runs(
             for svc_snap in reversed(run_record.service_snapshots):
                 if svc_snap.previous_start_type is not None:
                     system.set_service_start_type(registry, svc_snap.service_name, svc_snap.previous_start_type)
+            for task_snap in reversed(run_record.task_snapshots):
+                if task_snap.previous_enabled is not None:
+                    system.set_scheduled_task_enabled(task_snap.task_path, task_snap.previous_enabled)
+            for feat_snap in reversed(run_record.feature_snapshots):
+                if feat_snap.previous_enabled is not None:
+                    system.set_optional_feature_enabled(feat_snap.feature_name, feat_snap.previous_enabled)
             for pkg_id in reversed(run_record.installed_winget_packages):
                 system.uninstall_winget_package(pkg_id)
         state_store.save_runs(remaining_runs)
