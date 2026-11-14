@@ -286,7 +286,7 @@ class TestBackendsAndCoverage(unittest.TestCase):
             with patch.object(
                 win_sys,
                 "_run_native_cmd",
-                side_effect=lambda args, input_text=None: type(
+                side_effect=lambda args, input_text=None, **_: type(
                     "Res",
                     (),
                     {
@@ -513,7 +513,7 @@ class TestBackendsAndCoverage(unittest.TestCase):
         # Winget cache avoids duplicate subprocess invocations and invalidates on install/uninstall
         call_count = 0
 
-        def _fake_cmd(args: list[str], input_text: str | None = None) -> Any:
+        def _fake_cmd(args: list[str], input_text: str | None = None, **_: Any) -> Any:
             nonlocal call_count
             call_count += 1
             return type(
@@ -531,7 +531,125 @@ class TestBackendsAndCoverage(unittest.TestCase):
             self.assertEqual(call_count, 2)
             win_sys.install_winget_package("Microsoft.VisualStudioCode")
             self.assertTrue(win_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
-            self.assertEqual(call_count, 3)
+            self.assertEqual(call_count, 4)
+
+    def test_p1_registry_fidelity_state_validation_wsl_and_timeouts(self) -> None:
+        """Cover P1.1, P1.2, P1.4, P1.5, P1.6, P1.7, P1.8, P1.9, and P1.10 contracts."""
+        import subprocess
+
+        from winbearable.const import HIVE_HKCU, REG_BINARY, REG_MULTI_SZ
+        from winbearable.engine import apply_profile, detect_tweak
+        from winbearable.models import RegistrySpec, TweakDefinition, TweakStatus
+        from winbearable.state import StateStoreError
+        from winbearable.wsl import WslOperationError, apply_wsl_linux_baseline, audit_wsl, plan_or_apply_wsl
+
+        # P1.1: Lossless REG_BINARY & REG_MULTI_SZ snapshot/restore + type mismatch drift
+        reg = InMemoryRegistryBackend()
+        reg.set_value(HIVE_HKCU, r"Software\Test", "BinVal", b"\x01\x02\x03", REG_BINARY)
+        reg.set_value(HIVE_HKCU, r"Software\Test", "MultiVal", ["a", "b"], REG_MULTI_SZ)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = StateStore(state_path=Path(tmp_dir) / "state.json")
+            snap_bin = reg.snapshot_value(HIVE_HKCU, r"Software\Test", "BinVal")
+            snap_multi = reg.snapshot_value(HIVE_HKCU, r"Software\Test", "MultiVal")
+            roundtrip_bin = snap_bin.from_dict(snap_bin.to_dict())
+            roundtrip_multi = snap_multi.from_dict(snap_multi.to_dict())
+            self.assertEqual(roundtrip_bin.previous_data, b"\x01\x02\x03")
+            self.assertEqual(roundtrip_multi.previous_data, ["a", "b"])
+
+            # P1.7: Corrupt / wrong-version state.json raises StateStoreError
+            store.state_path.write_text("{bad json", encoding="utf-8")
+            with self.assertRaises(StateStoreError):
+                store.load_runs()
+            store.state_path.write_text('{"version": 99, "runs": []}', encoding="utf-8")
+            with self.assertRaises(StateStoreError):
+                store.load_runs()
+            store.state_path.unlink()
+
+            # P1.6: Strict profile validation rejects string booleans, floats, unknown wsl keys
+            bad_prof = Path(tmp_dir) / "bad.toml"
+            bad_prof.write_text('name = "bad"\n[wsl]\nenabled = "false"\n', encoding="utf-8")
+            with self.assertRaises(ProfileValidationError):
+                load_profile(str(bad_prof))
+            bad_prof.write_text('name = "bad"\n[wsl]\nunknown_key = true\n', encoding="utf-8")
+            with self.assertRaises(ProfileValidationError):
+                load_profile(str(bad_prof))
+            bad_prof.write_text('name = "bad"\n[wsl]\nmemory_gb = -4\n', encoding="utf-8")
+            with self.assertRaises(ProfileValidationError):
+                load_profile(str(bad_prof))
+
+            # P1.8 & P1.5: audit_wsl ignores comments/unrelated sections; WSL write failures raise
+            wslcfg = Path(tmp_dir) / ".wslconfig"
+            wslcfg.write_text("# networkingMode=mirrored\n[other]\nfirewall=true\n", encoding="utf-8")
+            sys_b = InMemorySystemBackend()
+            env = sys_b.detect_environment(reg)
+            aud = audit_wsl(env, wslconfig_path=wslcfg)
+            self.assertFalse(aud["mirrored_networking"])
+            self.assertFalse(aud["firewall_enabled"])
+
+            # P1.4: apply_profile integrates [wsl] when wslconfig_path is supplied
+            prof = load_profile("user-only")
+            summary = apply_profile(
+                profile=prof,
+                env=env,
+                registry=reg,
+                system=sys_b,
+                state_store=store,
+                dry_run=False,
+                wslconfig_path=wslcfg,
+            )
+            self.assertIsNotNone(summary.wsl_result)
+            self.assertTrue(wslcfg.is_file())
+
+            # P1.5: WSL command failure raises WslOperationError
+            sys_b.run_wsl_command = lambda args, input_text=None: type(  # type: ignore[method-assign]
+                "Res", (), {"args": tuple(args), "returncode": 1, "stdout": "", "stderr": "boom"}
+            )()
+            with self.assertRaises(WslOperationError):
+                apply_wsl_linux_baseline(sys_b, "Ubuntu-24.04", dry_run=False)
+            with self.assertRaises(WslOperationError):
+                plan_or_apply_wsl(prof.wsl, sys_b, wslconfig_path=wslcfg, distro="Ubuntu-24.04", dry_run=False)
+
+        # P1.1: Type mismatch is reported as DRIFTED
+        reg.set_value(HIVE_HKCU, r"Software\Test", "Num", "1", REG_SZ)
+        tw = TweakDefinition(
+            tweak_id="test.type_check",
+            title="Type Check",
+            description="Check type mismatch",
+            category="test",
+            risk="low",  # type: ignore[arg-type]
+            requires_admin=False,
+            min_build=26100,
+            max_build=None,
+            tested_builds=(26100,),
+            source_url="https://example.com",
+            registry_specs=(RegistrySpec(hive=HIVE_HKCU, key_path=r"Software\Test", value_name="Num", value_data=1),),
+        )
+        self.assertEqual(detect_tweak(tw, env, reg, sys_b).status, TweakStatus.DRIFTED)
+
+        # P1.9: TimeoutExpired returns structured returncode 124
+        native = NativeSystemBackend(platform_override="linux")
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["sleep"], timeout=1.0)):
+            tout = native._run_native_cmd(["sleep", "5"], timeout=1.0)
+            self.assertEqual(tout.returncode, 124)
+            self.assertIn("timed out", tout.stderr)
+
+        # P1.10: XML task detection is locale-independent
+        win_native = NativeSystemBackend(platform_override="win32")
+        with patch.object(
+            win_native,
+            "_run_native_cmd",
+            return_value=type(
+                "R",
+                (),
+                {
+                    "args": (),
+                    "returncode": 0,
+                    "stdout": "<Task><Settings><Enabled>false</Enabled></Settings></Task>",
+                    "stderr": "",
+                },
+            )(),
+        ):
+            self.assertFalse(win_native.is_scheduled_task_enabled(r"\Test\Task"))
 
     def test_profile_and_wsl_edge_cases(self) -> None:
         """Cover remaining validation branches in profiles.py and wsl.py."""

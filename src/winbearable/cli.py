@@ -21,16 +21,17 @@ from .engine import (
     evaluate_profile,
     rollback_runs,
 )
-from .models import TweakStatus, WslConfigSpec
+from .models import EnvironmentInfo, TweakStatus, WslConfigSpec
 from .profiles import (
     ProfileValidationError,
     generate_init_profile_toml,
     get_default_user_profile_path,
     load_profile,
 )
-from .state import StateStore
+from .state import StateStore, StateStoreError
 from .tui import launch_tui
 from .wsl import (
+    WslOperationError,
     apply_wsl_linux_baseline,
     audit_wsl,
     export_wsl_distro,
@@ -38,6 +39,18 @@ from .wsl import (
     install_wsl_distro,
     plan_or_apply_wsl,
 )
+
+
+class UnsupportedPlatformError(RuntimeError):
+    """Raised when a Windows-only mutating command is invoked on a non-Windows host."""
+
+
+def _require_windows_for_mutation(env: EnvironmentInfo, action: str) -> None:
+    if not env.is_windows:
+        raise UnsupportedPlatformError(
+            f"Refusing to run '{action}' on non-Windows host ({env.os_name}). "
+            "Windows and WSL2 mutations are only supported on Windows."
+        )
 
 
 def _print_json(payload: dict[str, Any]) -> None:
@@ -201,29 +214,48 @@ def run_cli(
 
     try:
         if args.command == "doctor":
-            audit = calculate_hardening_score(env, reg_backend, sys_backend)
+            if env.is_windows:
+                audit: dict[str, Any] = calculate_hardening_score(env, reg_backend, sys_backend)
+            else:
+                audit = {
+                    "applicable": False,
+                    "reason": "Not running on Windows",
+                    "passed": 0,
+                    "total": 0,
+                    "score_percent": 0.0,
+                    "cis_passed": 0,
+                    "cis_total": 0,
+                }
             wsl_info = audit_wsl(env)
+            incomplete_runs = store.get_incomplete_runs()
             payload = {
                 "version": __version__,
                 "environment": env.to_dict(),
                 "wsl": wsl_info,
                 "audit": audit,
+                "incomplete_runs": [run.to_dict() for run in incomplete_runs],
             }
             if args.json:
                 _print_json(payload)
             else:
-                distros_str = ", ".join(env.wsl_distros) or "none"
-                sys.stdout.write(
-                    f"winbearable v{__version__} — Doctor Report\n"
-                    f"OS: {env.os_name} (Build {env.windows_build}, Display: {env.display_version}, "
-                    f"Edition: {env.edition})\n"
-                    f"Admin: {env.is_admin} | Domain: {env.domain_joined} | Entra: {env.entra_joined} "
-                    f"| MDM: {env.mdm_enrolled}\n"
-                    f"Defender: {env.defender_enabled} | Secure Boot: {env.secure_boot_enabled}\n"
-                    f"WSL Installed: {env.wsl_installed} (Version: {env.wsl_version}, Distros: {distros_str})\n"
-                    f"Baseline Score: {audit['passed']}/{audit['total']} ({audit['score_percent']}%) "
-                    f"| CIS Checks: {audit['cis_passed']}/{audit['cis_total']}\n"
-                )
+                if not env.is_windows:
+                    sys.stdout.write(
+                        f"winbearable v{__version__} — Doctor Report\n"
+                        f"OS: {env.os_name} (not running on Windows — Windows compliance audit skipped)\n"
+                    )
+                else:
+                    distros_str = ", ".join(env.wsl_distros) or "none"
+                    sys.stdout.write(
+                        f"winbearable v{__version__} — Doctor Report\n"
+                        f"OS: {env.os_name} (Build {env.windows_build}, Display: {env.display_version}, "
+                        f"Edition: {env.edition})\n"
+                        f"Admin: {env.is_admin} | Domain: {env.domain_joined} | Entra: {env.entra_joined} "
+                        f"| MDM: {env.mdm_enrolled}\n"
+                        f"Defender: {env.defender_enabled} | Secure Boot: {env.secure_boot_enabled}\n"
+                        f"WSL Installed: {env.wsl_installed} (Version: {env.wsl_version}, Distros: {distros_str})\n"
+                        f"Baseline Score: {audit['passed']}/{audit['total']} ({audit['score_percent']}%) "
+                        f"| CIS Checks: {audit['cis_passed']}/{audit['cis_total']}\n"
+                    )
             return 0
 
         if args.command == "status":
@@ -259,9 +291,11 @@ def run_cli(
                 _print_json(summary.to_dict())
             else:
                 sys.stdout.write(_format_summary_markdown(summary))
-            return 0
+            return 1 if summary.failed_ids else 0
 
         if args.command == "apply":
+            if args.apply:
+                _require_windows_for_mutation(env, "wb apply --apply")
             profile = load_profile(args.profile)
             summary = apply_profile(
                 profile=profile,
@@ -276,9 +310,11 @@ def run_cli(
                 _print_json(summary.to_dict())
             else:
                 sys.stdout.write(_format_summary_markdown(summary))
-            return 0
+            return 1 if summary.failed_ids else 0
 
         if args.command == "rollback":
+            if args.apply:
+                _require_windows_for_mutation(env, "wb rollback --apply")
             reverted = rollback_runs(
                 state_store=store,
                 registry=reg_backend,
@@ -342,6 +378,11 @@ def run_cli(
                 )
             return 0
 
+        if args.wsl_command in {"install", "export", "import", "baseline", "apply"} and bool(
+            getattr(args, "apply", False)
+        ):
+            _require_windows_for_mutation(env, f"wb wsl {args.wsl_command} --apply")
+
         if args.wsl_command == "install":
             inst_res = install_wsl_distro(
                 system=sys_backend,
@@ -354,7 +395,7 @@ def run_cli(
             else:
                 tag = "DRY-RUN" if inst_res["dry_run"] else "EXECUTED"
                 sys.stdout.write(f"[{tag}] {' '.join(inst_res['command'])}\n")
-            return 0
+            return 1 if inst_res["returncode"] != 0 else 0
 
         if args.wsl_command == "export":
             exp_res = export_wsl_distro(
@@ -368,7 +409,7 @@ def run_cli(
             else:
                 tag = "DRY-RUN" if exp_res["dry_run"] else "EXECUTED"
                 sys.stdout.write(f"[{tag}] {' '.join(exp_res['command'])}\n")
-            return 0
+            return 1 if exp_res["returncode"] != 0 else 0
 
         if args.wsl_command == "import":
             imp_res = import_wsl_distro(
@@ -383,7 +424,7 @@ def run_cli(
             else:
                 tag = "DRY-RUN" if imp_res["dry_run"] else "EXECUTED"
                 sys.stdout.write(f"[{tag}] {' '.join(imp_res['command'])}\n")
-            return 0
+            return 1 if imp_res["returncode"] != 0 else 0
 
         if args.wsl_command == "baseline":
             base_res = apply_wsl_linux_baseline(
@@ -433,7 +474,14 @@ def run_cli(
             sys.stdout.write("Restart WSL to apply: wsl.exe --shutdown\n")
         return 0
 
-    except (ProfileValidationError, HighRiskConfirmationError, KeyError) as exc:
+    except (
+        ProfileValidationError,
+        HighRiskConfirmationError,
+        UnsupportedPlatformError,
+        WslOperationError,
+        StateStoreError,
+        KeyError,
+    ) as exc:
         sys.stderr.write(f"ERROR: {exc}\n")
         return 1
 

@@ -23,7 +23,7 @@ from winbearable.engine import (
     evaluate_profile,
     rollback_runs,
 )
-from winbearable.models import ProfileSpec, RiskLevel, TweakDefinition, TweakStatus
+from winbearable.models import ProfileSpec, RiskLevel, TransactionState, TweakDefinition, TweakStatus
 from winbearable.profiles import load_profile
 from winbearable.state import StateStore
 from winbearable.tweaks import get_all_tweaks, get_tweak
@@ -325,6 +325,49 @@ class TestEngineAndTweaks(unittest.TestCase):
 
         reverted_score = calculate_hardening_score(env, registry, system)
         self.assertEqual(reverted_score["passed"], 0)
+
+    def test_write_ahead_journal_and_compensation_on_failure(self) -> None:
+        """Failed native operation triggers compensating rollback and leaves FAILED journal record."""
+        run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        registry = InMemoryRegistryBackend(
+            initial_values={
+                (HIVE_HKCU, run_key, "OneDrive"): ("OneDrive.exe", REG_SZ),
+            }
+        )
+        system = InMemorySystemBackend(is_admin=True)
+        # Fail the scheduled task operation after the earlier registry tweak succeeds
+        system.set_scheduled_task_enabled = lambda task_path, enabled: False  # type: ignore[method-assign]
+        env = system.detect_environment(registry)
+
+        profile = ProfileSpec(
+            name="fail-mid-run",
+            description="Test write-ahead journal compensation",
+            tweaks={
+                "onedrive.disable_tray_autorun": True,
+                "telemetry.disable_scheduled_tasks": True,
+            },
+        )
+        summary = apply_profile(
+            profile=profile,
+            env=env,
+            registry=registry,
+            system=system,
+            state_store=self.state_store,
+            dry_run=False,
+        )
+        self.assertEqual(summary.failed_ids, ("telemetry.disable_scheduled_tasks",))
+        err_results = [r for r in summary.results if r.status == TweakStatus.ERROR]
+        self.assertEqual(len(err_results), 1)
+
+        # Earlier registry mutation was compensated back to original value
+        self.assertEqual(registry.get_value(HIVE_HKCU, run_key, "OneDrive"), ("OneDrive.exe", REG_SZ))
+
+        # Journal retains the FAILED record and reports it as incomplete
+        runs = self.state_store.load_runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].state, TransactionState.FAILED)
+        self.assertIsNotNone(runs[0].error)
+        self.assertEqual(len(self.state_store.get_incomplete_runs()), 1)
 
 
 if __name__ == "__main__":

@@ -10,10 +10,11 @@ from ..const import (
     REG_BINARY,
     REG_DWORD,
     REG_EXPAND_SZ,
+    REG_MULTI_SZ,
     REG_QWORD,
     REG_SZ,
 )
-from ..models import PolicyConflictPath, RegistryValueSnapshot
+from ..models import PolicyConflictPath, RegistryValueData, RegistryValueSnapshot
 
 
 class RegistryBackend(Protocol):
@@ -25,7 +26,7 @@ class RegistryBackend(Protocol):
     def list_subkeys(self, hive: str, key_path: str) -> list[str]:
         """List immediate subkey names under the specified registry key."""
 
-    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[int | str | None, str] | None:
+    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[RegistryValueData, str] | None:
         """Read (value_data, value_type) or return None if key/value does not exist."""
 
     def set_value(
@@ -33,7 +34,7 @@ class RegistryBackend(Protocol):
         hive: str,
         key_path: str,
         value_name: str,
-        value_data: int | str | None,
+        value_data: RegistryValueData,
         value_type: str = REG_DWORD,
     ) -> None:
         """Create key if needed and set the specified registry value."""
@@ -60,7 +61,7 @@ class InMemoryRegistryBackend:
 
     def __init__(
         self,
-        initial_values: dict[tuple[str, str, str], tuple[int | str | None, str]] | None = None,
+        initial_values: dict[tuple[str, str, str], tuple[RegistryValueData, str]] | None = None,
         initial_keys: set[tuple[str, str]] | None = None,
     ) -> None:
         self._keys: set[tuple[str, str]] = {
@@ -70,7 +71,7 @@ class InMemoryRegistryBackend:
         if initial_keys:
             for hive, raw_path in initial_keys:
                 self._ensure_key_hierarchy(hive, raw_path)
-        self._values: dict[tuple[str, str, str], tuple[int | str | None, str]] = {}
+        self._values: dict[tuple[str, str, str], tuple[RegistryValueData, str]] = {}
         if initial_values:
             for (hive, raw_path, val_name), val_tuple in initial_values.items():
                 norm_path = _normalize_key_path(raw_path)
@@ -106,7 +107,7 @@ class InMemoryRegistryBackend:
                     subkeys.add(remainder)
         return sorted(subkeys)
 
-    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[int | str | None, str] | None:
+    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[RegistryValueData, str] | None:
         norm = _normalize_key_path(key_path)
         return self._values.get((hive, norm, value_name))
 
@@ -115,9 +116,11 @@ class InMemoryRegistryBackend:
         hive: str,
         key_path: str,
         value_name: str,
-        value_data: int | str | None,
+        value_data: RegistryValueData,
         value_type: str = REG_DWORD,
     ) -> None:
+        if value_type not in {REG_SZ, REG_EXPAND_SZ, REG_BINARY, REG_DWORD, REG_QWORD, REG_MULTI_SZ}:
+            raise ValueError(f"Unsupported registry value type: {value_type}")
         norm = _normalize_key_path(key_path)
         self._ensure_key_hierarchy(hive, norm)
         self._values[(hive, norm, value_name)] = (value_data, value_type)
@@ -177,7 +180,7 @@ class InMemoryRegistryBackend:
                 continue
             current_val, _ = existing
             if policy.enforced_value is None or current_val == policy.enforced_value:
-                return f"Enforced by policy at {policy.hive}\\{policy.key_path}\\{policy.value_name}={current_val}"
+                return f"Enforced by policy at {policy.hive}\\{policy.key_path}\\{policy.value_name}={current_val!r}"
         return None
 
 
@@ -201,6 +204,7 @@ class WinregBackend:
             REG_BINARY: int(self._winreg.REG_BINARY),
             REG_DWORD: int(self._winreg.REG_DWORD),
             REG_QWORD: int(self._winreg.REG_QWORD),
+            REG_MULTI_SZ: int(getattr(self._winreg, "REG_MULTI_SZ", 7)),
         }
         self._int_to_type: dict[int, str] = {val: key for key, val in self._type_to_int.items()}
 
@@ -235,16 +239,30 @@ class WinregBackend:
             return []
         return sorted(subkeys)
 
-    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[int | str | None, str] | None:
+    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[RegistryValueData, str] | None:
         root = self._resolve_hive(hive)
         norm = _normalize_key_path(key_path)
         try:
             with self._winreg.OpenKey(root, norm, 0, self._winreg.KEY_READ) as handle:
                 raw_data, raw_type = self._winreg.QueryValueEx(handle, value_name)
-                reg_type = self._int_to_type.get(int(raw_type), REG_SZ)
-                typed_data: int | str | None = raw_data if isinstance(raw_data, (int, str)) else None
+                raw_type_int = int(raw_type)
+                if raw_type_int not in self._int_to_type:
+                    raise ValueError(f"Unsupported registry value type id: {raw_type_int}")
+                reg_type = self._int_to_type[raw_type_int]
+                if isinstance(raw_data, list):
+                    typed_data: RegistryValueData = [str(item) for item in raw_data]
+                elif isinstance(raw_data, (int, str, bytes)):
+                    typed_data = raw_data
+                elif raw_data is None:
+                    typed_data = None
+                else:
+                    raise ValueError(f"Unsupported registry value data type: {type(raw_data).__name__}")
                 return typed_data, reg_type
-        except OSError:
+        except PermissionError:
+            raise
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 5:
+                raise PermissionError(f"Access denied reading {hive}\\{norm}\\{value_name}") from exc
             return None
 
     def set_value(
@@ -252,12 +270,14 @@ class WinregBackend:
         hive: str,
         key_path: str,
         value_name: str,
-        value_data: int | str | None,
+        value_data: RegistryValueData,
         value_type: str = REG_DWORD,
     ) -> None:
         root = self._resolve_hive(hive)
         norm = _normalize_key_path(key_path)
-        raw_type = self._type_to_int.get(value_type, int(self._winreg.REG_DWORD))
+        if value_type not in self._type_to_int:
+            raise ValueError(f"Unsupported registry value type: {value_type}")
+        raw_type = self._type_to_int[value_type]
         with self._winreg.CreateKeyEx(root, norm, 0, self._winreg.KEY_WRITE) as handle:
             self._winreg.SetValueEx(handle, value_name, 0, raw_type, value_data)
 
@@ -318,7 +338,7 @@ class WinregBackend:
                 continue
             current_val, _ = existing
             if policy.enforced_value is None or current_val == policy.enforced_value:
-                return f"Enforced by policy at {policy.hive}\\{policy.key_path}\\{policy.value_name}={current_val}"
+                return f"Enforced by policy at {policy.hive}\\{policy.key_path}\\{policy.value_name}={current_val!r}"
         return None
 
 

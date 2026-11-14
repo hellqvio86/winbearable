@@ -47,26 +47,67 @@ def resolve_profile_path(name_or_path: str) -> Path:
     raise ProfileValidationError(f"Profile '{name_or_path}' not found at {candidate_path} or in {profiles_dir}.")
 
 
+def _require_bool(raw: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in raw:
+        return default
+    val = raw[key]
+    if not isinstance(val, bool):
+        raise ProfileValidationError(f"wsl.{key} must be a boolean, got {type(val).__name__}.")
+    return val
+
+
+def _require_bounded_int(raw: dict[str, Any], key: str, default: int | None, min_val: int, max_val: int) -> int | None:
+    if key not in raw:
+        return default
+    val = raw[key]
+    if val is None:
+        return None
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ProfileValidationError(f"wsl.{key} must be an integer, got {type(val).__name__}.")
+    if val < min_val or val > max_val:
+        raise ProfileValidationError(f"wsl.{key} must be between {min_val} and {max_val}, got {val}.")
+    return val
+
+
 def _parse_wsl_section(raw_wsl: dict[str, Any], base_wsl: WslConfigSpec | None = None) -> WslConfigSpec:
+    allowed_wsl_keys = {
+        "enabled",
+        "mode",
+        "networking_mode",
+        "dns_tunneling",
+        "firewall",
+        "auto_proxy",
+        "systemd",
+        "memory_gb",
+        "processors",
+    }
+    unknown_wsl = set(raw_wsl.keys()) - allowed_wsl_keys
+    if unknown_wsl:
+        raise ProfileValidationError(f"Unknown [wsl] keys: {', '.join(sorted(unknown_wsl))}")
+
     defaults = base_wsl or WslConfigSpec()
-    mode = str(raw_wsl.get("mode", defaults.mode))
-    if mode not in WSL_MODES:
-        raise ProfileValidationError(f"Invalid wsl.mode '{mode}'. Must be one of: {', '.join(WSL_MODES)}")
+    raw_mode = raw_wsl.get("mode", defaults.mode)
+    if not isinstance(raw_mode, str) or raw_mode not in WSL_MODES:
+        raise ProfileValidationError(f"Invalid wsl.mode '{raw_mode}'. Must be one of: {', '.join(WSL_MODES)}")
 
-    mem_raw = raw_wsl.get("memory_gb", defaults.memory_gb)
-    memory_gb = int(mem_raw) if mem_raw is not None else None
+    raw_net = raw_wsl.get("networking_mode", defaults.networking_mode or DEFAULT_WSL_NETWORKING_MODE)
+    allowed_net_modes = {"mirrored", "nat", "none", "bridged"}
+    if not isinstance(raw_net, str) or raw_net not in allowed_net_modes:
+        raise ProfileValidationError(
+            f"Invalid wsl.networking_mode '{raw_net}'. Must be one of: {', '.join(sorted(allowed_net_modes))}"
+        )
 
-    proc_raw = raw_wsl.get("processors", defaults.processors)
-    processors = int(proc_raw) if proc_raw is not None else None
+    memory_gb = _require_bounded_int(raw_wsl, "memory_gb", defaults.memory_gb, 1, 4096)
+    processors = _require_bounded_int(raw_wsl, "processors", defaults.processors, 1, 1024)
 
     return WslConfigSpec(
-        enabled=bool(raw_wsl.get("enabled", defaults.enabled)),
-        mode=mode,
-        networking_mode=str(raw_wsl.get("networking_mode", defaults.networking_mode or DEFAULT_WSL_NETWORKING_MODE)),
-        dns_tunneling=bool(raw_wsl.get("dns_tunneling", defaults.dns_tunneling)),
-        firewall=bool(raw_wsl.get("firewall", defaults.firewall)),
-        auto_proxy=bool(raw_wsl.get("auto_proxy", defaults.auto_proxy)),
-        systemd=bool(raw_wsl.get("systemd", defaults.systemd)),
+        enabled=_require_bool(raw_wsl, "enabled", defaults.enabled),
+        mode=raw_mode,
+        networking_mode=raw_net,
+        dns_tunneling=_require_bool(raw_wsl, "dns_tunneling", defaults.dns_tunneling),
+        firewall=_require_bool(raw_wsl, "firewall", defaults.firewall),
+        auto_proxy=_require_bool(raw_wsl, "auto_proxy", defaults.auto_proxy),
+        systemd=_require_bool(raw_wsl, "systemd", defaults.systemd),
         memory_gb=memory_gb,
         processors=processors,
     )
@@ -82,6 +123,8 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str) -> None:
 
     if "name" not in raw_data or not isinstance(raw_data["name"], str):
         raise ProfileValidationError(f"Profile '{source_label}' must define a string 'name'.")
+    if "description" in raw_data and not isinstance(raw_data["description"], str):
+        raise ProfileValidationError(f"Profile '{source_label}' 'description' must be a string.")
 
     raw_tweaks = raw_data.get("tweaks", {})
     if not isinstance(raw_tweaks, dict):

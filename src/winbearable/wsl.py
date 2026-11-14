@@ -2,12 +2,19 @@
 
 import os
 import re
+import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from .backends.system import GIB_BYTES, SystemBackend
 from .models import EnvironmentInfo, WslConfigSpec
+
+
+class WslOperationError(RuntimeError):
+    """Raised when a WSL configuration write or command fails."""
+
 
 SECTION_HEADER_RE = re.compile(r"^\s*\[(?P<section>[^\]]+)\]\s*(?:#.*|;.*)?$")
 KEY_VALUE_RE = re.compile(
@@ -144,8 +151,36 @@ def get_default_wslconfig_path() -> Path:
     return Path.home() / ".wslconfig"
 
 
-def _atomic_write_text(target_path: Path, content: str) -> None:
+def _parse_ini_sections(text: str) -> dict[str, dict[str, str]]:
+    """Parse INI text structurally, ignoring comments and whitespace."""
+    sections: dict[str, dict[str, str]] = {}
+    current_section: str | None = None
+    for raw_line in text.lstrip("\ufeff").splitlines():
+        line = raw_line.rstrip("\r").strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        sec_match = SECTION_HEADER_RE.match(line)
+        if sec_match is not None:
+            current_section = sec_match.group("section").strip()
+            sections.setdefault(current_section, {})
+            continue
+        kv_match = KEY_VALUE_RE.match(line)
+        if kv_match is not None and current_section is not None:
+            key_name = kv_match.group("key").strip()
+            val = kv_match.group("val").strip()
+            sections[current_section][key_name] = val
+    return sections
+
+
+def _atomic_write_text(target_path: Path, content: str) -> Path | None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path: Path | None = None
+    existing_mode: int | None = None
+    if target_path.is_file():
+        existing_mode = stat.S_IMODE(target_path.stat().st_mode)
+        backup_path = target_path.with_suffix(f"{target_path.suffix}.bak")
+        shutil.copy2(target_path, backup_path)
+
     fd, temp_path_str = tempfile.mkstemp(
         prefix=f"{target_path.name}.",
         dir=str(target_path.parent),
@@ -153,11 +188,16 @@ def _atomic_write_text(target_path: Path, content: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if existing_mode is not None:
+            os.chmod(temp_path_str, existing_mode)
         os.replace(temp_path_str, target_path)
     except Exception:
         if os.path.exists(temp_path_str):
             os.unlink(temp_path_str)
         raise
+    return backup_path
 
 
 def plan_or_apply_wsl(
@@ -169,7 +209,9 @@ def plan_or_apply_wsl(
 ) -> dict[str, Any]:
     """Plan or apply .wslconfig (sizing memory to 75% of host RAM) and per-distro /etc/wsl.conf."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
-    existing_wslconfig = target_wslconfig.read_text(encoding="utf-8") if target_wslconfig.is_file() else ""
+    existing_wslconfig = (
+        target_wslconfig.read_text(encoding="utf-8").lstrip("\ufeff") if target_wslconfig.is_file() else ""
+    )
 
     host_memory_bytes = system.get_total_memory_bytes()
     host_memory_gib_str = format_host_memory_gib(host_memory_bytes)
@@ -178,9 +220,13 @@ def plan_or_apply_wsl(
     desired_wslconfig_sections = build_wslconfig_sections(spec, host_memory_bytes)
     merged_wslconfig = merge_ini_preserving_comments(existing_wslconfig, desired_wslconfig_sections)
     wslconfig_changed = merged_wslconfig != existing_wslconfig
+    backup_path: Path | None = None
 
     if not dry_run and wslconfig_changed:
-        _atomic_write_text(target_wslconfig, merged_wslconfig)
+        backup_path = _atomic_write_text(target_wslconfig, merged_wslconfig)
+        verified_text = target_wslconfig.read_text(encoding="utf-8")
+        if verified_text != merged_wslconfig:
+            raise WslOperationError(f"Verification failed after writing {target_wslconfig}.")
 
     distro_sections = build_distro_wsl_conf_sections(spec)
     distro_changed = False
@@ -192,10 +238,15 @@ def plan_or_apply_wsl(
         merged_distro_conf = merge_ini_preserving_comments(existing_distro_conf, distro_sections)
         distro_changed = merged_distro_conf != existing_distro_conf
         if not dry_run and distro_changed:
-            system.run_wsl_command(
+            write_res = system.run_wsl_command(
                 ["-d", distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
                 input_text=merged_distro_conf,
             )
+            if write_res.returncode != 0:
+                raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro}': {write_res.stderr}")
+            verify_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
+            if verify_res.returncode != 0 or verify_res.stdout != merged_distro_conf:
+                raise WslOperationError(f"Verification failed after writing /etc/wsl.conf in '{distro}'.")
 
     return {
         "dry_run": dry_run,
@@ -204,6 +255,7 @@ def plan_or_apply_wsl(
         "host_memory_gib": host_memory_gib_str,
         "memory_limit_gib": memory_gib,
         "wslconfig_path": str(target_wslconfig),
+        "wslconfig_backup_path": str(backup_path) if backup_path is not None else None,
         "wslconfig_changed": wslconfig_changed,
         "wslconfig_content": merged_wslconfig,
         "distro": distro,
@@ -217,6 +269,8 @@ def audit_wsl(env: EnvironmentInfo, wslconfig_path: Path | None = None) -> dict[
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     has_wslconfig = target_wslconfig.is_file()
     wslconfig_text = target_wslconfig.read_text(encoding="utf-8") if has_wslconfig else ""
+    sections = _parse_ini_sections(wslconfig_text) if has_wslconfig else {}
+    wsl2_sec = sections.get("wsl2", {})
 
     return {
         "wsl_installed": env.wsl_installed,
@@ -224,9 +278,9 @@ def audit_wsl(env: EnvironmentInfo, wslconfig_path: Path | None = None) -> dict[
         "distros": list(env.wsl_distros),
         "wslconfig_path": str(target_wslconfig),
         "wslconfig_exists": has_wslconfig,
-        "mirrored_networking": "networkingMode=mirrored" in wslconfig_text.replace(" ", ""),
-        "firewall_enabled": "firewall=true" in wslconfig_text.replace(" ", ""),
-        "dns_tunneling": "dnsTunneling=true" in wslconfig_text.replace(" ", ""),
+        "mirrored_networking": wsl2_sec.get("networkingMode", "").lower() == "mirrored",
+        "firewall_enabled": wsl2_sec.get("firewall", "").lower() == "true",
+        "dns_tunneling": wsl2_sec.get("dnsTunneling", "").lower() == "true",
     }
 
 
@@ -315,21 +369,31 @@ def apply_wsl_linux_baseline(
     sysctl_path = "/etc/sysctl.d/99-winbearable-wsl.conf"
     steps: list[str] = [
         f"Write {sysctl_path} (kptr_restrict=2, dmesg_restrict=1, rp_filter=1)",
+        "Reload sysctl settings via sysctl --system",
         "Isolate git credential helper from Windows Credential Manager",
     ]
     if dotfiles_repo:
         steps.append(f"Apply dotfiles via chezmoi init --apply {dotfiles_repo}")
 
     if not dry_run:
-        system.run_wsl_command(
+        r1 = system.run_wsl_command(
             ["-d", distro, "-u", "root", "--", "tee", sysctl_path],
             input_text=WSL_LINUX_SYSCTL_CONF,
         )
-        system.run_wsl_command(
+        if r1.returncode != 0:
+            raise WslOperationError(f"Failed to write {sysctl_path} in '{distro}': {r1.stderr}")
+        r2 = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sysctl", "--system"])
+        if r2.returncode != 0:
+            raise WslOperationError(f"Failed to reload sysctl in '{distro}': {r2.stderr}")
+        r3 = system.run_wsl_command(
             ["-d", distro, "-u", "root", "--", "git", "config", "--system", "--unset-all", "credential.helper"]
         )
+        if r3.returncode not in (0, 5):  # git config --unset-all returns 5 if key was absent
+            raise WslOperationError(f"Failed to isolate git credential.helper in '{distro}': {r3.stderr}")
         if dotfiles_repo:
-            system.run_wsl_command(["-d", distro, "--", "chezmoi", "init", "--apply", dotfiles_repo])
+            r4 = system.run_wsl_command(["-d", distro, "--", "chezmoi", "init", "--apply", dotfiles_repo])
+            if r4.returncode != 0:
+                raise WslOperationError(f"Failed to apply chezmoi dotfiles in '{distro}': {r4.stderr}")
 
     return {
         "dry_run": dry_run,

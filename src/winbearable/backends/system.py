@@ -3,6 +3,7 @@
 import ctypes
 import os
 import platform
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -69,7 +70,7 @@ class SystemBackend(Protocol):
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
         """Read service Start type (2=Auto, 3=Manual, 4=Disabled) from HKLM\\SYSTEM\\CurrentControlSet\\Services."""
 
-    def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> None:
+    def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> bool:
         """Configure service Start type natively via registry and sc.exe."""
 
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
@@ -167,7 +168,7 @@ class InMemorySystemBackend:
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         build_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
-        resolved_build = int(build_val[0]) if build_val and build_val[0] is not None else self.windows_build
+        resolved_build = int(build_val[0]) if build_val and isinstance(build_val[0], (int, str)) else self.windows_build
 
         edition_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "EditionID")
         resolved_edition = str(edition_val[0]) if edition_val and edition_val[0] is not None else self.edition
@@ -214,13 +215,14 @@ class InMemorySystemBackend:
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
         val = registry.get_value(HIVE_HKLM, svc_key, "Start")
-        if val is None or val[0] is None:
+        if val is None or not isinstance(val[0], (int, str)):
             return None
         return int(val[0])
 
-    def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> None:
+    def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> bool:
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
         registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
+        return True
 
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
         return self.scheduled_tasks.get(task_path, False)
@@ -316,7 +318,12 @@ class NativeSystemBackend:
                 return False
         return False
 
-    def _run_native_cmd(self, args: list[str], input_text: str | None = None) -> CommandResult:
+    def _run_native_cmd(
+        self,
+        args: list[str],
+        input_text: str | None = None,
+        timeout: float = 60.0,
+    ) -> CommandResult:
         try:
             proc = subprocess.run(
                 args,
@@ -327,7 +334,7 @@ class NativeSystemBackend:
                 errors="replace",
                 shell=False,
                 check=False,
-                timeout=60,
+                timeout=timeout,
             )
             cleaned_stdout = proc.stdout.replace("\x00", "")
             cleaned_stderr = proc.stderr.replace("\x00", "")
@@ -336,6 +343,19 @@ class NativeSystemBackend:
                 returncode=proc.returncode,
                 stdout=cleaned_stdout,
                 stderr=cleaned_stderr,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raw_out = (
+                exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            )
+            raw_err = (
+                exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            )
+            return CommandResult(
+                args=tuple(args),
+                returncode=124,
+                stdout=raw_out.replace("\x00", ""),
+                stderr=f"Command timed out after {timeout}s: {raw_err.replace(chr(0), '')}".strip(),
             )
         except OSError as exc:
             return CommandResult(
@@ -352,10 +372,10 @@ class NativeSystemBackend:
         build_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
         if build_override is not None and build_override.isdigit():
             windows_build = int(build_override)
-        elif build_val and build_val[0] is not None and str(build_val[0]).isdigit():
+        elif build_val and isinstance(build_val[0], (int, str)) and str(build_val[0]).isdigit():
             windows_build = int(build_val[0])
         else:
-            windows_build = BUILD_WIN11_24H2 if not is_win else 0
+            windows_build = 0
 
         disp_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "DisplayVersion")
         display_version = str(disp_val[0]) if disp_val and disp_val[0] is not None else "Unknown"
@@ -417,47 +437,63 @@ class NativeSystemBackend:
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
         val = registry.get_value(HIVE_HKLM, svc_key, "Start")
-        if val is None or val[0] is None:
+        if val is None or not isinstance(val[0], (int, str)):
             return None
         return int(val[0])
 
-    def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> None:
+    def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> bool:
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
         registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
         if self._platform == "win32":
             start_map = {2: "auto", 3: "demand", 4: "disabled"}
             sc_mode = start_map.get(start_type, "demand")
-            self._run_native_cmd(["sc.exe", "config", service_name, f"start={sc_mode}"])
+            res = self._run_native_cmd(["sc.exe", "config", service_name, f"start={sc_mode}"])
+            return res.returncode == 0
+        return True
 
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd(["schtasks.exe", "/Query", "/TN", task_path, "/FO", "LIST", "/V"])
+        res = self._run_native_cmd(["schtasks.exe", "/Query", "/TN", task_path, "/XML"], timeout=30.0)
         if res.returncode != 0:
             return None
-        return "disabled" not in res.stdout.lower()
+        lower_out = res.stdout.lower()
+        xml_match = re.search(r"<enabled>\s*(true|false)\s*</enabled>", lower_out)
+        if xml_match is not None:
+            return xml_match.group(1) == "true"
+        state_match = re.search(r"scheduled task state\s*:\s*(enabled|disabled)\b", lower_out)
+        if state_match is not None:
+            return state_match.group(1) == "enabled"
+        return None
 
     def set_scheduled_task_enabled(self, task_path: str, enabled: bool) -> bool:
         if self._platform != "win32":
             return False
         flag = "/ENABLE" if enabled else "/DISABLE"
-        res = self._run_native_cmd(["schtasks.exe", "/Change", "/TN", task_path, flag])
+        res = self._run_native_cmd(["schtasks.exe", "/Change", "/TN", task_path, flag], timeout=30.0)
         return res.returncode == 0
 
     def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd(["dism.exe", "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}"])
+        res = self._run_native_cmd(
+            ["dism.exe", "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}", "/English"],
+            timeout=60.0,
+        )
         if res.returncode != 0:
             return None
-        return "state : enabled" in res.stdout.lower()
+        state_match = re.search(r"^\s*state\s*:\s*(enabled|disabled)\b", res.stdout, re.IGNORECASE | re.MULTILINE)
+        if state_match is not None:
+            return state_match.group(1).lower() == "enabled"
+        return None
 
     def set_optional_feature_enabled(self, feature_name: str, enabled: bool) -> bool:
         if self._platform != "win32":
             return False
         action = "/Enable-Feature" if enabled else "/Disable-Feature"
         res = self._run_native_cmd(
-            ["dism.exe", "/Online", action, f"/FeatureName:{feature_name}", "/NoRestart", "/Quiet"]
+            ["dism.exe", "/Online", action, f"/FeatureName:{feature_name}", "/NoRestart", "/Quiet"],
+            timeout=300.0,
         )
         return res.returncode == 0
 
@@ -535,9 +571,12 @@ class NativeSystemBackend:
                 package_id,
                 "--exact",
                 "--accept-source-agreements",
-            ]
+            ],
+            timeout=60.0,
         )
-        installed = res.returncode == 0 and cache_key in res.stdout.lower()
+        installed = res.returncode == 0 and bool(
+            re.search(rf"(?m)(?:^|\s){re.escape(package_id)}(?:\s|$)", res.stdout, re.IGNORECASE)
+        )
         self._winget_installed_cache[cache_key] = installed
         return installed
 
@@ -563,12 +602,17 @@ class NativeSystemBackend:
                 scope,
                 "--accept-package-agreements",
                 "--accept-source-agreements",
-            ]
+            ],
+            timeout=300.0,
         )
         if res.returncode != 0:
             return False
+        if not self.is_winget_package_installed(package_id):
+            return False
         for ext in vscode_extensions:
-            self._run_native_cmd(["code.cmd", "--install-extension", ext, "--force"])
+            ext_res = self._run_native_cmd(["code.cmd", "--install-extension", ext, "--force"], timeout=120.0)
+            if ext_res.returncode != 0:
+                return False
         self._winget_installed_cache[package_id.lower()] = True
         return True
 
@@ -592,7 +636,9 @@ class NativeSystemBackend:
         return ok
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
-        return self._run_native_cmd(["wsl.exe", *args], input_text=input_text)
+        long_ops = {"--install", "--export", "--import"}
+        timeout = 600.0 if any(arg in long_ops for arg in args) else 60.0
+        return self._run_native_cmd(["wsl.exe", *args], input_text=input_text, timeout=timeout)
 
     def get_total_memory_bytes(self) -> int:
         if self._platform == "win32" and self._windll is not None:

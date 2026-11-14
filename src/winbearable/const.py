@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 APP_NAME = "winbearable"
 CLI_NAME = "wb"
@@ -28,6 +28,7 @@ REG_EXPAND_SZ = "REG_EXPAND_SZ"
 REG_BINARY = "REG_BINARY"
 REG_DWORD = "REG_DWORD"
 REG_QWORD = "REG_QWORD"
+REG_MULTI_SZ = "REG_MULTI_SZ"
 
 # Registry Actions
 ACTION_SET = "set"

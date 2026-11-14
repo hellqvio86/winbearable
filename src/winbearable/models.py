@@ -1,8 +1,27 @@
 """Typed domain models for winbearable."""
 
+import base64
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+
+RegistryValueData = int | str | bytes | list[str] | None
+
+
+def _encode_registry_data(val: RegistryValueData) -> Any:
+    if isinstance(val, bytes):
+        return {"__bytes_b64__": base64.b64encode(val).decode("ascii")}
+    return val
+
+
+def _decode_registry_data(raw: Any) -> RegistryValueData:
+    if isinstance(raw, dict) and "__bytes_b64__" in raw:
+        return base64.b64decode(str(raw["__bytes_b64__"]))
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    if isinstance(raw, (int, str)) or raw is None:
+        return raw
+    return None
 
 
 class RiskLevel(StrEnum):
@@ -22,6 +41,17 @@ class TweakStatus(StrEnum):
     UNSUPPORTED_BUILD = "unsupported_build"
     REQUIRES_ADMIN = "requires_admin"
     ERROR = "error"
+
+
+class TransactionState(StrEnum):
+    """Lifecycle state of an apply/rollback transaction in the write-ahead journal."""
+
+    PLANNED = "planned"
+    APPLYING = "applying"
+    COMMITTED = "committed"
+    ROLLING_BACK = "rolling_back"
+    ROLLED_BACK = "rolled_back"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -66,10 +96,11 @@ class RegistryChangeDetail:
     value_name: str
     value_type: str
     action: str
-    current_value: int | str | None
+    current_value: RegistryValueData
     current_exists: bool
-    target_value: int | str | None
+    target_value: RegistryValueData
     is_compliant: bool
+    current_type: str | None = None
 
     @property
     def full_key_path(self) -> str:
@@ -96,9 +127,10 @@ class RegistryChangeDetail:
             "value_name": self.display_value_name,
             "value_type": self.value_type,
             "action": self.action,
-            "current_value": self.current_value,
+            "current_value": _encode_registry_data(self.current_value),
+            "current_type": self.current_type,
             "current_exists": self.current_exists,
-            "target_value": self.target_value,
+            "target_value": _encode_registry_data(self.target_value),
             "is_compliant": self.is_compliant,
         }
 
@@ -163,6 +195,8 @@ class TweakDefinition:
     stop_processes: tuple[str, ...] = ()
     uninstall_onedrive: bool = False
     cis_id: str | None = None
+    requires_reboot: bool = False
+    requires_explorer_restart: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,6 +256,7 @@ class TweakCheckResult:
     source_url: str
     registry_changes: tuple[RegistryChangeDetail, ...] = ()
     cis_id: str | None = None
+    pending_restart: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize check result to a JSON-compatible dictionary."""
@@ -235,6 +270,7 @@ class TweakCheckResult:
             "detail": self.detail,
             "source_url": self.source_url,
             "cis_id": self.cis_id,
+            "pending_restart": self.pending_restart,
             "registry_changes": [change.to_dict() for change in self.registry_changes],
         }
 
@@ -248,7 +284,7 @@ class RegistryValueSnapshot:
     value_name: str
     key_existed: bool
     value_existed: bool
-    previous_data: int | str | None
+    previous_data: RegistryValueData
     previous_type: str | None
 
     @property
@@ -269,7 +305,7 @@ class RegistryValueSnapshot:
             "value_name": self.value_name,
             "key_existed": self.key_existed,
             "value_existed": self.value_existed,
-            "previous_data": self.previous_data,
+            "previous_data": _encode_registry_data(self.previous_data),
             "previous_type": self.previous_type,
         }
 
@@ -282,7 +318,7 @@ class RegistryValueSnapshot:
             value_name=str(payload["value_name"]),
             key_existed=bool(payload["key_existed"]),
             value_existed=bool(payload["value_existed"]),
-            previous_data=payload.get("previous_data"),
+            previous_data=_decode_registry_data(payload.get("previous_data")),
             previous_type=payload.get("previous_type"),
         )
 
@@ -372,6 +408,8 @@ class RunRecord:
     task_snapshots: tuple[ScheduledTaskSnapshot, ...] = ()
     feature_snapshots: tuple[OptionalFeatureSnapshot, ...] = ()
     installed_winget_packages: tuple[str, ...] = ()
+    state: TransactionState = TransactionState.COMMITTED
+    error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize run record to a dictionary."""
@@ -385,6 +423,8 @@ class RunRecord:
             "task_snapshots": [snap.to_dict() for snap in self.task_snapshots],
             "feature_snapshots": [snap.to_dict() for snap in self.feature_snapshots],
             "installed_winget_packages": list(self.installed_winget_packages),
+            "state": str(self.state),
+            "error": self.error,
         }
 
     @classmethod
@@ -395,6 +435,8 @@ class RunRecord:
         task_snaps = tuple(ScheduledTaskSnapshot.from_dict(item) for item in payload.get("task_snapshots", []))
         feat_snaps = tuple(OptionalFeatureSnapshot.from_dict(item) for item in payload.get("feature_snapshots", []))
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
+        raw_state = payload.get("state", TransactionState.COMMITTED)
+        raw_error = payload.get("error")
         return cls(
             run_id=str(payload["run_id"]),
             timestamp=str(payload["timestamp"]),
@@ -405,6 +447,8 @@ class RunRecord:
             task_snapshots=task_snaps,
             feature_snapshots=feat_snaps,
             installed_winget_packages=winget_pkgs,
+            state=TransactionState(str(raw_state)),
+            error=str(raw_error) if raw_error is not None else None,
         )
 
 

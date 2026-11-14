@@ -2,12 +2,22 @@
 
 import json
 import os
+import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from .const import APP_NAME, ENV_STATE_PATH
-from .models import RunRecord
+from .models import RunRecord, TransactionState
+
+STATE_SCHEMA_VERSION = 1
+
+
+class StateStoreError(ValueError):
+    """Raised when state.json is corrupted, unreadable, or has an unsupported schema version."""
 
 
 def resolve_state_path() -> Path:
@@ -29,25 +39,76 @@ def resolve_state_path() -> Path:
 
 
 class StateStore:
-    """Manages atomic reads and writes of apply RunRecords in state.json."""
+    """Manages locked, atomic reads and writes of apply RunRecords in state.json."""
 
     def __init__(self, state_path: Path | None = None) -> None:
         self.state_path = state_path or resolve_state_path()
 
-    def load_runs(self) -> list[RunRecord]:
-        """Load all recorded runs in chronological order."""
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(self.state_path.parent, 0o700)
+        lock_path = self.state_path.with_suffix(".lock")
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            if sys.platform == "win32":
+                import msvcrt
+
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _load_runs_unlocked(self) -> list[RunRecord]:
         if not self.state_path.is_file():
             return []
-        raw_text = self.state_path.read_text(encoding="utf-8")
-        payload = json.loads(raw_text)
-        runs_raw = payload.get("runs", [])
-        return [RunRecord.from_dict(item) for item in runs_raw]
+        try:
+            raw_text = self.state_path.read_text(encoding="utf-8")
+            payload: Any = json.loads(raw_text)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise StateStoreError(
+                f"Corrupted state file at {self.state_path}: {exc}. "
+                f"Check {self.state_path.with_suffix('.json.bak')} for recovery."
+            ) from exc
 
-    def save_runs(self, runs: list[RunRecord]) -> None:
-        """Atomically persist all RunRecords to state.json."""
+        if not isinstance(payload, dict):
+            raise StateStoreError(f"Invalid state file at {self.state_path}: top-level JSON must be an object.")
+
+        version = payload.get("version")
+        if version != STATE_SCHEMA_VERSION:
+            raise StateStoreError(
+                f"Unsupported state schema version {version!r} in {self.state_path} (expected {STATE_SCHEMA_VERSION})."
+            )
+
+        runs_raw = payload.get("runs")
+        if not isinstance(runs_raw, list):
+            raise StateStoreError(f"Invalid state file at {self.state_path}: 'runs' must be a list.")
+
+        try:
+            return [RunRecord.from_dict(item) for item in runs_raw]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateStoreError(f"Malformed run record in {self.state_path}: {exc}") from exc
+
+    def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(self.state_path.parent, 0o700)
+        if self.state_path.is_file():
+            shutil.copy2(self.state_path, self.state_path.with_suffix(".json.bak"))
+
         payload = {
-            "version": 1,
+            "version": STATE_SCHEMA_VERSION,
             "runs": [run.to_dict() for run in runs],
         }
         serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -59,14 +120,51 @@ class StateStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.name == "posix":
+                os.chmod(temp_path_str, 0o600)
             os.replace(temp_path_str, self.state_path)
         except Exception:
             if os.path.exists(temp_path_str):
                 os.unlink(temp_path_str)
             raise
 
+    def load_runs(self) -> list[RunRecord]:
+        """Load all recorded runs in chronological order."""
+        with self._locked():
+            return self._load_runs_unlocked()
+
+    def save_runs(self, runs: list[RunRecord]) -> None:
+        """Atomically persist all RunRecords to state.json."""
+        with self._locked():
+            self._save_runs_unlocked(runs)
+
     def append_run(self, record: RunRecord) -> None:
         """Append a newly completed RunRecord and persist atomically."""
-        runs = self.load_runs()
-        runs.append(record)
-        self.save_runs(runs)
+        with self._locked():
+            runs = self._load_runs_unlocked()
+            runs.append(record)
+            self._save_runs_unlocked(runs)
+
+    def upsert_run(self, record: RunRecord) -> None:
+        """Insert or update a RunRecord by run_id in the write-ahead journal."""
+        with self._locked():
+            runs = self._load_runs_unlocked()
+            for idx, existing in enumerate(runs):
+                if existing.run_id == record.run_id:
+                    runs[idx] = record
+                    self._save_runs_unlocked(runs)
+                    return
+            runs.append(record)
+            self._save_runs_unlocked(runs)
+
+    def get_incomplete_runs(self) -> list[RunRecord]:
+        """Return any transactions that did not reach COMMITTED or ROLLED_BACK."""
+        incomplete_states = {
+            TransactionState.PLANNED,
+            TransactionState.APPLYING,
+            TransactionState.ROLLING_BACK,
+            TransactionState.FAILED,
+        }
+        return [run for run in self.load_runs() if run.state in incomplete_states]

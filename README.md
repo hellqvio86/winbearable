@@ -105,12 +105,16 @@ Press **`Win + R`**, type **`cmd`**, hit **Enter**, and paste these commands to 
 winget install --exact --id Astral-sh.uv --scope user --accept-source-agreements --accept-package-agreements
 ```
 
-Refresh your `PATH` (or open a new `cmd` / Windows Terminal tab), then install `winbearable` from PyPI:
-
-```cmd
-uv tool update-shell
-uv tool install winbearable
-```
+> **Important (Windows `PATH` quirk):** After `winget` installs `uv`, **`uv` will NOT be in your current `cmd` window's `PATH`** — Windows does not reload environment variables into an already-running shell.
+> 1. **Close this `cmd` window and open a brand-new `cmd` (or Windows Terminal) window** (if `uv` is still not found, sign out/in or restart Windows so the updated `PATH` propagates).
+> 2. In the **new** shell, run:
+>
+> ```cmd
+> uv tool update-shell
+> uv tool install winbearable
+> ```
+>
+> 3. **Open another new `cmd` window** (or restart) so `wb` / `winbearable` is picked up from `%USERPROFILE%\.local\bin`, then verify with `wb --version` (or invoke `%USERPROFILE%\.local\bin\wb.exe` directly without restarting your shell).
 
 *(Prefer `pipx`? Install Python and `pipx` via `winget install --exact --id Python.Python.3.13 --scope user` and `pip install --user pipx`, then run `pipx install winbearable`.)*
 

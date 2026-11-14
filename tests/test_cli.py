@@ -258,6 +258,42 @@ class TestCli(unittest.TestCase):
             main()
         self.assertEqual(cm.exception.code, 0)
 
+    def test_non_windows_host_refuses_mutations(self) -> None:
+        """Non-Windows hosts must fail closed on mutating commands and skip Windows audit."""
+        non_win_sys = InMemorySystemBackend(is_windows=False)
+        for argv in (
+            ["apply", "--profile", "user-only", "--apply"],
+            ["rollback", "--apply"],
+            ["wsl", "apply", "--apply"],
+            ["wsl", "baseline", "--distro", "Ubuntu-24.04", "--apply"],
+        ):
+            out_buf = io.StringIO()
+            err_buf = io.StringIO()
+            with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                code = run_cli(
+                    argv=argv,
+                    registry=self.registry,
+                    system=non_win_sys,
+                    state_store=self.state_store,
+                )
+            self.assertEqual(code, 1)
+            self.assertIn("non-Windows host", err_buf.getvalue())
+            self.assertEqual(self.state_store.load_runs(), [])
+
+        with patch("winbearable.cli.audit_wsl", return_value={"wsl_installed": False}):
+            out_buf = io.StringIO()
+            err_buf = io.StringIO()
+            with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                code = run_cli(
+                    argv=["doctor", "--json"],
+                    registry=self.registry,
+                    system=non_win_sys,
+                    state_store=self.state_store,
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(out_buf.getvalue())
+            self.assertFalse(payload["audit"]["applicable"])
+
 
 if __name__ == "__main__":
     unittest.main()
