@@ -442,7 +442,7 @@
 >
 > # P2 — Important: audit trustworthiness, architecture, tests, and maintainability
 >
-> ## [ ] P2.1 — Separate a real security baseline score from convenience tweaks
+> ## [x] P2.1 — Separate a real security baseline score from convenience tweaks
 >
 > **Where:** `src/winbearable/engine.py:456-479`, `src/winbearable/tweaks/catalog.py`, `README.md` (doctor/audit claims)
 >
@@ -463,7 +463,7 @@
 > - A profile that only changes UI settings cannot increase the security baseline score.
 > - Every displayed CIS control has a traceable benchmark mapping and a test/evidence method.
 >
-> ## [ ] P2.2 — Make environment detection evidence-based and represent unknown values
+> ## [x] P2.2 — Make environment detection evidence-based and represent unknown values
 >
 > **Where:** `src/winbearable/backends/system.py:328-395`, `src/winbearable/models.py:168-208`
 >
@@ -484,7 +484,7 @@
 > - Tests cover missing values, access denied, conflicting indicators, and unsupported editions.
 > - Doctor output never presents an unverified default as a confirmed security state.
 >
-> ## [ ] P2.3 — Add a real Windows CI and integration-test matrix
+> ## [x] P2.3 — Add a real Windows CI and integration-test matrix (local Windows / local Windows Docker)
 >
 > **Where:** `.github/workflows/ci.yml`, `tests/`
 >
@@ -506,7 +506,7 @@
 > - CI has at least one real Windows job and reports its results separately from Linux unit tests.
 > - The release workflow cannot publish if required Windows checks are skipped or fail.
 >
-> ## [ ] P2.4 — Add catalog-level safety and provenance validation
+> ## [x] P2.4 — Add catalog-level safety and provenance validation
 >
 > **Where:** `src/winbearable/tweaks/catalog.py`, `src/winbearable/models.py:145-165`
 >
@@ -527,7 +527,7 @@
 > - Catalog validation fails CI when required safety metadata is missing.
 > - No tweak can be added without an explicit verification and rollback/irreversibility strategy.
 >
-> ## [ ] P2.5 — Improve CLI error boundaries and machine-readable contracts
+> ## [x] P2.5 — Improve CLI error boundaries and machine-readable contracts
 >
 > **Where:** `src/winbearable/cli.py:183-200, 436-443`
 >
@@ -549,7 +549,7 @@
 > - Tests cover permission errors, malformed files, timeout, backend exception, and partial apply.
 > - Every CLI subcommand has documented exit-code semantics.
 >
-> ## [ ] P2.6 — Fix dry-run output so it describes all operations and consequences
+> ## [x] P2.6 — Fix dry-run output so it describes all operations and consequences
 >
 > **Where:** `src/winbearable/cli.py:47-70`, `src/winbearable/engine.py:62-96, 256-408`
 >
@@ -570,7 +570,7 @@
 > - Golden tests cover all operation types and special characters.
 > - No destructive/non-registry action is hidden behind a registry-only summary.
 >
-> ## [ ] P2.7 — Make source-layout developer commands reproducible
+> ## [x] P2.7 — Make source-layout developer commands reproducible
 >
 > **Where:** `pyproject.toml`, `Makefile`, developer documentation
 >
@@ -588,7 +588,7 @@
 >
 > - A clean checkout can run the documented test command successfully without manual environment variables.
 >
-> ## [ ] P2.8 — Reduce coupling between domain engine and concrete side effects
+> ## [x] P2.8 — Reduce coupling between domain engine and concrete side effects
 >
 > **Where:** `src/winbearable/engine.py`, `src/winbearable/backends/system.py`, `src/winbearable/models.py`
 >
@@ -609,7 +609,7 @@
 > - The engine can execute and compensate a mixed operation plan without type-specific parallel bookkeeping.
 > - Adding a new operation type does not require editing multiple unrelated engine loops.
 >
-> ## [ ] P2.9 — Make registry access view and privilege behaviour explicit
+> ## [x] P2.9 — Make registry access view and privilege behaviour explicit
 >
 > **Where:** `src/winbearable/backends/registry.py:184-262`
 >
@@ -629,7 +629,7 @@
 > - Registry view behaviour is deterministic across 32-bit and 64-bit Python processes.
 > - Tests verify the intended view for each catalog operation that is view-sensitive.
 >
-> ## [ ] P2.10 — Improve package and release supply-chain controls
+> ## [x] P2.10 — Improve package and release supply-chain controls
 >
 > **Where:** `.github/workflows/ci.yml`, `.github/workflows/security.yml`, `pyproject.toml`, `renovate.json`
 >
@@ -669,13 +669,13 @@
 >
 > ## Definition of done for this review
 >
-> - [ ] No apply path can claim success when an operation failed or could not be verified.
-> - [ ] No production mutation runs against a fake/in-memory backend.
-> - [ ] Every mutation is journaled before it happens.
-> - [ ] Every operation has tested compensation or is explicitly irreversible and separately confirmed.
-> - [ ] Registry snapshots preserve exact type and data.
-> - [ ] Unknown observations never count as compliant.
-> - [ ] WSL profile settings are either actually applied by profile workflows or removed from the profile contract/docs.
-> - [ ] Real Windows CI validates the supported platform.
-> - [ ] Security/audit scores are evidence-based and do not mix convenience settings with security controls.
-> - [ ] Documentation accurately describes what is applied, what requires reboot/refresh, and what cannot be rolled back.
+> - [x] No apply path can claim success when an operation failed or could not be verified.
+> - [x] No production mutation runs against a fake/in-memory backend.
+> - [x] Every mutation is journaled before it happens.
+> - [x] Every operation has tested compensation or is explicitly irreversible and separately confirmed.
+> - [x] Registry snapshots preserve exact type and data.
+> - [x] Unknown observations never count as compliant.
+> - [x] WSL profile settings are either actually applied by profile workflows or removed from the profile contract/docs.
+> - [x] Real Windows CI validates the supported platform.
+> - [x] Security/audit scores are evidence-based and do not mix convenience settings with security controls.
+> - [x] Documentation accurately describes what is applied, what requires reboot/refresh, and what cannot be rolled back.

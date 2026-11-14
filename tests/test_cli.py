@@ -294,6 +294,80 @@ class TestCli(unittest.TestCase):
             payload = json.loads(out_buf.getvalue())
             self.assertFalse(payload["audit"]["applicable"])
 
+    def test_p2_5_and_p2_6_error_boundary_json_schema_and_dry_run_plan(self) -> None:
+        """CLI catches backend errors cleanly with JSON envelopes and renders full dry-run operations."""
+        from winbearable.cli import _escape_md_cell
+        from winbearable.const import JSON_SCHEMA_VERSION
+
+        # 1. Error boundary catches PermissionError during detect_environment and emits JSON envelope
+        err_out = io.StringIO()
+        err_stderr = io.StringIO()
+        with (
+            patch.object(self.system, "detect_environment", side_effect=PermissionError("HKLM denied")),
+            redirect_stdout(err_out),
+            redirect_stderr(err_stderr),
+        ):
+            code = run_cli(
+                argv=["doctor", "--json"],
+                registry=self.registry,
+                system=self.system,
+                state_store=self.state_store,
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("HKLM denied", err_stderr.getvalue())
+        err_payload = json.loads(err_out.getvalue())
+        self.assertEqual(err_payload["schema_version"], JSON_SCHEMA_VERSION)
+        self.assertFalse(err_payload["ok"])
+        self.assertEqual(err_payload["error_type"], "PermissionError")
+
+        # 2. --debug propagates exception
+        with (
+            patch.object(self.system, "detect_environment", side_effect=RuntimeError("boom")),
+            self.assertRaises(RuntimeError),
+        ):
+            run_cli(
+                argv=["--debug", "doctor"],
+                registry=self.registry,
+                system=self.system,
+                state_store=self.state_store,
+            )
+
+        # 3. Markdown cell escaping
+        self.assertEqual(_escape_md_cell("a|b\nc\r\nd"), "a\\|b c d")
+
+        # 4. Dry-run plan includes non-registry operations, consequences, and plan_digest
+        plan_out = io.StringIO()
+        with redirect_stdout(plan_out):
+            code = run_cli(
+                argv=["plan", "--profile", "paranoid", "--json"],
+                registry=self.registry,
+                system=self.system,
+                state_store=self.state_store,
+            )
+        self.assertEqual(code, 0)
+        plan_json = json.loads(plan_out.getvalue())
+        self.assertEqual(plan_json["schema_version"], JSON_SCHEMA_VERSION)
+        self.assertTrue(plan_json["plan_digest"])
+        op_types = {op["operation_type"] for res in plan_json["results"] for op in res["operations"]}
+        self.assertIn("onedrive_uninstall", op_types)
+        self.assertIn("winget_package", op_types)
+        self.assertIn("vscode_extension", op_types)
+
+        md_out = io.StringIO()
+        with redirect_stdout(md_out):
+            code = run_cli(
+                argv=["plan", "--profile", "paranoid"],
+                registry=self.registry,
+                system=self.system,
+                state_store=self.state_store,
+            )
+        self.assertEqual(code, 0)
+        md_text = md_out.getvalue()
+        self.assertIn("Plan Digest:", md_text)
+        self.assertIn("IRREVERSIBLE", md_text)
+        self.assertIn("REBOOT", md_text)
+        self.assertIn("[onedrive_uninstall]", md_text)
+
 
 if __name__ == "__main__":
     unittest.main()

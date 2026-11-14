@@ -16,6 +16,19 @@ fi
 if [[ -d "${REPO_ROOT}/.venv/bin" ]]; then
     export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
 fi
+if [[ -d "${REPO_ROOT}/.venv/Scripts" ]]; then
+    export PATH="${REPO_ROOT}/.venv/Scripts:${PATH}"
+fi
+
+# Enable real Windows integration tests automatically when pre-commit runs on Windows
+case "$(uname -s 2>/dev/null || echo "")" in
+    MINGW*|MSYS*|CYGWIN*) export WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 ;;
+    *)
+        if [[ "${OS:-}" == "Windows_NT" ]]; then
+            export WINBEARABLE_RUN_WINDOWS_INTEGRATION=1
+        fi
+        ;;
+esac
 
 run_docker() {
     if docker info >/dev/null 2>&1; then

@@ -1,5 +1,7 @@
 """Authoritative catalog of Windows 11 (24H2/25H2+) tweaks with build and policy metadata."""
 
+from dataclasses import replace
+
 from ..const import (
     ACTION_DELETE,
     ACTION_SET,
@@ -15,15 +17,40 @@ from ..const import (
     VSCODE_WSL_EXTENSION_ID,
 )
 from ..models import (
+    CisControlMapping,
     OptionalFeatureSpec,
     PolicyConflictPath,
     RegistrySpec,
+    RegistryView,
     RiskLevel,
     ScheduledTaskSpec,
     ServiceSpec,
     TweakDefinition,
     WingetSpec,
 )
+from .provenance import TWEAK_PROVENANCE
+
+CIS_BENCHMARK_NAME = "CIS Microsoft Windows 11 Enterprise Benchmark"
+CIS_BENCHMARK_VERSION = "v3.0.0"
+
+
+def _cis(
+    control_id: str,
+    level: str = "L1",
+    verification_method: str = "registry_value",
+    partial_registry_only: bool = True,
+) -> CisControlMapping:
+    """Build a traceable CIS Benchmark control mapping."""
+    return CisControlMapping(
+        benchmark=CIS_BENCHMARK_NAME,
+        version=CIS_BENCHMARK_VERSION,
+        level=level,
+        section=control_id,
+        control_id=control_id,
+        verification_method=verification_method,
+        partial_registry_only=partial_registry_only,
+    )
+
 
 TWEAK_CATALOG: dict[str, TweakDefinition] = {
     # -------------------------------------------------------------------------
@@ -110,6 +137,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
                 value_data=0,
                 value_type=REG_DWORD,
                 action=ACTION_SET,
+                view=RegistryView.VIEW_64,
             ),
             RegistrySpec(
                 hive=HIVE_HKCU,
@@ -118,6 +146,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
                 value_data=0,
                 value_type=REG_DWORD,
                 action=ACTION_SET,
+                view=RegistryView.VIEW_32,
             ),
         ),
     ),
@@ -133,6 +162,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.56.1",
+        cis_mapping=_cis("18.9.56.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -646,6 +676,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.16.1",
+        cis_mapping=_cis("18.9.16.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -690,7 +721,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Disable Windows Script Host (WSH) for Current User",
         description="Blocks execution of .vbs and .js scripts via wscript.exe/cscript.exe in user scope.",
         source_url="https://learn.microsoft.com/en-us/troubleshoot/windows-client/admin-development/windows-script-host-error-access-is-disabled",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=False,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
@@ -712,12 +743,13 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Disable Link-Local Multicast Name Resolution (LLMNR)",
         description="Mitigates LAN name poisoning (Responder) by setting EnableMulticast=0.",
         source_url="https://learn.microsoft.com/en-us/windows-server/networking/technologies/dns/dns-client",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.5.4.2",
+        cis_mapping=_cis("18.5.4.2", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -735,7 +767,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Disable Web Proxy Auto-Discovery (WPAD)",
         description="Prevents automatic proxy discovery spoofing by setting WpadOverride=1.",
         source_url="https://learn.microsoft.com/en-us/security-updates/SecurityBulletins/2016/ms16-077",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
@@ -763,6 +795,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.8.1",
+        cis_mapping=_cis("18.9.8.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -786,6 +819,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.97.1",
+        cis_mapping=_cis("18.9.97.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -809,6 +843,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.8.3.1",
+        cis_mapping=_cis("18.8.3.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -832,6 +867,8 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.4.4",
+        cis_mapping=_cis("18.4.4", level="L1"),
+        requires_reboot=True,
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -855,6 +892,8 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.5.2",
+        cis_mapping=_cis("18.9.5.2", level="L1"),
+        requires_reboot=True,
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -886,6 +925,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.10.12.1",
+        cis_mapping=_cis("18.10.12.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -911,7 +951,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Disable Telemetry & Customer Experience Scheduled Tasks",
         description="Disables Microsoft Compatibility Appraiser and CEIP Consolidator tasks via schtasks.exe.",
         source_url="https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
@@ -933,12 +973,14 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Disable Legacy SMBv1 Protocol & Optional Feature",
         description="Disables SMBv1 in LanmanServer and disables the SMB1Protocol optional feature via dism.exe.",
         source_url="https://learn.microsoft.com/en-us/windows-server/storage/file-server/troubleshoot/detect-enable-and-disable-smbv1-v2-v3",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.4.8",
+        cis_mapping=_cis("18.4.8", level="L1", verification_method="registry_and_dism", partial_registry_only=False),
+        requires_reboot=True,
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -962,7 +1004,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Disable Multicast DNS (mDNS)",
         description="Disables mDNS responder in Windows DNS client to reduce local network attack surface.",
         source_url="https://learn.microsoft.com/en-us/windows-server/networking/dns/dns-client",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
@@ -984,12 +1026,13 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Enforce Windows Firewall Across Domain, Private, and Public Profiles",
         description="Ensures Windows Firewall is enabled with default inbound block across all profiles.",
         source_url="https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="9.1.1",
+        cis_mapping=_cis("9.1.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -1023,12 +1066,13 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         title="Enable Microsoft Defender PUA Block & Cloud Protection",
         description="Enables Defender Potentially Unwanted Application (PUA) blocking and MAPS cloud protection.",
         source_url="https://learn.microsoft.com/en-us/defender-endpoint/detect-block-potentially-unwanted-apps-microsoft-defender-antivirus",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.10.43",
+        cis_mapping=_cis("18.10.43", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -1056,12 +1100,13 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             "Restricts local accounts with blank passwords to console logon only and disables Remote Assistance."
         ),
         source_url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/accounts-limit-local-account-use-of-blank-passwords-to-console-logon-only",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="2.3.1.1",
+        cis_mapping=_cis("2.3.1.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -1121,6 +1166,11 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             ),
         ),
     ),
+}
+
+TWEAK_CATALOG = {
+    tid: replace(tweak, provenance=TWEAK_PROVENANCE[tid]) if tid in TWEAK_PROVENANCE else tweak
+    for tid, tweak in TWEAK_CATALOG.items()
 }
 
 

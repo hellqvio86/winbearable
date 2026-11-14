@@ -1,5 +1,7 @@
 """Core evaluation, plan, apply, rollback, and hardening audit engine."""
 
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,8 +12,10 @@ from .backends.registry import RegistryBackend
 from .backends.system import SystemBackend
 from .const import ACTION_DELETE
 from .models import (
+    AuditDimension,
     EnvironmentInfo,
     OptionalFeatureSnapshot,
+    PlannedOperation,
     ProfileSpec,
     RegistryChangeDetail,
     RegistryValueSnapshot,
@@ -24,6 +28,7 @@ from .models import (
     TweakDefinition,
     TweakStatus,
 )
+from .operations import format_registry_op, inspect_non_registry_operations
 from .state import StateStore
 from .tweaks import get_all_tweaks, get_tweak
 from .wsl import plan_or_apply_wsl
@@ -35,6 +40,79 @@ class HighRiskConfirmationError(RuntimeError):
 
 class IrreversibleActionError(RuntimeError):
     """Raised when applying an irreversible tweak without --allow-irreversible."""
+
+
+_CATEGORY_DIMENSION_MAP: dict[str, AuditDimension] = {
+    "hardening": AuditDimension.SECURITY,
+    "privacy": AuditDimension.PRIVACY,
+    "telemetry": AuditDimension.PRIVACY,
+    "ai": AuditDimension.PRIVACY,
+    "explorer": AuditDimension.USABILITY,
+    "start": AuditDimension.USABILITY,
+    "taskbar": AuditDimension.USABILITY,
+    "search": AuditDimension.USABILITY,
+    "onedrive": AuditDimension.USABILITY,
+    "bloat": AuditDimension.USABILITY,
+    "apps": AuditDimension.DEVELOPER,
+}
+
+
+def _resolve_dimension(category: str) -> AuditDimension:
+    """Map a tweak category to its audit dimension."""
+    return _CATEGORY_DIMENSION_MAP.get(category, AuditDimension.USABILITY)
+
+
+def _resolve_verification_method(tweak: TweakDefinition) -> str:
+    """Describe the technical verification methods used to inspect a tweak."""
+    if tweak.cis_mapping is not None:
+        return tweak.cis_mapping.verification_method
+    methods: list[str] = []
+    if tweak.registry_specs:
+        methods.append("registry_value")
+    if tweak.service_specs:
+        methods.append("service_start_type")
+    if tweak.task_specs:
+        methods.append("scheduled_task")
+    if tweak.feature_specs:
+        methods.append("dism_optional_feature")
+    if tweak.winget_specs:
+        methods.append("winget_package")
+    if tweak.stop_processes:
+        methods.append("process_list")
+    if tweak.uninstall_onedrive:
+        methods.append("onedrive_client_state")
+    return "+".join(methods) if methods else "none"
+
+
+def _make_check_result(
+    tweak: TweakDefinition,
+    status: TweakStatus,
+    detail: str,
+    registry_changes: tuple[RegistryChangeDetail, ...] = (),
+    pending_restart: bool = False,
+    operations: tuple[PlannedOperation, ...] = (),
+) -> TweakCheckResult:
+    """Construct a TweakCheckResult with consistent dimension and CIS provenance metadata."""
+    return TweakCheckResult(
+        tweak_id=tweak.tweak_id,
+        title=tweak.title,
+        category=tweak.category,
+        dimension=_resolve_dimension(tweak.category),
+        risk=tweak.risk,
+        requires_admin=tweak.requires_admin,
+        status=status,
+        detail=detail,
+        source_url=tweak.source_url,
+        registry_changes=registry_changes,
+        cis_id=tweak.cis_id,
+        cis_mapping=tweak.cis_mapping,
+        verification_method=_resolve_verification_method(tweak),
+        pending_restart=pending_restart,
+        requires_reboot=tweak.requires_reboot,
+        requires_explorer_restart=tweak.requires_explorer_restart,
+        irreversible=tweak.irreversible,
+        operations=operations,
+    )
 
 
 @dataclass(frozen=True)
@@ -52,6 +130,7 @@ class ApplySummary:
     already_applied_ids: tuple[str, ...]
     failed_ids: tuple[str, ...] = ()
     wsl_result: dict[str, Any] | None = None
+    plan_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize summary to a JSON-compatible dictionary."""
@@ -59,6 +138,7 @@ class ApplySummary:
             "profile_name": self.profile_name,
             "dry_run": self.dry_run,
             "run_id": self.run_id,
+            "plan_digest": self.plan_digest,
             "applied_ids": list(self.applied_ids),
             "already_applied_ids": list(self.already_applied_ids),
             "skipped_policy_ids": list(self.skipped_policy_ids),
@@ -79,7 +159,7 @@ def _inspect_registry_specs(
     drifted_reasons: list[str] = []
 
     for reg_spec in tweak.registry_specs:
-        current = registry.get_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name)
+        current = registry.get_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name, view=reg_spec.view)
         current_exists = current is not None
         current_val = current[0] if current is not None else None
         current_type = current[1] if current is not None else None
@@ -119,99 +199,62 @@ def detect_tweak(
     try:
         reg_details, drifted_reasons = _inspect_registry_specs(tweak, registry)
     except PermissionError as exc:
-        return TweakCheckResult(
-            tweak_id=tweak.tweak_id,
-            title=tweak.title,
-            category=tweak.category,
-            risk=tweak.risk,
-            requires_admin=tweak.requires_admin,
-            status=TweakStatus.ERROR,
-            detail=f"Inaccessible registry key/value: {exc}",
-            source_url=tweak.source_url,
-            cis_id=tweak.cis_id,
-        )
+        return _make_check_result(tweak, TweakStatus.ERROR, f"Inaccessible registry key/value: {exc}")
 
     if env.windows_build < tweak.min_build:
-        return TweakCheckResult(
-            tweak_id=tweak.tweak_id,
-            title=tweak.title,
-            category=tweak.category,
-            risk=tweak.risk,
-            requires_admin=tweak.requires_admin,
-            status=TweakStatus.UNSUPPORTED_BUILD,
-            detail=f"Requires Windows 11 build >= {tweak.min_build} (detected {env.windows_build})",
-            source_url=tweak.source_url,
+        return _make_check_result(
+            tweak,
+            TweakStatus.UNSUPPORTED_BUILD,
+            f"Requires Windows 11 build >= {tweak.min_build} (detected {env.windows_build})",
             registry_changes=tuple(reg_details),
-            cis_id=tweak.cis_id,
         )
 
     if tweak.max_build is not None and env.windows_build > tweak.max_build:
-        return TweakCheckResult(
-            tweak_id=tweak.tweak_id,
-            title=tweak.title,
-            category=tweak.category,
-            risk=tweak.risk,
-            requires_admin=tweak.requires_admin,
-            status=TweakStatus.UNSUPPORTED_BUILD,
-            detail=f"Requires Windows build <= {tweak.max_build} (detected {env.windows_build})",
-            source_url=tweak.source_url,
+        return _make_check_result(
+            tweak,
+            TweakStatus.UNSUPPORTED_BUILD,
+            f"Requires Windows build <= {tweak.max_build} (detected {env.windows_build})",
             registry_changes=tuple(reg_details),
-            cis_id=tweak.cis_id,
         )
 
     for reg_spec in tweak.registry_specs:
         conflict = registry.check_policy_conflict(reg_spec.policy_checks)
         if conflict is not None:
-            return TweakCheckResult(
-                tweak_id=tweak.tweak_id,
-                title=tweak.title,
-                category=tweak.category,
-                risk=tweak.risk,
-                requires_admin=tweak.requires_admin,
-                status=TweakStatus.BLOCKED_BY_POLICY,
-                detail=conflict,
-                source_url=tweak.source_url,
+            return _make_check_result(
+                tweak,
+                TweakStatus.BLOCKED_BY_POLICY,
+                conflict,
                 registry_changes=tuple(reg_details),
-                cis_id=tweak.cis_id,
             )
 
-    unverified_reasons: list[str] = []
+    planned_ops: list[PlannedOperation] = [
+        format_registry_op(
+            item.full_key_path,
+            item.display_value_name,
+            item.action,
+            item.current_value,
+            item.target_value,
+            tweak.irreversible,
+        )
+        for item in reg_details
+    ]
+    non_reg_ops, non_reg_drifted, unverified_reasons = inspect_non_registry_operations(tweak, registry, system)
+    planned_ops.extend(non_reg_ops)
+    drifted_reasons.extend(non_reg_drifted)
 
-    for svc_spec in tweak.service_specs:
-        actual_start = system.get_service_start_type(registry, svc_spec.service_name)
-        if actual_start != svc_spec.start_type:
-            drifted_reasons.append(
-                f"{svc_spec.registry_key_path} [Start]: {actual_start} -> {svc_spec.start_type} (REG_DWORD)"
+    if tweak.uninstall_onedrive:
+        planned_ops.append(
+            PlannedOperation(
+                operation_type="onedrive_uninstall",
+                target="OneDriveSetup.exe /uninstall",
+                action="uninstall",
+                before_state="present" if drifted_reasons else "uninstalled",
+                after_state="uninstalled",
+                reversible=False,
             )
+        )
 
-    for task_spec in tweak.task_specs:
-        actual_enabled = system.is_scheduled_task_enabled(task_spec.task_path)
-        if actual_enabled is None:
-            unverified_reasons.append(f"schtasks {task_spec.task_path}: <unverified/missing>")
-        elif actual_enabled != task_spec.enabled:
-            drifted_reasons.append(
-                f"schtasks {task_spec.task_path}: enabled={actual_enabled} -> enabled={task_spec.enabled}"
-            )
-
-    for feat_spec in tweak.feature_specs:
-        actual_feat = system.is_optional_feature_enabled(feat_spec.feature_name)
-        if actual_feat is None:
-            unverified_reasons.append(f"dism feature {feat_spec.feature_name}: <unverified/missing>")
-        elif actual_feat != feat_spec.enabled:
-            drifted_reasons.append(
-                f"dism feature {feat_spec.feature_name}: enabled={actual_feat} -> enabled={feat_spec.enabled}"
-            )
-
-    for winget_spec in tweak.winget_specs:
-        if not system.is_winget_package_installed(winget_spec.package_id):
-            ext_str = f" + extensions {list(winget_spec.vscode_extensions)}" if winget_spec.vscode_extensions else ""
-            drifted_reasons.append(
-                f"winget package {winget_spec.package_id} (scope={winget_spec.scope}): <missing> -> installed{ext_str}"
-            )
-
-    for proc_name in tweak.stop_processes:
-        if system.is_process_running(proc_name):
-            drifted_reasons.append(f"Process {proc_name}: running -> stopped")
+    ops_tuple = tuple(planned_ops)
 
     if not drifted_reasons and not unverified_reasons:
         compliant_parts = [
@@ -228,62 +271,40 @@ def detect_tweak(
         for winget_spec in tweak.winget_specs:
             compliant_parts.append(f"winget:{winget_spec.package_id}=installed")
         compliant_summary = "; ".join(compliant_parts)
-        return TweakCheckResult(
-            tweak_id=tweak.tweak_id,
-            title=tweak.title,
-            category=tweak.category,
-            risk=tweak.risk,
-            requires_admin=tweak.requires_admin,
-            status=TweakStatus.APPLIED,
-            detail=f"Compliant ({compliant_summary})",
-            source_url=tweak.source_url,
+        return _make_check_result(
+            tweak,
+            TweakStatus.APPLIED,
+            f"Compliant ({compliant_summary})",
             registry_changes=tuple(reg_details),
-            cis_id=tweak.cis_id,
             pending_restart=(tweak.requires_reboot or tweak.requires_explorer_restart),
-            irreversible=tweak.irreversible,
+            operations=ops_tuple,
         )
 
     if tweak.requires_admin and not env.is_admin:
         all_reasons = drifted_reasons + unverified_reasons
-        return TweakCheckResult(
-            tweak_id=tweak.tweak_id,
-            title=tweak.title,
-            category=tweak.category,
-            risk=tweak.risk,
-            requires_admin=tweak.requires_admin,
-            status=TweakStatus.REQUIRES_ADMIN,
-            detail="Skipped (requires Administrator): " + "; ".join(all_reasons),
-            source_url=tweak.source_url,
+        return _make_check_result(
+            tweak,
+            TweakStatus.REQUIRES_ADMIN,
+            "Skipped (requires Administrator): " + "; ".join(all_reasons),
             registry_changes=tuple(reg_details),
-            cis_id=tweak.cis_id,
+            operations=ops_tuple,
         )
 
     if unverified_reasons:
-        return TweakCheckResult(
-            tweak_id=tweak.tweak_id,
-            title=tweak.title,
-            category=tweak.category,
-            risk=tweak.risk,
-            requires_admin=tweak.requires_admin,
-            status=TweakStatus.ERROR,
-            detail="Unverified state: " + "; ".join(unverified_reasons + drifted_reasons),
-            source_url=tweak.source_url,
+        return _make_check_result(
+            tweak,
+            TweakStatus.ERROR,
+            "Unverified state: " + "; ".join(unverified_reasons + drifted_reasons),
             registry_changes=tuple(reg_details),
-            cis_id=tweak.cis_id,
+            operations=ops_tuple,
         )
 
-    return TweakCheckResult(
-        tweak_id=tweak.tweak_id,
-        title=tweak.title,
-        category=tweak.category,
-        risk=tweak.risk,
-        requires_admin=tweak.requires_admin,
-        status=TweakStatus.DRIFTED,
-        detail="; ".join(drifted_reasons),
-        source_url=tweak.source_url,
+    return _make_check_result(
+        tweak,
+        TweakStatus.DRIFTED,
+        "; ".join(drifted_reasons),
         registry_changes=tuple(reg_details),
-        cis_id=tweak.cis_id,
-        irreversible=tweak.irreversible,
+        operations=ops_tuple,
     )
 
 
@@ -330,7 +351,9 @@ def _collect_pre_apply_snapshots(
         for reg_spec in tweak.registry_specs:
             reg_id = (reg_spec.hive, reg_spec.key_path, reg_spec.value_name)
             if reg_id not in seen_reg_keys:
-                reg_snapshots.append(registry.snapshot_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name))
+                reg_snapshots.append(
+                    registry.snapshot_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name, view=reg_spec.view)
+                )
                 seen_reg_keys.add(reg_id)
         for svc_spec in tweak.service_specs:
             if svc_spec.service_name not in seen_services:
@@ -424,7 +447,7 @@ def _execute_tweak_mutations(
             exported_subtrees.add(subtree)
 
         if reg_spec.action == ACTION_DELETE:
-            registry.delete_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name)
+            registry.delete_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name, view=reg_spec.view)
         else:
             registry.set_value(
                 hive=reg_spec.hive,
@@ -432,6 +455,7 @@ def _execute_tweak_mutations(
                 value_name=reg_spec.value_name,
                 value_data=reg_spec.value_data,
                 value_type=reg_spec.value_type,
+                view=reg_spec.view,
             )
 
     for svc_spec in tweak.service_specs:
@@ -617,6 +641,19 @@ def apply_profile(
                     raise
                 wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
 
+    digest_payload = json.dumps(
+        [
+            {
+                "tweak_id": r.tweak_id,
+                "status": str(r.status),
+                "operations": [op.to_dict() for op in r.operations],
+            }
+            for r in final_results
+        ],
+        sort_keys=True,
+    ).encode("utf-8")
+    plan_digest = hashlib.sha256(digest_payload).hexdigest()[:16]
+
     return ApplySummary(
         profile_name=profile.name,
         dry_run=dry_run,
@@ -629,6 +666,7 @@ def apply_profile(
         already_applied_ids=tuple(already_applied_ids),
         failed_ids=tuple(failed_ids),
         wsl_result=wsl_result,
+        plan_digest=plan_digest,
     )
 
 
@@ -699,27 +737,91 @@ def rollback_runs(
     return runs_to_revert
 
 
+def _classify_audit_status(status: TweakStatus) -> str:
+    """Map TweakStatus to explicit audit outcome buckets."""
+    if status == TweakStatus.APPLIED:
+        return "passed"
+    if status == TweakStatus.UNSUPPORTED_BUILD:
+        return "not_applicable"
+    if status == TweakStatus.BLOCKED_BY_POLICY:
+        return "blocked_by_policy"
+    if status in (TweakStatus.REQUIRES_ADMIN, TweakStatus.ERROR):
+        return "unknown"
+    return "failed"
+
+
+def _summarize_dimension(results: list[TweakCheckResult]) -> dict[str, Any]:
+    """Summarize passed/failed/blocked/not_applicable/unknown counts for a list of checks."""
+    counts = {
+        "passed": 0,
+        "failed": 0,
+        "blocked_by_policy": 0,
+        "not_applicable": 0,
+        "unknown": 0,
+    }
+    for res in results:
+        counts[_classify_audit_status(res.status)] += 1
+    total_applicable = len(results) - counts["not_applicable"]
+    score_percent = round((counts["passed"] / total_applicable) * 100, 1) if total_applicable > 0 else 100.0
+    return {
+        **counts,
+        "total_applicable": total_applicable,
+        "score_percent": score_percent,
+    }
+
+
 def calculate_hardening_score(
     env: EnvironmentInfo,
     registry: RegistryBackend,
     system: SystemBackend,
 ) -> dict[str, Any]:
-    """Audit all catalog tweaks and compute CIS/baseline compliance metrics."""
+    """Audit all catalog tweaks across separated dimensions and traceable CIS controls."""
     all_results = [detect_tweak(tweak, env, registry, system) for tweak in get_all_tweaks()]
     applicable = [res for res in all_results if res.status != TweakStatus.UNSUPPORTED_BUILD]
     passed = [res for res in applicable if res.status == TweakStatus.APPLIED]
-    cis_results = [res for res in applicable if res.cis_id is not None]
+    cis_results = [res for res in applicable if res.cis_mapping is not None]
     cis_passed = [res for res in cis_results if res.status == TweakStatus.APPLIED]
+
+    dimensions = {
+        dim.value: _summarize_dimension([res for res in all_results if res.dimension == dim]) for dim in AuditDimension
+    }
+    status_breakdown = _summarize_dimension(all_results)
 
     total_count = len(applicable)
     passed_count = len(passed)
     score_pct = round((passed_count / total_count) * 100, 1) if total_count > 0 else 100.0
 
+    cis_controls_list = [
+        {
+            "tweak_id": res.tweak_id,
+            "audit_status": _classify_audit_status(res.status),
+            "status": str(res.status),
+            "evidence": res.detail,
+            **res.cis_mapping.to_dict(),
+        }
+        for res in all_results
+        if res.cis_mapping is not None
+    ]
+
     return {
         "passed": passed_count,
         "total": total_count,
         "score_percent": score_pct,
+        "security_score_percent": dimensions[AuditDimension.SECURITY.value]["score_percent"],
+        "dimensions": dimensions,
+        "status_breakdown": status_breakdown,
         "cis_passed": len(cis_passed),
         "cis_total": len(cis_results),
+        "cis_controls": {
+            "benchmark": "CIS Microsoft Windows 11 Enterprise Benchmark",
+            "version": "v3.0.0",
+            "note": (
+                "Registry and OS policy checks represent partial technical control verification, "
+                "not full CIS Benchmark certification."
+            ),
+            "verified_controls": len(cis_passed),
+            "total_controls": len(cis_results),
+            "controls": cis_controls_list,
+        },
         "results": [res.to_dict() for res in all_results],
     }

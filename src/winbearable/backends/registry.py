@@ -14,19 +14,25 @@ from ..const import (
     REG_QWORD,
     REG_SZ,
 )
-from ..models import PolicyConflictPath, RegistryValueData, RegistryValueSnapshot
+from ..models import PolicyConflictPath, RegistryValueData, RegistryValueSnapshot, RegistryView
 
 
 class RegistryBackend(Protocol):
     """Protocol for reading, writing, and snapshotting Windows registry keys."""
 
-    def key_exists(self, hive: str, key_path: str) -> bool:
+    def key_exists(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> bool:
         """Return True if the specified registry key exists."""
 
-    def list_subkeys(self, hive: str, key_path: str) -> list[str]:
+    def list_subkeys(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> list[str]:
         """List immediate subkey names under the specified registry key."""
 
-    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[RegistryValueData, str] | None:
+    def get_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> tuple[RegistryValueData, str] | None:
         """Read (value_data, value_type) or return None if key/value does not exist."""
 
     def set_value(
@@ -36,13 +42,26 @@ class RegistryBackend(Protocol):
         value_name: str,
         value_data: RegistryValueData,
         value_type: str = REG_DWORD,
+        view: RegistryView = RegistryView.DEFAULT,
     ) -> None:
         """Create key if needed and set the specified registry value."""
 
-    def delete_value(self, hive: str, key_path: str, value_name: str) -> bool:
+    def delete_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
         """Delete a registry value if present. Return True if deleted."""
 
-    def snapshot_value(self, hive: str, key_path: str, value_name: str) -> RegistryValueSnapshot:
+    def snapshot_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryValueSnapshot:
         """Capture current value state prior to modification."""
 
     def restore_snapshot(self, snapshot: RegistryValueSnapshot) -> None:
@@ -88,13 +107,13 @@ class InMemoryRegistryBackend:
             prefix = "\\".join(parts[:idx])
             self._keys.add((hive, prefix))
 
-    def key_exists(self, hive: str, key_path: str) -> bool:
+    def key_exists(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> bool:
         norm = _normalize_key_path(key_path)
         return (hive, norm) in self._keys
 
-    def list_subkeys(self, hive: str, key_path: str) -> list[str]:
+    def list_subkeys(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> list[str]:
         norm = _normalize_key_path(key_path)
-        if not self.key_exists(hive, norm):
+        if not self.key_exists(hive, norm, view=view):
             return []
         prefix = f"{norm}\\" if norm else ""
         subkeys: set[str] = set()
@@ -107,7 +126,13 @@ class InMemoryRegistryBackend:
                     subkeys.add(remainder)
         return sorted(subkeys)
 
-    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[RegistryValueData, str] | None:
+    def get_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> tuple[RegistryValueData, str] | None:
         norm = _normalize_key_path(key_path)
         return self._values.get((hive, norm, value_name))
 
@@ -118,6 +143,7 @@ class InMemoryRegistryBackend:
         value_name: str,
         value_data: RegistryValueData,
         value_type: str = REG_DWORD,
+        view: RegistryView = RegistryView.DEFAULT,
     ) -> None:
         if value_type not in {REG_SZ, REG_EXPAND_SZ, REG_BINARY, REG_DWORD, REG_QWORD, REG_MULTI_SZ}:
             raise ValueError(f"Unsupported registry value type: {value_type}")
@@ -125,7 +151,13 @@ class InMemoryRegistryBackend:
         self._ensure_key_hierarchy(hive, norm)
         self._values[(hive, norm, value_name)] = (value_data, value_type)
 
-    def delete_value(self, hive: str, key_path: str, value_name: str) -> bool:
+    def delete_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
         norm = _normalize_key_path(key_path)
         lookup = (hive, norm, value_name)
         if lookup in self._values:
@@ -133,10 +165,16 @@ class InMemoryRegistryBackend:
             return True
         return False
 
-    def snapshot_value(self, hive: str, key_path: str, value_name: str) -> RegistryValueSnapshot:
+    def snapshot_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryValueSnapshot:
         norm = _normalize_key_path(key_path)
-        existed_key = self.key_exists(hive, norm)
-        current = self.get_value(hive, norm, value_name)
+        existed_key = self.key_exists(hive, norm, view=view)
+        current = self.get_value(hive, norm, value_name, view=view)
         if current is None:
             return RegistryValueSnapshot(
                 hive=hive,
@@ -146,6 +184,7 @@ class InMemoryRegistryBackend:
                 value_existed=False,
                 previous_data=None,
                 previous_type=None,
+                view=view,
             )
         return RegistryValueSnapshot(
             hive=hive,
@@ -155,6 +194,7 @@ class InMemoryRegistryBackend:
             value_existed=True,
             previous_data=current[0],
             previous_type=current[1],
+            view=view,
         )
 
     def restore_snapshot(self, snapshot: RegistryValueSnapshot) -> None:
@@ -165,12 +205,14 @@ class InMemoryRegistryBackend:
                 value_name=snapshot.value_name,
                 value_data=snapshot.previous_data,
                 value_type=snapshot.previous_type,
+                view=snapshot.view,
             )
         else:
             self.delete_value(
                 hive=snapshot.hive,
                 key_path=snapshot.key_path,
                 value_name=snapshot.value_name,
+                view=snapshot.view,
             )
 
     def check_policy_conflict(self, policy_checks: tuple[PolicyConflictPath, ...]) -> str | None:
@@ -213,21 +255,34 @@ class WinregBackend:
             raise ValueError(f"Unsupported registry hive: {hive}")
         return self._hive_map[hive]
 
-    def key_exists(self, hive: str, key_path: str) -> bool:
+    def _resolve_access(self, base_access: int, view: RegistryView) -> int:
+        if view == RegistryView.VIEW_64:
+            return base_access | int(getattr(self._winreg, "KEY_WOW64_64KEY", 0x0100))
+        if view == RegistryView.VIEW_32:
+            return base_access | int(getattr(self._winreg, "KEY_WOW64_32KEY", 0x0200))
+        return base_access
+
+    def key_exists(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> bool:
         root = self._resolve_hive(hive)
         norm = _normalize_key_path(key_path)
+        access = self._resolve_access(int(self._winreg.KEY_READ), view)
         try:
-            with self._winreg.OpenKey(root, norm, 0, self._winreg.KEY_READ):
+            with self._winreg.OpenKey(root, norm, 0, access):
                 return True
-        except OSError:
+        except PermissionError:
+            raise
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 5:
+                raise PermissionError(f"Access denied checking {hive}\\{norm}") from exc
             return False
 
-    def list_subkeys(self, hive: str, key_path: str) -> list[str]:
+    def list_subkeys(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> list[str]:
         root = self._resolve_hive(hive)
         norm = _normalize_key_path(key_path)
+        access = self._resolve_access(int(self._winreg.KEY_READ), view)
         subkeys: list[str] = []
         try:
-            with self._winreg.OpenKey(root, norm, 0, self._winreg.KEY_READ) as handle:
+            with self._winreg.OpenKey(root, norm, 0, access) as handle:
                 idx = 0
                 while True:
                     try:
@@ -235,15 +290,26 @@ class WinregBackend:
                         idx += 1
                     except OSError:
                         break
-        except OSError:
+        except PermissionError:
+            raise
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 5:
+                raise PermissionError(f"Access denied listing {hive}\\{norm}") from exc
             return []
         return sorted(subkeys)
 
-    def get_value(self, hive: str, key_path: str, value_name: str) -> tuple[RegistryValueData, str] | None:
+    def get_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> tuple[RegistryValueData, str] | None:
         root = self._resolve_hive(hive)
         norm = _normalize_key_path(key_path)
+        access = self._resolve_access(int(self._winreg.KEY_READ), view)
         try:
-            with self._winreg.OpenKey(root, norm, 0, self._winreg.KEY_READ) as handle:
+            with self._winreg.OpenKey(root, norm, 0, access) as handle:
                 raw_data, raw_type = self._winreg.QueryValueEx(handle, value_name)
                 raw_type_int = int(raw_type)
                 if raw_type_int not in self._int_to_type:
@@ -272,29 +338,48 @@ class WinregBackend:
         value_name: str,
         value_data: RegistryValueData,
         value_type: str = REG_DWORD,
+        view: RegistryView = RegistryView.DEFAULT,
     ) -> None:
         root = self._resolve_hive(hive)
         norm = _normalize_key_path(key_path)
         if value_type not in self._type_to_int:
             raise ValueError(f"Unsupported registry value type: {value_type}")
         raw_type = self._type_to_int[value_type]
-        with self._winreg.CreateKeyEx(root, norm, 0, self._winreg.KEY_WRITE) as handle:
+        access = self._resolve_access(int(self._winreg.KEY_WRITE), view)
+        with self._winreg.CreateKeyEx(root, norm, 0, access) as handle:
             self._winreg.SetValueEx(handle, value_name, 0, raw_type, value_data)
 
-    def delete_value(self, hive: str, key_path: str, value_name: str) -> bool:
+    def delete_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
         root = self._resolve_hive(hive)
         norm = _normalize_key_path(key_path)
+        access = self._resolve_access(int(self._winreg.KEY_SET_VALUE), view)
         try:
-            with self._winreg.OpenKey(root, norm, 0, self._winreg.KEY_SET_VALUE) as handle:
+            with self._winreg.OpenKey(root, norm, 0, access) as handle:
                 self._winreg.DeleteValue(handle, value_name)
                 return True
-        except OSError:
+        except PermissionError:
+            raise
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 5:
+                raise PermissionError(f"Access denied deleting {hive}\\{norm}\\{value_name}") from exc
             return False
 
-    def snapshot_value(self, hive: str, key_path: str, value_name: str) -> RegistryValueSnapshot:
+    def snapshot_value(
+        self,
+        hive: str,
+        key_path: str,
+        value_name: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryValueSnapshot:
         norm = _normalize_key_path(key_path)
-        existed_key = self.key_exists(hive, norm)
-        current = self.get_value(hive, norm, value_name)
+        existed_key = self.key_exists(hive, norm, view=view)
+        current = self.get_value(hive, norm, value_name, view=view)
         if current is None:
             return RegistryValueSnapshot(
                 hive=hive,
@@ -304,6 +389,7 @@ class WinregBackend:
                 value_existed=False,
                 previous_data=None,
                 previous_type=None,
+                view=view,
             )
         return RegistryValueSnapshot(
             hive=hive,
@@ -313,6 +399,7 @@ class WinregBackend:
             value_existed=True,
             previous_data=current[0],
             previous_type=current[1],
+            view=view,
         )
 
     def restore_snapshot(self, snapshot: RegistryValueSnapshot) -> None:
@@ -323,12 +410,14 @@ class WinregBackend:
                 value_name=snapshot.value_name,
                 value_data=snapshot.previous_data,
                 value_type=snapshot.previous_type,
+                view=snapshot.view,
             )
         else:
             self.delete_value(
                 hive=snapshot.hive,
                 key_path=snapshot.key_path,
                 value_name=snapshot.value_name,
+                view=snapshot.view,
             )
 
     def check_policy_conflict(self, policy_checks: tuple[PolicyConflictPath, ...]) -> str | None:

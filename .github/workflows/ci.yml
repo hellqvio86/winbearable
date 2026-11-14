@@ -3,6 +3,10 @@ name: CI/CD
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches: [main]
@@ -182,14 +186,6 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create Git tag
-        if: steps.check_version.outputs.changed == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.check_version.outputs.version }}" -m "Release v${{ steps.check_version.outputs.version }}"
-          git push origin "v${{ steps.check_version.outputs.version }}"
-
       - name: Install uv
         if: steps.check_version.outputs.changed == 'true'
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -204,15 +200,25 @@ jobs:
 
       - name: Build package
         if: steps.check_version.outputs.changed == 'true'
-        run: uv build
+        run: |
+          uv build
+          sha256sum dist/*.whl dist/*.tar.gz > dist/SHA256SUMS.txt
 
-      - name: Generate SBOM
+      - name: Generate SBOM for built artifacts
         if: steps.check_version.outputs.changed == 'true'
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          path: .
+          path: dist
           format: spdx-json
           output-file: sbom.spdx.json
+
+      - name: Create Git tag (only after build and SBOM succeed)
+        if: steps.check_version.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.check_version.outputs.version }}" -m "Release v${{ steps.check_version.outputs.version }}"
+          git push origin "v${{ steps.check_version.outputs.version }}"
 
       - name: Generate Changelog
         if: steps.check_version.outputs.changed == 'true'
@@ -242,6 +248,7 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            dist/SHA256SUMS.txt
             sbom.spdx.json
           token: ${{ secrets.GITHUB_TOKEN }}
 

@@ -1,4 +1,4 @@
-.PHONY: venv lint test clean format build publish run install version release-check hooks secrets trivy pre-commit
+.PHONY: venv lint test test-windows clean format build publish run install version release-check hooks secrets trivy pre-commit
 
 # renovate: datasource=docker depName=trufflesecurity/trufflehog
 TRUFFLEHOG_VERSION ?= 3.99.9
@@ -22,6 +22,9 @@ test: .venv
 	.venv/bin/mypy src tests
 	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
 	.venv/bin/python3 src/generate_badge.py
+
+test-windows: ## Run safe real-Windows integration tests locally (or in local Windows Docker container)
+	WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py -v
 
 pre-commit: hooks
 	./.githooks/pre-commit

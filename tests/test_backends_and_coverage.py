@@ -747,6 +747,142 @@ class TestBackendsAndCoverage(unittest.TestCase):
             with patch("os.replace", side_effect=OSError("write failed")), self.assertRaises(OSError):
                 _atomic_write_text(tmp_path / ".wslconfig", "[wsl2]\n")
 
+    def test_p2_2_evidence_based_posture_observations(self) -> None:
+        """Posture detection handles missing values, access denied, conflicts, and unsupported editions."""
+        from winbearable.const import DEFENDER_KEY, REG_DWORD
+        from winbearable.models import ObservationState
+        from winbearable.profiles import generate_init_profile_toml
+
+        # 1. Missing values -> Defender/SecureBoot/BitLocker are UNKNOWN (None), not assumed True
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(windows_build=26100, edition="Home")
+        env_missing = sys_b.detect_environment(reg)
+        self.assertIsNone(env_missing.defender_enabled)
+        self.assertEqual(env_missing.observations["defender_enabled"].state, ObservationState.UNKNOWN)
+        self.assertIsNone(env_missing.secure_boot_enabled)
+        self.assertEqual(env_missing.observations["secure_boot_enabled"].state, ObservationState.UNKNOWN)
+        # Home edition -> BitLocker UNSUPPORTED
+        self.assertIsNone(env_missing.bitlocker_protected)
+        self.assertEqual(env_missing.observations["bitlocker_protected"].state, ObservationState.UNSUPPORTED)
+
+        # 2. Access denied -> INACCESSIBLE, and init profile must NOT escalate to owner when MDM is unknown
+        reg_denied = InMemoryRegistryBackend()
+        with (
+            patch.object(reg_denied, "get_value", side_effect=PermissionError("Access denied")),
+            patch.object(reg_denied, "list_subkeys", side_effect=PermissionError("Access denied")),
+        ):
+            env_denied = sys_b.detect_environment(reg_denied)
+        self.assertIsNone(env_denied.mdm_enrolled)
+        self.assertEqual(env_denied.observations["mdm_enrolled"].state, ObservationState.INACCESSIBLE)
+        self.assertEqual(env_denied.observations["defender_enabled"].state, ObservationState.INACCESSIBLE)
+        toml_out = generate_init_profile_toml(env_denied)
+        self.assertIn('extends = "user-only"', toml_out)
+
+        # 3. Conflicting Defender indicators (DisableAntiSpyware=1 + WinDefend RUNNING) -> UNKNOWN
+        reg_conflict = InMemoryRegistryBackend(
+            initial_values={(HIVE_HKLM, DEFENDER_KEY, "DisableAntiSpyware"): (1, REG_DWORD)}
+        )
+        win_sys = NativeSystemBackend(platform_override="win32")
+        with patch.object(
+            win_sys,
+            "_run_native_cmd",
+            side_effect=lambda args, **_: type(
+                "Res",
+                (),
+                {
+                    "args": tuple(args),
+                    "returncode": 0,
+                    "stdout": "STATE : 4 RUNNING\nAzureAdJoined : YES\nProtection Status: Protection On\n",
+                    "stderr": "",
+                },
+            )(),
+        ):
+            env_conflict = win_sys.detect_environment(reg_conflict)
+        self.assertIsNone(env_conflict.defender_enabled)
+        self.assertEqual(env_conflict.observations["defender_enabled"].state, ObservationState.UNKNOWN)
+        self.assertIn("Conflicting", env_conflict.observations["defender_enabled"].evidence)
+        self.assertTrue(env_conflict.entra_joined)
+        self.assertTrue(env_conflict.bitlocker_protected)
+
+    def test_p2_9_registry_view_and_permission_preservation(self) -> None:
+        """WinregBackend passes explicit WOW64 views and preserves PermissionError on key/subkey/delete."""
+        from winbearable.backends.registry import WinregBackend
+        from winbearable.models import RegistryValueSnapshot, RegistryView
+        from winbearable.tweaks import get_tweak
+
+        recorded_access: list[int] = []
+
+        class FakeHandle:
+            def __enter__(self) -> "FakeHandle":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        class FakeWinreg:
+            HKEY_CURRENT_USER = 1
+            HKEY_LOCAL_MACHINE = 2
+            REG_SZ = 1
+            REG_EXPAND_SZ = 2
+            REG_BINARY = 3
+            REG_DWORD = 4
+            REG_QWORD = 11
+            REG_MULTI_SZ = 7
+            KEY_READ = 0x20019
+            KEY_WRITE = 0x20006
+            KEY_SET_VALUE = 0x0002
+            KEY_WOW64_64KEY = 0x0100
+            KEY_WOW64_32KEY = 0x0200
+
+            def OpenKey(self, root: int, subkey: str, res: int, sam: int) -> FakeHandle:
+                recorded_access.append(sam)
+                if "Denied" in subkey:
+                    err: Any = OSError("Access denied")
+                    err.winerror = 5
+                    raise err
+                return FakeHandle()
+
+            def CreateKeyEx(self, root: int, subkey: str, res: int, sam: int) -> FakeHandle:
+                recorded_access.append(sam)
+                return FakeHandle()
+
+            def SetValueEx(self, *args: object) -> None:
+                return None
+
+            def QueryValueEx(self, handle: FakeHandle, name: str) -> tuple[int, int]:
+                return (0, self.REG_DWORD)
+
+            def EnumKey(self, handle: FakeHandle, idx: int) -> str:
+                raise OSError("No more items")
+
+        backend = WinregBackend(winreg_module=FakeWinreg())
+        self.assertTrue(backend.key_exists(HIVE_HKCU, "Software\\Test", view=RegistryView.VIEW_64))
+        self.assertTrue(recorded_access[-1] & FakeWinreg.KEY_WOW64_64KEY)
+        backend.set_value(HIVE_HKCU, "Software\\Test", "Val", 1, REG_DWORD, view=RegistryView.VIEW_32)
+        self.assertTrue(recorded_access[-1] & FakeWinreg.KEY_WOW64_32KEY)
+
+        with self.assertRaises(PermissionError):
+            backend.key_exists(HIVE_HKCU, "Software\\Denied")
+        with self.assertRaises(PermissionError):
+            backend.list_subkeys(HIVE_HKCU, "Software\\Denied")
+
+        snap = RegistryValueSnapshot(
+            hive=HIVE_HKCU,
+            key_path="Software\\Test",
+            value_name="Val",
+            key_existed=True,
+            value_existed=True,
+            previous_data=1,
+            previous_type=REG_DWORD,
+            view=RegistryView.VIEW_32,
+        )
+        roundtrip = RegistryValueSnapshot.from_dict(snap.to_dict())
+        self.assertEqual(roundtrip.view, RegistryView.VIEW_32)
+
+        unpin = get_tweak("onedrive.unpin_explorer")
+        self.assertEqual(unpin.registry_specs[0].view, RegistryView.VIEW_64)
+        self.assertEqual(unpin.registry_specs[1].view, RegistryView.VIEW_32)
+
 
 if __name__ == "__main__":
     unittest.main()

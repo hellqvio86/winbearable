@@ -30,6 +30,13 @@ jobs:
           head: ${{ github.sha }}
           extra_args: --only-verified
 
+      - name: TruffleHog Unverified Secret Audit (Report-Only)
+        continue-on-error: true
+        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb # v3.99.8
+        with:
+          base: ""
+          head: ${{ github.sha }}
+
   trivy-scan:
     name: Trivy Vulnerability Scan
     runs-on: ubuntu-latest

@@ -417,6 +417,48 @@ class TestEngineAndTweaks(unittest.TestCase):
         rollback_runs(self.state_store, reg, sys_b, dry_run=False)
         self.assertFalse(sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
 
+    def test_p2_1_separated_audit_dimensions_and_cis_provenance(self) -> None:
+        """UI-only profiles cannot raise security score, and CIS controls carry traceable mappings."""
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(windows_build=BUILD_WIN11_24H2, is_admin=False)
+        env = sys_b.detect_environment(reg)
+
+        before = calculate_hardening_score(env, reg, sys_b)
+        self.assertEqual(before["security_score_percent"], 0.0)
+        self.assertEqual(before["dimensions"]["security"]["score_percent"], 0.0)
+        self.assertGreater(before["dimensions"]["security"]["unknown"], 0)
+
+        ui_profile = ProfileSpec(
+            name="ui-only",
+            description="UI usability tweaks only",
+            tweaks={
+                "explorer.show_file_extensions": True,
+                "explorer.show_hidden_files": True,
+                "start.disable_recommendations": True,
+            },
+        )
+        apply_profile(ui_profile, env, reg, sys_b, self.state_store, dry_run=False)
+
+        after_ui = calculate_hardening_score(env, reg, sys_b)
+        self.assertGreater(after_ui["dimensions"]["usability"]["score_percent"], 0.0)
+        self.assertEqual(after_ui["dimensions"]["security"]["score_percent"], 0.0)
+        self.assertEqual(after_ui["security_score_percent"], 0.0)
+
+        cis_controls = after_ui["cis_controls"]["controls"]
+        self.assertGreater(len(cis_controls), 0)
+        for ctrl in cis_controls:
+            self.assertIn("benchmark", ctrl)
+            self.assertIn("version", ctrl)
+            self.assertIn("level", ctrl)
+            self.assertIn("section", ctrl)
+            self.assertIn("control_id", ctrl)
+            self.assertIn("verification_method", ctrl)
+            self.assertIn("evidence", ctrl)
+            self.assertIn(
+                ctrl["audit_status"],
+                {"passed", "failed", "blocked_by_policy", "not_applicable", "unknown"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

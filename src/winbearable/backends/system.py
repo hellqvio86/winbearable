@@ -6,6 +6,7 @@ import platform
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,7 +27,7 @@ from ..const import (
     SECURE_BOOT_KEY,
     TCPIP_PARAMS_KEY,
 )
-from ..models import EnvironmentInfo
+from ..models import EnvironmentInfo, ObservationConfidence, ObservationState, PostureObservation
 from .registry import RegistryBackend
 
 GIB_BYTES = 1024 * 1024 * 1024
@@ -59,6 +60,451 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+def _safe_get_reg(registry: RegistryBackend, key_path: str, value_name: str) -> tuple[bool, Any]:
+    """Read an HKLM registry value, distinguishing access denied from absent."""
+    try:
+        return True, registry.get_value(HIVE_HKLM, key_path, value_name)
+    except PermissionError as exc:
+        return False, str(exc)
+
+
+def _safe_list_subkeys(registry: RegistryBackend, key_path: str) -> tuple[bool, list[str] | str]:
+    """List HKLM subkeys, distinguishing access denied from empty."""
+    try:
+        return True, registry.list_subkeys(HIVE_HKLM, key_path)
+    except PermissionError as exc:
+        return False, str(exc)
+
+
+def _observe_domain(registry: RegistryBackend) -> tuple[PostureObservation, bool | None]:
+    proves = "Indicates an AD/DNS domain suffix in Tcpip\\Parameters\\Domain; does not prove live DC connectivity."
+    ok, val = _safe_get_reg(registry, TCPIP_PARAMS_KEY, "Domain")
+    if not ok:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source=f"registry:{TCPIP_PARAMS_KEY}\\Domain",
+                confidence=ObservationConfidence.NONE,
+                evidence=f"Access denied: {val}",
+                proves=proves,
+            ),
+            None,
+        )
+    if val and val[0]:
+        return (
+            PostureObservation(
+                state=ObservationState.ENABLED,
+                source=f"registry:{TCPIP_PARAMS_KEY}\\Domain",
+                confidence=ObservationConfidence.MEDIUM,
+                evidence=f"Domain={val[0]!r}",
+                proves=proves,
+            ),
+            True,
+        )
+    return (
+        PostureObservation(
+            state=ObservationState.ABSENT,
+            source=f"registry:{TCPIP_PARAMS_KEY}\\Domain",
+            confidence=ObservationConfidence.MEDIUM,
+            evidence="Tcpip\\Parameters\\Domain is absent or empty",
+            proves=proves,
+        ),
+        False,
+    )
+
+
+def _observe_entra(
+    registry: RegistryBackend,
+    dsreg_stdout: str | None,
+) -> tuple[PostureObservation, bool | None]:
+    proves = "Indicates Microsoft Entra (Azure AD) device join state; does not prove Intune/MDM policy enforcement."
+    if dsreg_stdout is not None:
+        match = re.search(r"AzureAdJoined\s*:\s*(YES|NO)\b", dsreg_stdout, re.IGNORECASE)
+        if match is not None:
+            joined = match.group(1).upper() == "YES"
+            return (
+                PostureObservation(
+                    state=ObservationState.ENABLED if joined else ObservationState.DISABLED,
+                    source="dsregcmd.exe /status",
+                    confidence=ObservationConfidence.HIGH,
+                    evidence=f"AzureAdJoined={match.group(1).upper()}",
+                    proves=proves,
+                ),
+                joined,
+            )
+    ok, subkeys = _safe_list_subkeys(registry, CLOUD_DOMAIN_JOIN_KEY)
+    if not ok:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source=f"registry:{CLOUD_DOMAIN_JOIN_KEY}",
+                confidence=ObservationConfidence.NONE,
+                evidence=f"Access denied: {subkeys}",
+                proves=proves,
+            ),
+            None,
+        )
+    if len(subkeys) > 0:
+        return (
+            PostureObservation(
+                state=ObservationState.ENABLED,
+                source=f"registry:{CLOUD_DOMAIN_JOIN_KEY}",
+                confidence=ObservationConfidence.MEDIUM,
+                evidence=f"Found {len(subkeys)} CloudDomainJoin JoinInfo subkey(s)",
+                proves=proves,
+            ),
+            True,
+        )
+    return (
+        PostureObservation(
+            state=ObservationState.ABSENT,
+            source=f"registry:{CLOUD_DOMAIN_JOIN_KEY}",
+            confidence=ObservationConfidence.LOW,
+            evidence="No CloudDomainJoin JoinInfo subkeys found",
+            proves=proves,
+        ),
+        False,
+    )
+
+
+def _observe_mdm(registry: RegistryBackend) -> tuple[PostureObservation, bool | None]:
+    proves = "Indicates MDM enrollment subkeys under Enrollments; does not prove active MDM check-in."
+    ok, subkeys = _safe_list_subkeys(registry, MDM_ENROLLMENTS_KEY)
+    if not ok:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source=f"registry:{MDM_ENROLLMENTS_KEY}",
+                confidence=ObservationConfidence.NONE,
+                evidence=f"Access denied: {subkeys}",
+                proves=proves,
+            ),
+            None,
+        )
+    if len(subkeys) > 0:
+        return (
+            PostureObservation(
+                state=ObservationState.ENABLED,
+                source=f"registry:{MDM_ENROLLMENTS_KEY}",
+                confidence=ObservationConfidence.MEDIUM,
+                evidence=f"Found {len(subkeys)} MDM enrollment subkey(s)",
+                proves=proves,
+            ),
+            True,
+        )
+    return (
+        PostureObservation(
+            state=ObservationState.ABSENT,
+            source=f"registry:{MDM_ENROLLMENTS_KEY}",
+            confidence=ObservationConfidence.MEDIUM,
+            evidence="No MDM enrollment subkeys present",
+            proves=proves,
+        ),
+        False,
+    )
+
+
+def _observe_defender(
+    registry: RegistryBackend,
+    run_cmd: Callable[[list[str]], CommandResult] | None,
+) -> tuple[PostureObservation, bool | None]:
+    proves = "Indicates WinDefend service and DisableAntiSpyware policy; does not prove real-time protection health."
+    ok, def_val = _safe_get_reg(registry, DEFENDER_KEY, "DisableAntiSpyware")
+    if not ok:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source=f"registry:{DEFENDER_KEY}\\DisableAntiSpyware",
+                confidence=ObservationConfidence.NONE,
+                evidence=f"Access denied: {def_val}",
+                proves=proves,
+            ),
+            None,
+        )
+    disabled_by_reg = bool(def_val and def_val[0] == 1)
+
+    svc_running: bool | None = None
+    if run_cmd is not None:
+        sc_res = run_cmd(["sc.exe", "query", "WinDefend"])
+        if sc_res.returncode == 0:
+            if "RUNNING" in sc_res.stdout.upper():
+                svc_running = True
+            elif "STOPPED" in sc_res.stdout.upper():
+                svc_running = False
+
+    if disabled_by_reg and svc_running is True:
+        return (
+            PostureObservation(
+                state=ObservationState.UNKNOWN,
+                source=f"registry:{DEFENDER_KEY}+sc.exe query WinDefend",
+                confidence=ObservationConfidence.NONE,
+                evidence="Conflicting indicators: DisableAntiSpyware=1 while WinDefend service is RUNNING",
+                proves=proves,
+            ),
+            None,
+        )
+    if disabled_by_reg:
+        return (
+            PostureObservation(
+                state=ObservationState.DISABLED,
+                source=f"registry:{DEFENDER_KEY}\\DisableAntiSpyware",
+                confidence=ObservationConfidence.MEDIUM,
+                evidence="DisableAntiSpyware=1",
+                proves=proves,
+            ),
+            False,
+        )
+    if svc_running is True:
+        return (
+            PostureObservation(
+                state=ObservationState.ENABLED,
+                source="sc.exe query WinDefend",
+                confidence=ObservationConfidence.HIGH,
+                evidence="WinDefend service state is RUNNING",
+                proves=proves,
+            ),
+            True,
+        )
+    if svc_running is False:
+        return (
+            PostureObservation(
+                state=ObservationState.DISABLED,
+                source="sc.exe query WinDefend",
+                confidence=ObservationConfidence.HIGH,
+                evidence="WinDefend service state is STOPPED",
+                proves=proves,
+            ),
+            False,
+        )
+    return (
+        PostureObservation(
+            state=ObservationState.UNKNOWN,
+            source=f"registry:{DEFENDER_KEY}\\DisableAntiSpyware",
+            confidence=ObservationConfidence.LOW,
+            evidence="DisableAntiSpyware absent/0 and WinDefend service state unverified",
+            proves=proves,
+        ),
+        None,
+    )
+
+
+def _observe_secure_boot(registry: RegistryBackend) -> tuple[PostureObservation, bool | None]:
+    proves = "Indicates UEFI Secure Boot state from Windows kernel registry; does not prove BIOS password lock."
+    ok, sb_val = _safe_get_reg(registry, SECURE_BOOT_KEY, "UEFISecureBootEnabled")
+    if not ok:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source=f"registry:{SECURE_BOOT_KEY}\\UEFISecureBootEnabled",
+                confidence=ObservationConfidence.NONE,
+                evidence=f"Access denied: {sb_val}",
+                proves=proves,
+            ),
+            None,
+        )
+    if sb_val is None:
+        return (
+            PostureObservation(
+                state=ObservationState.UNKNOWN,
+                source=f"registry:{SECURE_BOOT_KEY}\\UEFISecureBootEnabled",
+                confidence=ObservationConfidence.NONE,
+                evidence="UEFISecureBootEnabled value is absent (legacy BIOS or unverified)",
+                proves=proves,
+            ),
+            None,
+        )
+    enabled = sb_val[0] == 1
+    return (
+        PostureObservation(
+            state=ObservationState.ENABLED if enabled else ObservationState.DISABLED,
+            source=f"registry:{SECURE_BOOT_KEY}\\UEFISecureBootEnabled",
+            confidence=ObservationConfidence.MEDIUM,
+            evidence=f"UEFISecureBootEnabled={sb_val[0]}",
+            proves=proves,
+        ),
+        enabled,
+    )
+
+
+def _observe_bitlocker(
+    registry: RegistryBackend,
+    edition: str,
+    run_cmd: Callable[[list[str]], CommandResult] | None,
+) -> tuple[PostureObservation, bool | None]:
+    proves = "Indicates OS volume BitLocker protection status; does not prove key escrow or TPM PIN policy."
+    if any(tag in edition.lower() for tag in ("home", "core")):
+        return (
+            PostureObservation(
+                state=ObservationState.UNSUPPORTED,
+                source=f"edition:{edition}",
+                confidence=ObservationConfidence.HIGH,
+                evidence=f"Edition {edition!r} does not support full BitLocker management",
+                proves=proves,
+            ),
+            None,
+        )
+    if run_cmd is not None:
+        bde_res = run_cmd(["manage-bde.exe", "-status", "C:"])
+        if bde_res.returncode == 0:
+            lower_out = bde_res.stdout.lower()
+            if "protection on" in lower_out:
+                return (
+                    PostureObservation(
+                        state=ObservationState.ENABLED,
+                        source="manage-bde.exe -status C:",
+                        confidence=ObservationConfidence.HIGH,
+                        evidence="Protection Status: Protection On",
+                        proves=proves,
+                    ),
+                    True,
+                )
+            if "protection off" in lower_out:
+                return (
+                    PostureObservation(
+                        state=ObservationState.DISABLED,
+                        source="manage-bde.exe -status C:",
+                        confidence=ObservationConfidence.HIGH,
+                        evidence="Protection Status: Protection Off",
+                        proves=proves,
+                    ),
+                    False,
+                )
+    ok, bl_val = _safe_get_reg(registry, BITLOCKER_STATUS_KEY, "BootStatus")
+    if not ok:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source=f"registry:{BITLOCKER_STATUS_KEY}\\BootStatus",
+                confidence=ObservationConfidence.NONE,
+                evidence=f"Access denied: {bl_val}",
+                proves=proves,
+            ),
+            None,
+        )
+    if bl_val is not None and bl_val[0] == 1:
+        return (
+            PostureObservation(
+                state=ObservationState.ENABLED,
+                source=f"registry:{BITLOCKER_STATUS_KEY}\\BootStatus",
+                confidence=ObservationConfidence.LOW,
+                evidence="BootStatus=1",
+                proves=proves,
+            ),
+            True,
+        )
+    return (
+        PostureObservation(
+            state=ObservationState.UNKNOWN,
+            source=f"registry:{BITLOCKER_STATUS_KEY}\\BootStatus",
+            confidence=ObservationConfidence.NONE,
+            evidence="BitLocker status unverified (BootStatus absent/0 and manage-bde unavailable)",
+            proves=proves,
+        ),
+        None,
+    )
+
+
+def _observe_applocker(registry: RegistryBackend) -> tuple[PostureObservation, bool | None]:
+    proves = "Indicates AppLocker SRP/AppId policy subkeys; does not prove WDAC/App Control enforcement."
+    ok, subkeys = _safe_list_subkeys(registry, APPLOCKER_POLICIES_KEY)
+    if not ok:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source=f"registry:{APPLOCKER_POLICIES_KEY}",
+                confidence=ObservationConfidence.NONE,
+                evidence=f"Access denied: {subkeys}",
+                proves=proves,
+            ),
+            None,
+        )
+    if len(subkeys) > 0:
+        return (
+            PostureObservation(
+                state=ObservationState.ENABLED,
+                source=f"registry:{APPLOCKER_POLICIES_KEY}",
+                confidence=ObservationConfidence.MEDIUM,
+                evidence=f"Found {len(subkeys)} AppLocker policy subkey(s)",
+                proves=proves,
+            ),
+            True,
+        )
+    return (
+        PostureObservation(
+            state=ObservationState.ABSENT,
+            source=f"registry:{APPLOCKER_POLICIES_KEY}",
+            confidence=ObservationConfidence.MEDIUM,
+            evidence="No AppLocker policy subkeys present",
+            proves=proves,
+        ),
+        False,
+    )
+
+
+def _collect_posture_observations(
+    registry: RegistryBackend,
+    is_windows: bool,
+    edition: str,
+    run_cmd: Callable[[list[str]], CommandResult] | None = None,
+) -> tuple[dict[str, PostureObservation], dict[str, bool | None]]:
+    """Collect evidence-backed posture observations without assuming defaults on missing data."""
+    keys = (
+        "domain_joined",
+        "entra_joined",
+        "mdm_enrolled",
+        "defender_enabled",
+        "secure_boot_enabled",
+        "bitlocker_protected",
+        "applocker_configured",
+    )
+    if not is_windows:
+        obs = {
+            key: PostureObservation(
+                state=ObservationState.UNSUPPORTED,
+                source="platform",
+                confidence=ObservationConfidence.NONE,
+                evidence="Not running on Windows",
+                proves="Windows-only posture check.",
+            )
+            for key in keys
+        }
+        return obs, dict.fromkeys(keys, None)
+
+    dsreg_stdout: str | None = None
+    if run_cmd is not None:
+        dsreg_res = run_cmd(["dsregcmd.exe", "/status"])
+        if dsreg_res.returncode == 0:
+            dsreg_stdout = dsreg_res.stdout
+
+    dom_obs, dom_bool = _observe_domain(registry)
+    ent_obs, ent_bool = _observe_entra(registry, dsreg_stdout)
+    mdm_obs, mdm_bool = _observe_mdm(registry)
+    def_obs, def_bool = _observe_defender(registry, run_cmd)
+    sb_obs, sb_bool = _observe_secure_boot(registry)
+    bl_obs, bl_bool = _observe_bitlocker(registry, edition, run_cmd)
+    al_obs, al_bool = _observe_applocker(registry)
+
+    observations = {
+        "domain_joined": dom_obs,
+        "entra_joined": ent_obs,
+        "mdm_enrolled": mdm_obs,
+        "defender_enabled": def_obs,
+        "secure_boot_enabled": sb_obs,
+        "bitlocker_protected": bl_obs,
+        "applocker_configured": al_obs,
+    }
+    flags: dict[str, bool | None] = {
+        "domain_joined": dom_bool,
+        "entra_joined": ent_bool,
+        "mdm_enrolled": mdm_bool,
+        "defender_enabled": def_bool,
+        "secure_boot_enabled": sb_bool,
+        "bitlocker_protected": bl_bool,
+        "applocker_configured": al_bool,
+    }
+    return observations, flags
 
 
 class SystemBackend(Protocol):
@@ -174,31 +620,22 @@ class InMemorySystemBackend:
         self.wsl_etc_conf: dict[str, str] = {}
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
-        build_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
-        resolved_build = int(build_val[0]) if build_val and isinstance(build_val[0], (int, str)) else self.windows_build
+        ok_b, build_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
+        resolved_build = (
+            int(build_val[0]) if ok_b and build_val and isinstance(build_val[0], (int, str)) else self.windows_build
+        )
 
-        edition_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "EditionID")
-        resolved_edition = str(edition_val[0]) if edition_val and edition_val[0] is not None else self.edition
+        ok_e, edition_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "EditionID")
+        resolved_edition = str(edition_val[0]) if ok_e and edition_val and edition_val[0] is not None else self.edition
 
-        disp_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "DisplayVersion")
-        resolved_display = str(disp_val[0]) if disp_val and disp_val[0] is not None else self.display_version
+        ok_d, disp_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "DisplayVersion")
+        resolved_display = str(disp_val[0]) if ok_d and disp_val and disp_val[0] is not None else self.display_version
 
-        domain_val = registry.get_value(HIVE_HKLM, TCPIP_PARAMS_KEY, "Domain")
-        domain_joined = bool(domain_val and domain_val[0])
-
-        entra_joined = len(registry.list_subkeys(HIVE_HKLM, CLOUD_DOMAIN_JOIN_KEY)) > 0
-        mdm_enrolled = len(registry.list_subkeys(HIVE_HKLM, MDM_ENROLLMENTS_KEY)) > 0
-
-        defender_val = registry.get_value(HIVE_HKLM, DEFENDER_KEY, "DisableAntiSpyware")
-        defender_enabled = not (defender_val and defender_val[0] == 1)
-
-        sb_val = registry.get_value(HIVE_HKLM, SECURE_BOOT_KEY, "UEFISecureBootEnabled")
-        secure_boot_enabled = bool(sb_val and sb_val[0] == 1)
-
-        bl_val = registry.get_value(HIVE_HKLM, BITLOCKER_STATUS_KEY, "BootStatus")
-        bitlocker_protected = bool(bl_val and bl_val[0] == 1)
-
-        applocker_configured = len(registry.list_subkeys(HIVE_HKLM, APPLOCKER_POLICIES_KEY)) > 0
+        observations, flags = _collect_posture_observations(
+            registry=registry,
+            is_windows=self.is_windows,
+            edition=resolved_edition,
+        )
 
         return EnvironmentInfo(
             os_name="Windows" if self.is_windows else platform.system(),
@@ -207,16 +644,17 @@ class InMemorySystemBackend:
             display_version=resolved_display,
             edition=resolved_edition,
             is_admin=self.is_admin,
-            domain_joined=domain_joined,
-            entra_joined=entra_joined,
-            mdm_enrolled=mdm_enrolled,
-            defender_enabled=defender_enabled,
-            secure_boot_enabled=secure_boot_enabled,
+            domain_joined=flags["domain_joined"],
+            entra_joined=flags["entra_joined"],
+            mdm_enrolled=flags["mdm_enrolled"],
+            defender_enabled=flags["defender_enabled"],
+            secure_boot_enabled=flags["secure_boot_enabled"],
             wsl_installed=self.wsl_installed,
             wsl_version=self.wsl_version,
             wsl_distros=self.wsl_distros,
-            bitlocker_protected=bitlocker_protected,
-            applocker_configured=applocker_configured,
+            bitlocker_protected=flags["bitlocker_protected"],
+            applocker_configured=flags["applocker_configured"],
+            observations=observations,
         )
 
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
@@ -387,35 +825,26 @@ class NativeSystemBackend:
         is_win = self._platform == "win32"
         build_override = os.environ.get(ENV_BUILD_OVERRIDE)
 
-        build_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
+        ok_b, build_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
         if build_override is not None and build_override.isdigit():
             windows_build = int(build_override)
-        elif build_val and isinstance(build_val[0], (int, str)) and str(build_val[0]).isdigit():
+        elif ok_b and build_val and isinstance(build_val[0], (int, str)) and str(build_val[0]).isdigit():
             windows_build = int(build_val[0])
         else:
             windows_build = 0
 
-        disp_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "DisplayVersion")
-        display_version = str(disp_val[0]) if disp_val and disp_val[0] is not None else "Unknown"
+        ok_d, disp_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "DisplayVersion")
+        display_version = str(disp_val[0]) if ok_d and disp_val and disp_val[0] is not None else "Unknown"
 
-        edition_val = registry.get_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "EditionID")
-        edition = str(edition_val[0]) if edition_val and edition_val[0] is not None else "Unknown"
+        ok_e, edition_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "EditionID")
+        edition = str(edition_val[0]) if ok_e and edition_val and edition_val[0] is not None else "Unknown"
 
-        domain_val = registry.get_value(HIVE_HKLM, TCPIP_PARAMS_KEY, "Domain")
-        domain_joined = bool(domain_val and domain_val[0])
-
-        entra_joined = len(registry.list_subkeys(HIVE_HKLM, CLOUD_DOMAIN_JOIN_KEY)) > 0
-        mdm_enrolled = len(registry.list_subkeys(HIVE_HKLM, MDM_ENROLLMENTS_KEY)) > 0
-
-        defender_val = registry.get_value(HIVE_HKLM, DEFENDER_KEY, "DisableAntiSpyware")
-        defender_enabled = not (defender_val and defender_val[0] == 1)
-
-        sb_val = registry.get_value(HIVE_HKLM, SECURE_BOOT_KEY, "UEFISecureBootEnabled")
-        secure_boot_enabled = bool(sb_val and sb_val[0] == 1)
-
-        bl_val = registry.get_value(HIVE_HKLM, BITLOCKER_STATUS_KEY, "BootStatus")
-        bitlocker_protected = bool(bl_val and bl_val[0] == 1)
-        applocker_configured = len(registry.list_subkeys(HIVE_HKLM, APPLOCKER_POLICIES_KEY)) > 0
+        observations, flags = _collect_posture_observations(
+            registry=registry,
+            is_windows=is_win,
+            edition=edition,
+            run_cmd=self._run_native_cmd if is_win else None,
+        )
 
         wsl_installed = False
         wsl_version: str | None = None
@@ -440,16 +869,17 @@ class NativeSystemBackend:
             display_version=display_version,
             edition=edition,
             is_admin=self._check_is_admin(),
-            domain_joined=domain_joined,
-            entra_joined=entra_joined,
-            mdm_enrolled=mdm_enrolled,
-            defender_enabled=defender_enabled,
-            secure_boot_enabled=secure_boot_enabled,
+            domain_joined=flags["domain_joined"],
+            entra_joined=flags["entra_joined"],
+            mdm_enrolled=flags["mdm_enrolled"],
+            defender_enabled=flags["defender_enabled"],
+            secure_boot_enabled=flags["secure_boot_enabled"],
             wsl_installed=wsl_installed,
             wsl_version=wsl_version,
             wsl_distros=tuple(wsl_distros),
-            bitlocker_protected=bitlocker_protected,
-            applocker_configured=applocker_configured,
+            bitlocker_protected=flags["bitlocker_protected"],
+            applocker_configured=flags["applocker_configured"],
+            observations=observations,
         )
 
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:

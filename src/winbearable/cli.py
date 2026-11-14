@@ -12,7 +12,7 @@ from .backends import (
     create_default_registry_backend,
     create_default_system_backend,
 )
-from .const import DEFAULT_WSL_MODE, WSL_MODES, __version__
+from .const import DEFAULT_WSL_MODE, JSON_SCHEMA_VERSION, WSL_MODES, __version__
 from .engine import (
     ApplySummary,
     HighRiskConfirmationError,
@@ -55,23 +55,53 @@ def _require_windows_for_mutation(env: EnvironmentInfo, action: str) -> None:
 
 
 def _print_json(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    enriched = {"schema_version": JSON_SCHEMA_VERSION, **payload}
+    sys.stdout.write(json.dumps(enriched, indent=2, sort_keys=True) + "\n")
+
+
+def _escape_md_cell(text: str) -> str:
+    """Escape Markdown table delimiters and newlines in user/system values."""
+    return text.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+
+def _format_consequences(item: Any) -> str:
+    tags: list[str] = []
+    tags.append("IRREVERSIBLE" if item.irreversible else "reversible")
+    if getattr(item, "requires_reboot", False):
+        tags.append("REBOOT")
+    if getattr(item, "requires_explorer_restart", False):
+        tags.append("EXPLORER RESTART")
+    return ", ".join(tags)
 
 
 def _format_summary_markdown(summary: ApplySummary) -> str:
     mode_str = "DRY-RUN PLAN (no changes written)" if summary.dry_run else f"APPLIED (run_id={summary.run_id})"
     lines = [
         f"# winbearable — {mode_str}",
-        f"Profile: `{summary.profile_name}`",
-        "",
-        "| Status | Tweak ID | Risk | Admin | Registry Path & Value Transition |",
-        "| :--- | :--- | :--- | :--- | :--- |",
+        f"Profile: `{_escape_md_cell(summary.profile_name)}`",
     ]
+    if summary.plan_digest:
+        lines.append(f"Plan Digest: `{summary.plan_digest}`")
+    lines.extend(
+        [
+            "",
+            "| Status | Tweak ID | Risk | Admin | Consequences | Operations & Transitions |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- |",
+        ]
+    )
     for item in summary.results:
         admin_col = "yes" if item.requires_admin else "no"
-        irrev_tag = " [IRREVERSIBLE]" if item.irreversible else ""
+        consequences_col = _escape_md_cell(_format_consequences(item))
+        ops = getattr(item, "operations", ())
+        if ops:
+            ops_text = "; ".join(
+                f"[{op.operation_type}] {op.target}: {op.before_state} -> {op.after_state}" for op in ops
+            )
+        else:
+            ops_text = item.detail
         lines.append(
-            f"| `{item.status}` | `{item.tweak_id}`{irrev_tag} | `{item.risk}` | {admin_col} | {item.detail} |"
+            f"| `{item.status}` | `{_escape_md_cell(item.tweak_id)}` | `{item.risk}` | "
+            f"{admin_col} | {consequences_col} | {_escape_md_cell(ops_text)} |"
         )
 
     lines.append("")
@@ -83,7 +113,9 @@ def _format_summary_markdown(summary: ApplySummary) -> str:
         f"{len(summary.skipped_build_ids)} unsupported build."
     )
     if summary.dry_run and summary.applied_ids:
-        lines.append("Run with `--apply` to execute these changes.")
+        lines.append(
+            "Run with `--apply` to execute these changes (registry backups and rollback state will be recorded)."
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -94,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Make Windows + WSL2 bearable (and locked down) for Linux people — native Python, zero PowerShell.",
     )
     parser.add_argument("--version", action="version", version=f"winbearable {__version__}")
+    parser.add_argument("--debug", action="store_true", help="Show full tracebacks on unexpected errors")
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -226,9 +259,9 @@ def run_cli(
     reg_backend = registry or create_default_registry_backend()
     sys_backend = system or create_default_system_backend()
     store = state_store or StateStore()
-    env = sys_backend.detect_environment(reg_backend)
 
     try:
+        env = sys_backend.detect_environment(reg_backend)
         if args.command == "doctor":
             if env.is_windows:
                 audit: dict[str, Any] = calculate_hardening_score(env, reg_backend, sys_backend)
@@ -261,16 +294,35 @@ def run_cli(
                     )
                 else:
                     distros_str = ", ".join(env.wsl_distros) or "none"
+
+                    def _fmt_obs(key: str, raw: bool | None) -> str:
+                        obs = env.observations.get(key)
+                        if obs is not None:
+                            return f"{obs.state} ({obs.confidence})"
+                        return "unknown" if raw is None else str(raw)
+
+                    dims = audit.get("dimensions", {})
+                    sec = dims.get("security", {})
+                    priv = dims.get("privacy", {})
+                    usab = dims.get("usability", {})
+                    dev = dims.get("developer", {})
                     sys.stdout.write(
                         f"winbearable v{__version__} — Doctor Report\n"
                         f"OS: {env.os_name} (Build {env.windows_build}, Display: {env.display_version}, "
                         f"Edition: {env.edition})\n"
-                        f"Admin: {env.is_admin} | Domain: {env.domain_joined} | Entra: {env.entra_joined} "
-                        f"| MDM: {env.mdm_enrolled}\n"
-                        f"Defender: {env.defender_enabled} | Secure Boot: {env.secure_boot_enabled}\n"
+                        f"Admin: {env.is_admin} | Domain: {_fmt_obs('domain_joined', env.domain_joined)} "
+                        f"| Entra: {_fmt_obs('entra_joined', env.entra_joined)} "
+                        f"| MDM: {_fmt_obs('mdm_enrolled', env.mdm_enrolled)}\n"
+                        f"Defender: {_fmt_obs('defender_enabled', env.defender_enabled)} "
+                        f"| Secure Boot: {_fmt_obs('secure_boot_enabled', env.secure_boot_enabled)} "
+                        f"| BitLocker: {_fmt_obs('bitlocker_protected', env.bitlocker_protected)}\n"
                         f"WSL Installed: {env.wsl_installed} (Version: {env.wsl_version}, Distros: {distros_str})\n"
-                        f"Baseline Score: {audit['passed']}/{audit['total']} ({audit['score_percent']}%) "
-                        f"| CIS Checks: {audit['cis_passed']}/{audit['cis_total']}\n"
+                        f"Security Controls: {sec.get('passed', 0)}/{sec.get('total_applicable', 0)} "
+                        f"({sec.get('score_percent', 0.0)}%) | "
+                        f"Privacy: {priv.get('passed', 0)}/{priv.get('total_applicable', 0)} | "
+                        f"Usability: {usab.get('passed', 0)}/{usab.get('total_applicable', 0)} | "
+                        f"Developer: {dev.get('passed', 0)}/{dev.get('total_applicable', 0)}\n"
+                        f"CIS Technical Checks (partial): {audit['cis_passed']}/{audit['cis_total']}\n"
                     )
             return 0
 
@@ -500,8 +552,24 @@ def run_cli(
         WslOperationError,
         StateStoreError,
         KeyError,
+        PermissionError,
+        TimeoutError,
+        OSError,
+        ValueError,
+        RuntimeError,
     ) as exc:
+        if getattr(args, "debug", False):
+            raise
         sys.stderr.write(f"ERROR: {exc}\n")
+        if getattr(args, "json", False):
+            _print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        return 1
+    except Exception as exc:
+        if getattr(args, "debug", False):
+            raise
+        sys.stderr.write(f"ERROR: Unexpected failure: {exc}\n")
+        if getattr(args, "json", False):
+            _print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
         return 1
 
 

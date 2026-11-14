@@ -54,6 +54,81 @@ class TransactionState(StrEnum):
     FAILED = "failed"
 
 
+class AuditDimension(StrEnum):
+    """Audit dimension separating security controls from privacy, usability, and developer setup."""
+
+    SECURITY = "security"
+    PRIVACY = "privacy"
+    USABILITY = "usability"
+    DEVELOPER = "developer"
+
+
+class ObservationState(StrEnum):
+    """Tri-state+ evidence-backed observation outcome."""
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    ABSENT = "absent"
+    UNSUPPORTED = "unsupported"
+    INACCESSIBLE = "inaccessible"
+    UNKNOWN = "unknown"
+
+
+class ObservationConfidence(StrEnum):
+    """Confidence level of a posture observation based on its evidence source."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    NONE = "none"
+
+
+@dataclass(frozen=True)
+class PostureObservation:
+    """Evidence-backed security or management posture observation."""
+
+    state: ObservationState
+    source: str
+    confidence: ObservationConfidence
+    evidence: str
+    proves: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize posture observation to a JSON-compatible dictionary."""
+        return {
+            "state": str(self.state),
+            "source": self.source,
+            "confidence": str(self.confidence),
+            "evidence": self.evidence,
+            "proves": self.proves,
+        }
+
+
+@dataclass(frozen=True)
+class CisControlMapping:
+    """Traceable CIS Benchmark control mapping and verification metadata."""
+
+    benchmark: str
+    version: str
+    level: str
+    section: str
+    control_id: str
+    verification_method: str
+    partial_registry_only: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize CIS mapping to a JSON-compatible dictionary."""
+        return {
+            "benchmark": self.benchmark,
+            "version": self.version,
+            "level": self.level,
+            "section": self.section,
+            "control_id": self.control_id,
+            "verification_method": self.verification_method,
+            "partial_registry_only": self.partial_registry_only,
+        }
+
+
 @dataclass(frozen=True)
 class PolicyConflictPath:
     """Registry path owned by Group Policy (GPO) or MDM PolicyManager."""
@@ -62,6 +137,14 @@ class PolicyConflictPath:
     key_path: str
     value_name: str
     enforced_value: int | str | None = None
+
+
+class RegistryView(StrEnum):
+    """Explicit Windows registry architecture view (default, 64-bit, or 32-bit WOW64)."""
+
+    DEFAULT = "default"
+    VIEW_64 = "64"
+    VIEW_32 = "32"
 
 
 @dataclass(frozen=True)
@@ -75,6 +158,7 @@ class RegistrySpec:
     value_type: str = "REG_DWORD"
     action: str = "set"
     policy_checks: tuple[PolicyConflictPath, ...] = ()
+    view: RegistryView = RegistryView.DEFAULT
 
     @property
     def full_path(self) -> str:
@@ -174,6 +258,20 @@ class WingetSpec:
 
 
 @dataclass(frozen=True)
+class TweakProvenance:
+    """Safety, provenance, and verification metadata required for every catalog tweak."""
+
+    rationale: str
+    authoritative_source: str
+    risk_rationale: str
+    impact: str
+    reversibility: str
+    verification_method: str
+    review_evidence: str
+    supported_editions: tuple[str, ...] = ("Home", "Pro", "Enterprise", "Education")
+
+
+@dataclass(frozen=True)
 class TweakDefinition:
     """Complete metadata and execution specification for a single tweak."""
 
@@ -195,6 +293,8 @@ class TweakDefinition:
     stop_processes: tuple[str, ...] = ()
     uninstall_onedrive: bool = False
     cis_id: str | None = None
+    cis_mapping: CisControlMapping | None = None
+    provenance: TweakProvenance | None = None
     requires_reboot: bool = False
     requires_explorer_restart: bool = False
     irreversible: bool = False
@@ -210,16 +310,17 @@ class EnvironmentInfo:
     display_version: str
     edition: str
     is_admin: bool
-    domain_joined: bool
-    entra_joined: bool
-    mdm_enrolled: bool
-    defender_enabled: bool
-    secure_boot_enabled: bool
+    domain_joined: bool | None
+    entra_joined: bool | None
+    mdm_enrolled: bool | None
+    defender_enabled: bool | None
+    secure_boot_enabled: bool | None
     wsl_installed: bool
     wsl_version: str | None
     wsl_distros: tuple[str, ...] = ()
-    bitlocker_protected: bool = False
-    applocker_configured: bool = False
+    bitlocker_protected: bool | None = None
+    applocker_configured: bool | None = None
+    observations: dict[str, PostureObservation] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize environment info to a JSON-compatible dictionary."""
@@ -240,6 +341,30 @@ class EnvironmentInfo:
             "wsl_installed": self.wsl_installed,
             "wsl_version": self.wsl_version,
             "wsl_distros": list(self.wsl_distros),
+            "observations": {key: obs.to_dict() for key, obs in self.observations.items()},
+        }
+
+
+@dataclass(frozen=True)
+class PlannedOperation:
+    """Typed single-operation plan item for dry-run, JSON, and Markdown rendering."""
+
+    operation_type: str
+    target: str
+    action: str
+    before_state: str
+    after_state: str
+    reversible: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize planned operation to a JSON-compatible dictionary."""
+        return {
+            "operation_type": self.operation_type,
+            "target": self.target,
+            "action": self.action,
+            "before_state": self.before_state,
+            "after_state": self.after_state,
+            "reversible": self.reversible,
         }
 
 
@@ -257,8 +382,14 @@ class TweakCheckResult:
     source_url: str
     registry_changes: tuple[RegistryChangeDetail, ...] = ()
     cis_id: str | None = None
+    cis_mapping: CisControlMapping | None = None
+    dimension: AuditDimension | None = None
+    verification_method: str = ""
     pending_restart: bool = False
+    requires_reboot: bool = False
+    requires_explorer_restart: bool = False
     irreversible: bool = False
+    operations: tuple[PlannedOperation, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize check result to a JSON-compatible dictionary."""
@@ -266,14 +397,20 @@ class TweakCheckResult:
             "tweak_id": self.tweak_id,
             "title": self.title,
             "category": self.category,
+            "dimension": str(self.dimension) if self.dimension is not None else None,
             "risk": str(self.risk),
             "requires_admin": self.requires_admin,
             "status": str(self.status),
             "detail": self.detail,
             "source_url": self.source_url,
             "cis_id": self.cis_id,
+            "cis_mapping": self.cis_mapping.to_dict() if self.cis_mapping is not None else None,
+            "verification_method": self.verification_method,
             "pending_restart": self.pending_restart,
+            "requires_reboot": self.requires_reboot,
+            "requires_explorer_restart": self.requires_explorer_restart,
             "irreversible": self.irreversible,
+            "operations": [op.to_dict() for op in self.operations],
             "registry_changes": [change.to_dict() for change in self.registry_changes],
         }
 
@@ -289,6 +426,7 @@ class RegistryValueSnapshot:
     value_existed: bool
     previous_data: RegistryValueData
     previous_type: str | None
+    view: RegistryView = RegistryView.DEFAULT
 
     @property
     def full_key_path(self) -> str:
@@ -310,11 +448,17 @@ class RegistryValueSnapshot:
             "value_existed": self.value_existed,
             "previous_data": _encode_registry_data(self.previous_data),
             "previous_type": self.previous_type,
+            "view": str(self.view),
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RegistryValueSnapshot":
         """Deserialize snapshot from dictionary."""
+        raw_view = payload.get("view", RegistryView.DEFAULT)
+        try:
+            view = RegistryView(str(raw_view))
+        except ValueError:
+            view = RegistryView.DEFAULT
         return cls(
             hive=str(payload["hive"]),
             key_path=str(payload["key_path"]),
@@ -323,6 +467,7 @@ class RegistryValueSnapshot:
             value_existed=bool(payload["value_existed"]),
             previous_data=_decode_registry_data(payload.get("previous_data")),
             previous_type=payload.get("previous_type"),
+            view=view,
         )
 
 
