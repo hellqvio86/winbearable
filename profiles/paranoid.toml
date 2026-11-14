@@ -1,0 +1,25 @@
+# winbearable profile: paranoid
+# Target: Maximum lockdown for high-security workstations.
+# Inherits owner.toml and adds aggressive service/feature removal, VBS/HVCI, LSA PPL, and strict WSL isolation.
+
+name = "paranoid"
+extends = "owner"
+description = "Aggressive lockdown profile: owner tweaks plus OneDrive client removal, WSearch service disable, LSA RunAsPPL, VBS/HVCI enforcement, and strict WSL2 isolation."
+
+[wsl]
+enabled = true
+mode = "strict"
+networking_mode = "mirrored"
+dns_tunneling = true
+firewall = true
+auto_proxy = true
+systemd = true
+
+[tweaks]
+# --- Aggressive Removals & Services ---
+"onedrive.uninstall" = true
+"search.disable_wsearch_service" = true
+
+# --- High-Assurance Native Hardening (Requires --i-know-what-im-doing for high-risk items) ---
+"hardening.enable_lsa_protection" = true
+"hardening.enable_vbs_hvci" = true

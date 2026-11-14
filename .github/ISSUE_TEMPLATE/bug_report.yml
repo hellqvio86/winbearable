@@ -1,0 +1,38 @@
+name: Bug Report
+description: Report a problem with a tweak, WSL configuration, or environment detection
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: wb_version
+    attributes:
+      label: winbearable version
+      description: Output of `wb --version`
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows_build
+    attributes:
+      label: Windows 11 build number
+      description: Output of `wb doctor --json` (only latest Windows 11 24H2/25H2+ builds >= 26100 are supported)
+      placeholder: "26100"
+    validations:
+      required: true
+  - type: dropdown
+    id: mdm_managed
+    attributes:
+      label: Managed by MDM / Group Policy (GPO)?
+      options:
+        - "No (personal / unmanaged machine)"
+        - "Yes (corporate Entra ID / Intune / Active Directory)"
+        - "Ex-work machine (locked BIOS, local user)"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the tweak ID, profile used, and output of `wb plan` or `wb doctor --json`.
+    validations:
+      required: true

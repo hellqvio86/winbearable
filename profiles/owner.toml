@@ -1,0 +1,34 @@
+# winbearable profile: owner
+# Target: Personal or ex-work machine where you have Administrator rights.
+# Inherits all per-user tweaks from user-only.toml and adds machine-wide policy & hardening tweaks.
+
+name = "owner"
+extends = "user-only"
+description = "Full-control profile for machine owners: user-only tweaks plus machine-wide OneDrive policy block, Recall/Copilot removal, minimal telemetry, and baseline CIS hardening."
+
+[wsl]
+enabled = true
+mode = "convenient"
+networking_mode = "mirrored"
+dns_tunneling = true
+firewall = true
+auto_proxy = true
+systemd = true
+
+[tweaks]
+# --- OneDrive (Admin Policy) ---
+# Source: https://learn.microsoft.com/en-us/sharepoint/use-group-policy
+"onedrive.disable_policy" = true
+
+# --- AI & Telemetry (Admin Policy) ---
+# Source: https://learn.microsoft.com/en-us/windows/privacy/manage-windows-recall
+"ai.disable_copilot_machine" = true
+"ai.disable_recall" = true
+"privacy.telemetry_minimal" = true
+
+# --- Native Hardening (Admin Policy, CIS Benchmark) ---
+"hardening.disable_llmnr" = true
+"hardening.disable_wpad" = true
+"hardening.disable_autorun" = true
+"hardening.powershell_scriptblock_logging" = true
+"hardening.cmdline_process_audit" = true

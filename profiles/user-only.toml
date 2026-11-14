@@ -1,0 +1,47 @@
+# winbearable profile: user-only
+# Target: Work PC or locked-down Windows 11 account with NO Administrator privileges.
+# Every tweak in this profile operates strictly in HKCU / user scope.
+
+name = "user-only"
+description = "Per-user tweaks that require no Administrator privileges: install VS Code + Remote-WSL, kill OneDrive tray/Explorer pin, kill Bing search, ads, widgets, and restore classic Explorer behavior."
+
+[wsl]
+enabled = true
+mode = "convenient"
+networking_mode = "mirrored"
+dns_tunneling = true
+firewall = true
+auto_proxy = true
+systemd = true
+
+[tweaks]
+# --- Opinionated Developer Apps (No Admin, User Scope via winget) ---
+# Source: https://code.visualstudio.com/docs/remote/wsl
+"apps.install_vscode" = true
+
+# --- OneDrive (No Admin) ---
+# Source: https://learn.microsoft.com/en-us/sharepoint/per-machine-installation
+"onedrive.disable_tray_autorun" = true
+"onedrive.unpin_explorer" = true
+
+# --- Search & Start Menu (No Admin) ---
+# Source: https://learn.microsoft.com/en-us/windows/configuration/search/
+"search.disable_bing" = true
+"search.disable_highlights" = true
+"search.hide_taskbar_box" = true
+"search.disable_cloud_and_history" = true
+"start.disable_recommendations" = true
+
+# --- Taskbar & File Explorer (No Admin) ---
+# Source: https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/
+"taskbar.disable_widgets_and_chat" = true
+"explorer.classic_context_menu" = true
+"explorer.show_file_extensions" = true
+"explorer.show_hidden_files" = true
+
+# --- AI, Privacy & Hardening (No Admin) ---
+# Source: https://learn.microsoft.com/en-us/windows/client-management/manage-windows-copilot
+"ai.disable_copilot_user" = true
+"privacy.disable_advertising_id" = true
+"privacy.disable_tailored_experiences" = true
+"hardening.disable_wsh_user" = true
