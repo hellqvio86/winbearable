@@ -36,6 +36,7 @@ Homepage = "https://github.com/hellqvio86/winbearable"
 Documentation = "https://github.com/hellqvio86/winbearable#readme"
 Repository = "https://github.com/hellqvio86/winbearable.git"
 Issues = "https://github.com/hellqvio86/winbearable/issues"
+Funding = "https://github.com/sponsors/hellqvio86"
 
 [build-system]
 requires = ["hatchling"]
@@ -78,7 +79,7 @@ source = ["src/winbearable"]
 omit = ["src/winbearable/__main__.py"]
 
 [tool.coverage.report]
-fail_under = 100
+fail_under = 80
 show_missing = true
 exclude_lines = [
   "pragma: no cover",

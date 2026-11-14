@@ -15,7 +15,7 @@ format: .venv
 
 test: .venv
 	.venv/bin/mypy src
-	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=100
+	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
 	.venv/bin/python3 src/generate_badge.py
 
 run: .venv

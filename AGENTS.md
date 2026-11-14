@@ -40,6 +40,6 @@ wb rollback --apply --json
 ```bash
 make venv          # Create .venv and install dependencies with uv
 make lint          # ruff check + ruff format --check
-make test          # mypy --strict + pytest-cov (>=85%) + badge generation
+make test          # mypy --strict + pytest-cov (>=80%) + badge generation
 make release-check # lint + test + TruffleHog + Trivy
 ```

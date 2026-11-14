@@ -23,6 +23,6 @@ Thank you for contributing to `winbearable`!
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
 make lint          # Run ruff check and ruff format --check
-make test          # Run mypy --strict and pytest with >=85% coverage
+make test          # Run mypy --strict and pytest with >=80% coverage
 make release-check # Run lint, test, TruffleHog, and Trivy
 ```

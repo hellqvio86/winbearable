@@ -191,12 +191,12 @@ We don't like Windows enough to maintain legacy workarounds for EOL operating sy
 
 ---
 
-## Development & 100% Test Coverage Gate (`uv`)
+## Development & Test Coverage Gate (`uv`)
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
 make lint          # ruff check + ruff format --check
-make test          # mypy --strict + pytest-cov (enforces 100% coverage) + badge generation
+make test          # mypy --strict + pytest-cov (enforces >=80% coverage) + badge generation
 make release-check # lint + test + TruffleHog + Trivy
 ```
 
@@ -207,3 +207,24 @@ make release-check # lint + test + TruffleHog + Trivy
 - [AI Agent Instructions (`AGENTS.md`)](AGENTS.md)
 - [Security Policy (`SECURITY.md`)](SECURITY.md)
 - [Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)
+
+---
+
+## 💖 Support & Donate
+
+If `winbearable` made your forced Windows + WSL2 setup bearable, consider supporting the project:
+
+- **GitHub Sponsors:** [github.com/sponsors/hellqvio86](https://github.com/sponsors/hellqvio86)
+- **Buy Me a Coffee:** [buymeacoffee.com/olofhellqvc](https://www.buymeacoffee.com/olofhellqvc)
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+<p align="right">
+  <a href="https://www.buymeacoffee.com/olofhellqvc">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="48">
+  </a>
+</p>
