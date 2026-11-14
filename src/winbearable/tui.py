@@ -1,8 +1,10 @@
 """Optional Textual TUI for winbearable (`wb tui`)."""
 
+import importlib
 import importlib.util
 import sys
 from collections.abc import Callable
+from typing import Any
 
 from .backends.registry import RegistryBackend
 from .backends.system import SystemBackend
@@ -53,31 +55,35 @@ def launch_tui(
         )
         return 1
 
-    from textual.app import App, ComposeResult  # pragma: no cover
-    from textual.widgets import DataTable, Footer, Header, Static  # pragma: no cover
+    textual_app: Any = importlib.import_module("textual.app")  # pragma: no cover
+    textual_widgets: Any = importlib.import_module("textual.widgets")  # pragma: no cover
 
-    class WinbearableApp(App[int]):  # pragma: no cover
-        """Interactive TUI displaying winbearable profile status and registry paths."""
+    def _compose(self: Any) -> Any:  # pragma: no cover
+        yield textual_widgets.Header()
+        yield textual_widgets.Static(
+            f"Profile: {profile.name} — {profile.description}\n"
+            "Note: Dry-run preview mode. Use `wb apply --apply` from CLI to persist changes."
+        )
+        yield textual_widgets.DataTable()
+        yield textual_widgets.Footer()
 
-        TITLE = f"winbearable — Profile: {profile.name}"
-        SUB_TITLE = f"OS: {env.os_name} (Build {env.windows_build}) | Admin: {env.is_admin}"
-        BINDINGS = [("q", "quit", "Quit")]
+    def _on_mount(self: Any) -> None:  # pragma: no cover
+        table = self.query_one(textual_widgets.DataTable)
+        table.add_columns("Tweak ID", "Category", "Risk", "Admin", "Status", "Registry Path & Value")
+        for row in rows:
+            table.add_row(*row)
 
-        def compose(self) -> ComposeResult:
-            yield Header()
-            yield Static(
-                f"Profile: {profile.name} — {profile.description}\n"
-                "Note: Dry-run preview mode. Use `wb apply --apply` from CLI to persist changes."
-            )
-            yield DataTable()
-            yield Footer()
-
-        def on_mount(self) -> None:
-            table = self.query_one(DataTable)
-            table.add_columns("Tweak ID", "Category", "Risk", "Admin", "Status", "Registry Path & Value")
-            for row in rows:
-                table.add_row(*row)
-
-    app = WinbearableApp()  # pragma: no cover
+    app_cls: Any = type(  # pragma: no cover
+        "WinbearableApp",
+        (textual_app.App,),
+        {
+            "TITLE": f"winbearable — Profile: {profile.name}",
+            "SUB_TITLE": f"OS: {env.os_name} (Build {env.windows_build}) | Admin: {env.is_admin}",
+            "BINDINGS": [("q", "quit", "Quit")],
+            "compose": _compose,
+            "on_mount": _on_mount,
+        },
+    )
+    app = app_cls()  # pragma: no cover
     app.run()  # pragma: no cover
     return 0  # pragma: no cover

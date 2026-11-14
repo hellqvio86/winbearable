@@ -107,7 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # wb init
     init_parser = subparsers.add_parser("init", help="Generate a TOML profile from the detected environment")
-    init_parser.add_argument("--output", default=None, help="Write to file instead of ~/.config/winbearable/profile.toml")
+    init_parser.add_argument(
+        "--output",
+        default=None,
+        help="Write to file instead of ~/.config/winbearable/profile.toml",
+    )
     init_parser.add_argument("--stdout", action="store_true", help="Print generated TOML to stdout")
 
     # wb tui
@@ -116,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # wb wsl ...
     wsl_parser = subparsers.add_parser("wsl", help="Audit, plan, or apply WSL2 (.wslconfig and /etc/wsl.conf) settings")
-    wsl_sub = wsl_parser.add_subparsers(dest="wsl_command")
+    wsl_sub = wsl_parser.add_subparsers(dest="wsl_command", required=True)
 
     wsl_audit_p = wsl_sub.add_parser("audit", help="Audit WSL2 installation, distros, and .wslconfig")
     wsl_audit_p.add_argument("--wslconfig", default=None, help="Custom .wslconfig path")
@@ -172,12 +176,15 @@ def run_cli(
             if args.json:
                 _print_json(payload)
             else:
+                distros_str = ", ".join(env.wsl_distros) or "none"
                 sys.stdout.write(
                     f"winbearable v{__version__} — Doctor Report\n"
-                    f"OS: {env.os_name} (Build {env.windows_build}, Display: {env.display_version}, Edition: {env.edition})\n"
-                    f"Admin: {env.is_admin} | Domain: {env.domain_joined} | Entra: {env.entra_joined} | MDM: {env.mdm_enrolled}\n"
+                    f"OS: {env.os_name} (Build {env.windows_build}, Display: {env.display_version}, "
+                    f"Edition: {env.edition})\n"
+                    f"Admin: {env.is_admin} | Domain: {env.domain_joined} | Entra: {env.entra_joined} "
+                    f"| MDM: {env.mdm_enrolled}\n"
                     f"Defender: {env.defender_enabled} | Secure Boot: {env.secure_boot_enabled}\n"
-                    f"WSL Installed: {env.wsl_installed} (Version: {env.wsl_version}, Distros: {', '.join(env.wsl_distros) or 'none'})\n"
+                    f"WSL Installed: {env.wsl_installed} (Version: {env.wsl_version}, Distros: {distros_str})\n"
                     f"Baseline Score: {audit['passed']}/{audit['total']} ({audit['score_percent']}%) "
                     f"| CIS Checks: {audit['cis_passed']}/{audit['cis_total']}\n"
                 )
@@ -267,7 +274,8 @@ def run_cli(
                                 else "<deleted>"
                             )
                             sys.stdout.write(
-                                f"  Registry restore: {snap.full_key_path} [{snap.display_value_name}] -> {target_desc}\n"
+                                f"  Registry restore: {snap.full_key_path} "
+                                f"[{snap.display_value_name}] -> {target_desc}\n"
                             )
             return 0
 
@@ -286,59 +294,55 @@ def run_cli(
             profile = load_profile(args.profile)
             return launch_tui(profile, env, reg_backend, sys_backend)
 
-        if args.command == "wsl":
-            if not args.wsl_command:
-                parser.parse_args(["wsl", "--help"])
-            wslconfig_path = Path(args.wslconfig) if getattr(args, "wslconfig", None) else None
-            if args.wsl_command == "audit":
-                wsl_report = audit_wsl(env, wslconfig_path=wslconfig_path)
-                if args.json:
-                    _print_json(wsl_report)
-                else:
-                    sys.stdout.write(
-                        f"WSL Installed: {wsl_report['wsl_installed']} (Version: {wsl_report['wsl_version']})\n"
-                        f"Distros: {', '.join(wsl_report['distros']) or 'none'}\n"
-                        f".wslconfig ({wsl_report['wslconfig_path']}): exists={wsl_report['wslconfig_exists']}, "
-                        f"mirrored={wsl_report['mirrored_networking']}, firewall={wsl_report['firewall_enabled']}\n"
-                    )
-                return 0
-
-            is_apply = args.wsl_command == "apply" and bool(getattr(args, "apply", False))
-            spec = WslConfigSpec(
-                enabled=True,
-                mode=args.mode,
-                memory_gb=args.memory_gb,
-            )
-            wsl_res = plan_or_apply_wsl(
-                spec=spec,
-                system=sys_backend,
-                wslconfig_path=wslconfig_path,
-                distro=args.distro,
-                dry_run=not is_apply,
-            )
+        wslconfig_path = Path(args.wslconfig) if getattr(args, "wslconfig", None) else None
+        if args.wsl_command == "audit":
+            wsl_report = audit_wsl(env, wslconfig_path=wslconfig_path)
             if args.json:
-                _print_json(wsl_res)
+                _print_json(wsl_report)
             else:
-                mode_tag = "DRY-RUN" if wsl_res["dry_run"] else "APPLIED"
                 sys.stdout.write(
-                    f"Detected Windows host RAM: {wsl_res['host_memory_gib']} GiB ({wsl_res['host_memory_bytes']} bytes).\n"
-                    f"WSL memory limit: {wsl_res['memory_limit_gib']}GB (75% of detected host RAM).\n"
-                    f"[{mode_tag}] .wslconfig ({wsl_res['wslconfig_path']}) changed={wsl_res['wslconfig_changed']}\n"
-                    f"{wsl_res['wslconfig_content']}\n"
+                    f"WSL Installed: {wsl_report['wsl_installed']} (Version: {wsl_report['wsl_version']})\n"
+                    f"Distros: {', '.join(wsl_report['distros']) or 'none'}\n"
+                    f".wslconfig ({wsl_report['wslconfig_path']}): exists={wsl_report['wslconfig_exists']}, "
+                    f"mirrored={wsl_report['mirrored_networking']}, firewall={wsl_report['firewall_enabled']}\n"
                 )
-                if args.distro:
-                    sys.stdout.write(
-                        f"[{mode_tag}] /etc/wsl.conf ({args.distro}) changed={wsl_res['distro_changed']}\n"
-                        f"{wsl_res['distro_wsl_conf_content']}\n"
-                    )
-                sys.stdout.write("Restart WSL to apply: wsl.exe --shutdown\n")
             return 0
+
+        is_apply = args.wsl_command == "apply" and bool(getattr(args, "apply", False))
+        spec = WslConfigSpec(
+            enabled=True,
+            mode=args.mode,
+            memory_gb=args.memory_gb,
+        )
+        wsl_res = plan_or_apply_wsl(
+            spec=spec,
+            system=sys_backend,
+            wslconfig_path=wslconfig_path,
+            distro=args.distro,
+            dry_run=not is_apply,
+        )
+        if args.json:
+            _print_json(wsl_res)
+        else:
+            mode_tag = "DRY-RUN" if wsl_res["dry_run"] else "APPLIED"
+            sys.stdout.write(
+                f"Detected Windows host RAM: {wsl_res['host_memory_gib']} GiB "
+                f"({wsl_res['host_memory_bytes']} bytes).\n"
+                f"WSL memory limit: {wsl_res['memory_limit_gib']}GB (75% of detected host RAM).\n"
+                f"[{mode_tag}] .wslconfig ({wsl_res['wslconfig_path']}) changed={wsl_res['wslconfig_changed']}\n"
+                f"{wsl_res['wslconfig_content']}\n"
+            )
+            if args.distro:
+                sys.stdout.write(
+                    f"[{mode_tag}] /etc/wsl.conf ({args.distro}) changed={wsl_res['distro_changed']}\n"
+                    f"{wsl_res['distro_wsl_conf_content']}\n"
+                )
+            sys.stdout.write("Restart WSL to apply: wsl.exe --shutdown\n")
+        return 0
 
     except (ProfileValidationError, HighRiskConfirmationError, KeyError) as exc:
         sys.stderr.write(f"ERROR: {exc}\n")
         return 1
-
-    return 0
 
 
 def main() -> None:

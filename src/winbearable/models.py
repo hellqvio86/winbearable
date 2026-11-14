@@ -84,10 +84,7 @@ class RegistryChangeDetail:
     def format_transition(self) -> str:
         """Format explicit path, value name, type, and before -> after transition."""
         current_str = repr(self.current_value) if self.current_exists else "<missing>"
-        if self.action == "delete":
-            target_str = "<deleted>"
-        else:
-            target_str = f"{self.target_value!r} ({self.value_type})"
+        target_str = "<deleted>" if self.action == "delete" else f"{self.target_value!r} ({self.value_type})"
         return f"{self.full_key_path} [{self.display_value_name}]: {current_str} -> {target_str}"
 
     def to_dict(self) -> dict[str, Any]:

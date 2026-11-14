@@ -1,6 +1,7 @@
 """Comprehensive unit tests for WinregBackend, NativeSystemBackend, StateStore, and TUI."""
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from winbearable.backends.registry import (
 )
 from winbearable.backends.system import (
     GIB_BYTES,
+    InMemorySystemBackend,
     NativeSystemBackend,
     create_default_system_backend,
 )
@@ -39,7 +41,12 @@ from winbearable.profiles import (
 from winbearable.state import StateStore, resolve_state_path
 from winbearable.tui import format_tui_rows, is_textual_available, launch_tui
 from winbearable.tweaks import get_tweak
-from winbearable.wsl import _atomic_write_text, calculate_wsl_memory_gib, format_host_memory_gib, get_default_wslconfig_path
+from winbearable.wsl import (
+    _atomic_write_text,
+    calculate_wsl_memory_gib,
+    format_host_memory_gib,
+    get_default_wslconfig_path,
+)
 
 
 class FakeWinregHandle:
@@ -176,7 +183,10 @@ class TestBackendsAndCoverage(unittest.TestCase):
     def test_in_memory_registry_backend_methods(self) -> None:
         """InMemoryRegistryBackend covers initial_keys, subkey listing, and missing deletes."""
         reg = InMemoryRegistryBackend(
-            initial_keys={(HIVE_HKLM, r"SOFTWARE\Microsoft\Enrollments\GUID-1")},
+            initial_keys={
+                (HIVE_HKCU, ""),
+                (HIVE_HKLM, r"SOFTWARE\Microsoft\Enrollments\GUID-1"),
+            },
         )
         self.assertTrue(reg.key_exists(HIVE_HKLM, r"SOFTWARE\Microsoft\Enrollments"))
         self.assertEqual(reg.list_subkeys(HIVE_HKLM, r"SOFTWARE\Microsoft\Enrollments"), ["GUID-1"])
@@ -204,14 +214,18 @@ class TestBackendsAndCoverage(unittest.TestCase):
         self.assertFalse(linux_sys.is_winget_package_installed("Microsoft.VisualStudioCode"))
         self.assertFalse(linux_sys.install_winget_package("Microsoft.VisualStudioCode"))
         self.assertFalse(linux_sys.uninstall_winget_package("Microsoft.VisualStudioCode"))
-        self.assertGreater(linux_sys.get_total_memory_bytes(), 0)
+        with patch("os.sysconf", side_effect=[4096, 4194304], create=True):
+            self.assertEqual(linux_sys.get_total_memory_bytes(), 16 * GIB_BYTES)
 
         # Service start type get/set on non-Windows
         self.assertIsNone(linux_sys.get_service_start_type(reg, "WSearch"))
         linux_sys.set_service_start_type(reg, "WSearch", 4)
         self.assertEqual(linux_sys.get_service_start_type(reg, "WSearch"), 4)
 
-        # Command execution failure (non-existent binary -> returncode 127)
+        # Real command execution and non-existent binary -> returncode 127
+        ok_cmd = linux_sys._run_native_cmd([sys.executable, "-c", "print('ok')"])
+        self.assertEqual(ok_cmd.returncode, 0)
+        self.assertIn("ok", ok_cmd.stdout)
         bad_cmd = linux_sys._run_native_cmd(["/nonexistent/binary/path/xyz"])
         self.assertEqual(bad_cmd.returncode, 127)
 
@@ -291,6 +305,13 @@ class TestBackendsAndCoverage(unittest.TestCase):
                 wsl_res = win_sys.run_wsl_command(["--status"])
                 self.assertEqual(wsl_res.returncode, 0)
 
+            with patch.object(
+                win_sys,
+                "_run_native_cmd",
+                return_value=type("Res", (), {"args": (), "returncode": 1, "stdout": "", "stderr": "err"})(),
+            ):
+                self.assertFalse(win_sys.install_winget_package("Microsoft.VisualStudioCode"))
+
         # Fallback when windll fails and no OneDriveSetup candidate exists
         win_sys_err = NativeSystemBackend(
             platform_override="win32",
@@ -299,7 +320,7 @@ class TestBackendsAndCoverage(unittest.TestCase):
         )
         self.assertFalse(win_sys_err._check_is_admin())
         self.assertFalse(win_sys_err.uninstall_onedrive_client())
-        with patch("os.sysconf", side_effect=OSError("no sysconf")):
+        with patch("os.sysconf", side_effect=OSError("no sysconf"), create=True):
             self.assertEqual(win_sys_err.get_total_memory_bytes(), 16 * GIB_BYTES)
 
         # Env overrides for build and admin
@@ -334,8 +355,11 @@ class TestBackendsAndCoverage(unittest.TestCase):
             ):
                 self.assertEqual(resolve_state_path(), Path(tmp_dir) / "winbearable" / "state.json")
 
-            with patch.dict(os.environ, {}, clear=True), patch("sys.platform", "linux"):
-                self.assertIn(".local/state/winbearable/state.json", str(resolve_state_path()))
+            with (
+                patch.dict(os.environ, {"HOME": tmp_dir, "USERPROFILE": tmp_dir}, clear=True),
+                patch("sys.platform", "linux"),
+            ):
+                self.assertIn(".local/state/winbearable/state.json", resolve_state_path().as_posix())
 
             store = StateStore(state_path=custom_state)
             with patch("os.replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
@@ -357,9 +381,9 @@ class TestBackendsAndCoverage(unittest.TestCase):
             get_tweak("unknown.tweak.id")
 
         reg = InMemoryRegistryBackend()
-        from winbearable.backends.system import InMemorySystemBackend
-
         sys_b = InMemorySystemBackend()
+        self.assertFalse(sys_b.uninstall_winget_package("NotInstalled"))
+        self.assertEqual(sys_b.run_wsl_command(["--status"]).returncode, 0)
         env = sys_b.detect_environment(reg)
         profile = load_profile("user-only")
 
@@ -389,7 +413,7 @@ class TestBackendsAndCoverage(unittest.TestCase):
                 self.assertEqual(get_builtin_profiles_dir(), tmp_path)
 
             with (
-                patch.dict(os.environ, {}, clear=True),
+                patch.dict(os.environ, {"HOME": tmp_dir, "USERPROFILE": tmp_dir}, clear=True),
                 patch("winbearable.profiles.REPO_PROFILES_DIR", tmp_path / "missing_repo_profiles"),
             ):
                 self.assertTrue(str(get_builtin_profiles_dir()).endswith("profiles"))
@@ -403,8 +427,8 @@ class TestBackendsAndCoverage(unittest.TestCase):
                     tmp_path / "winbearable" / "profile.toml",
                 )
 
-            with patch.dict(os.environ, {}, clear=True):
-                self.assertIn(".config/winbearable/profile.toml", str(get_default_user_profile_path()))
+            with patch.dict(os.environ, {"HOME": tmp_dir, "USERPROFILE": tmp_dir}, clear=True):
+                self.assertIn(".config/winbearable/profile.toml", get_default_user_profile_path().as_posix())
 
             with self.assertRaises(ProfileValidationError):
                 load_profile(str(tmp_path / "does_not_exist.toml"))

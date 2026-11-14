@@ -167,7 +167,8 @@ def detect_tweak(
 
     if not drifted_reasons:
         compliant_parts = [
-            f"{item.full_key_path} [{item.display_value_name}]={'<deleted>' if item.action == ACTION_DELETE else repr(item.target_value)}"
+            f"{item.full_key_path} [{item.display_value_name}]="
+            f"{'<deleted>' if item.action == ACTION_DELETE else repr(item.target_value)}"
             for item in reg_details
         ]
         for svc_spec in tweak.service_specs:

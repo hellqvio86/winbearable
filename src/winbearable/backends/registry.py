@@ -1,5 +1,6 @@
 """Native Windows registry backend using stdlib winreg and in-memory test fake."""
 
+import importlib
 import sys
 from typing import Any, Protocol
 
@@ -187,9 +188,7 @@ class WinregBackend:
         if winreg_module is None:
             if sys.platform != "win32":
                 raise RuntimeError("WinregBackend is only available on Windows (win32).")
-            import winreg as stdlib_winreg  # pragma: no cover
-
-            winreg_module = stdlib_winreg  # pragma: no cover
+            winreg_module = importlib.import_module("winreg")  # pragma: no cover
 
         self._winreg: Any = winreg_module
         self._hive_map: dict[str, int] = {
@@ -243,7 +242,8 @@ class WinregBackend:
             with self._winreg.OpenKey(root, norm, 0, self._winreg.KEY_READ) as handle:
                 raw_data, raw_type = self._winreg.QueryValueEx(handle, value_name)
                 reg_type = self._int_to_type.get(int(raw_type), REG_SZ)
-                return raw_data, reg_type
+                typed_data: int | str | None = raw_data if isinstance(raw_data, (int, str)) else None
+                return typed_data, reg_type
         except OSError:
             return None
 

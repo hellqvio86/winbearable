@@ -104,14 +104,22 @@ class TestCli(unittest.TestCase):
         code_rb_dry, stdout_rb_dry, _ = self._invoke(["rollback"])
         self.assertEqual(code_rb_dry, 0)
         self.assertIn("[DRY-RUN] Would revert", stdout_rb_dry)
-        self.assertIn("Registry restore: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run [OneDrive]", stdout_rb_dry)
+        self.assertIn(
+            "Registry restore: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run [OneDrive]",
+            stdout_rb_dry,
+        )
+
+        # Unknown run ID error when state_store has runs
+        code_err_nonempty, _, stderr_err_nonempty = self._invoke(["rollback", "--to", "missing-id"])
+        self.assertEqual(code_err_nonempty, 1)
+        self.assertIn("ERROR:", stderr_err_nonempty)
 
         code, stdout, _ = self._invoke(["rollback", "--to", str(run_id), "--apply", "--json"])
         self.assertEqual(code, 0)
         rb_data = json.loads(stdout)
         self.assertEqual(len(rb_data["reverted_runs"]), 1)
 
-        # Unknown run ID error
+        # Unknown run ID error when state_store is empty
         code_err, _, stderr_err = self._invoke(["rollback", "--to", "missing-id"])
         self.assertEqual(code_err, 1)
         self.assertIn("ERROR:", stderr_err)
