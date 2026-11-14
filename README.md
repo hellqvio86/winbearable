@@ -5,11 +5,15 @@
 # winbearable (`wb`)
 
 <p align="center">
+  <a href="https://github.com/hellqvio86/winbearable/actions/workflows/ci.yml"><img src="https://github.com/hellqvio86/winbearable/actions/workflows/ci.yml/badge.svg" alt="CI/CD"></a>
+  <a href="https://github.com/hellqvio86/winbearable/actions/workflows/ci.yml"><img src="coverage.svg" alt="Coverage"></a>
+  <a href="https://pypi.org/project/winbearable/"><img src="https://img.shields.io/pypi/v/winbearable.svg" alt="PyPI Version"></a>
+  <a href="https://pypi.org/project/winbearable/"><img src="https://img.shields.io/pypi/dm/winbearable.svg" alt="PyPI Downloads"></a>
+  <a href="https://pypi.org/project/winbearable/"><img src="https://img.shields.io/pypi/pyversions/winbearable.svg" alt="Python Versions"></a>
   <a href="https://github.com/astral-sh/uv"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v1.json" alt="uv"></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
-  <a href="https://github.com/hellqvio86/winbearable/actions/workflows/ci.yml"><img src="coverage.svg" alt="Coverage"></a>
-  <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python Version">
   <img src="https://img.shields.io/badge/Windows_11-24H2%20%7C%2025H2+-0078D6.svg?logo=windows11&logoColor=white" alt="Windows 11">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
 > ### Foreword: Why Does This Exist?
@@ -29,13 +33,71 @@
 
 ---
 
+## ⚡ Quick Installation (from PyPI via `uv`, `pipx`, or `pip`)
+
+`winbearable` is published on [PyPI (`winbearable`)](https://pypi.org/project/winbearable/) and installs both the `wb` and `winbearable` CLI commands.
+
+### Option 1: Install globally from PyPI with `uv` (Recommended)
+
+```bash
+# Install globally from PyPI:
+uv tool install winbearable
+
+# Or with the optional interactive Textual TUI (`wb tui`):
+uv tool install "winbearable[tui]"
+
+# Or run one-shot directly from PyPI without permanent installation:
+uvx --from winbearable wb doctor
+```
+
+### Option 2: Install globally from PyPI with `pipx`
+
+```bash
+# Install globally from PyPI:
+pipx install winbearable
+
+# Or with the optional interactive Textual TUI (`wb tui`):
+pipx install "winbearable[tui]"
+```
+
+### Option 3: Install via `pip`
+
+```bash
+pip install winbearable
+```
+
+### Option 4: Install or run directly from GitHub (`main`)
+
+```bash
+# Install latest git HEAD via uv:
+uv tool install git+https://github.com/hellqvio86/winbearable.git
+
+# Or via pipx:
+pipx install git+https://github.com/hellqvio86/winbearable.git
+```
+
+### 🔄 Upgrading `winbearable`
+
+```bash
+# If installed via uv tool:
+uv tool upgrade winbearable
+
+# If installed via pipx:
+pipx upgrade winbearable
+
+# If installed via pip:
+pip install --upgrade winbearable
+```
+
+---
+
 ## 🚀 Zero-to-Bash Bootstrap (Fresh Windows 11 -> Linux Shell Fast)
 
-If you are a Linux person staring at a fresh Windows 11 desktop, **do not open Edge, do not open the Microsoft Store, and do not click through GUI installers.**
+If you are a Linux person staring at a fresh Windows 11 desktop without Python or `uv` installed yet, **do not open Edge, do not open the Microsoft Store, and do not click through GUI installers.**
 
 Press **`Win + R`**, type **`cmd`**, hit **Enter**, and paste these commands to get `uv`, Python, VS Code, `winbearable`, and your Linux `bash` shell running in under two minutes:
 
-### Step 1: Install `uv` (and Python) via `winget` (No Admin Required)
+### Step 1: Install `uv` (or Python + `pipx`) via `winget` (No Admin Required)
 
 `winget` is built into Windows 11. Installing `uv` with `--scope user` requires zero Administrator privileges, and `uv` automatically downloads and manages a standalone Python interpreter when needed:
 
@@ -43,14 +105,14 @@ Press **`Win + R`**, type **`cmd`**, hit **Enter**, and paste these commands to 
 winget install --exact --id Astral-sh.uv --scope user --accept-source-agreements --accept-package-agreements
 ```
 
-*(Optional: if you also want a standalone user-scoped Python on `PATH`, run `winget install --exact --id Python.Python.3.13 --scope user --accept-source-agreements --accept-package-agreements`)*
-
-Refresh your `PATH` (or open a new `cmd` / Windows Terminal tab), then install `winbearable`:
+Refresh your `PATH` (or open a new `cmd` / Windows Terminal tab), then install `winbearable` from PyPI:
 
 ```cmd
 uv tool update-shell
 uv tool install winbearable
 ```
+
+*(Prefer `pipx`? Install Python and `pipx` via `winget install --exact --id Python.Python.3.13 --scope user` and `pip install --user pipx`, then run `pipx install winbearable`.)*
 
 ### Step 2: Install VS Code, Kill OneDrive Tray, Kill Bing Search & Fix Explorer (`wb`)
 
