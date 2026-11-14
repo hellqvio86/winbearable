@@ -770,6 +770,32 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             ),
         ),
     ),
+    "hardening.disable_netbios_broadcast": TweakDefinition(
+        tweak_id="hardening.disable_netbios_broadcast",
+        category="hardening",
+        title="Disable NetBIOS Broadcast Name Resolution (NodeType=2 / P-node)",
+        description=(
+            "Sets NetBT NodeType=2 (Peer-to-Peer) to disable NetBIOS broadcast name resolution; "
+            "may break legacy NAS hostnames or split-tunnel corporate VPNs relying on NetBIOS broadcasts."
+        ),
+        source_url="https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/netbios-over-tcp-ip-node-types",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        requires_reboot=True,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters",
+                value_name="NodeType",
+                value_data=2,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
     "hardening.disable_wpad": TweakDefinition(
         tweak_id="hardening.disable_wpad",
         category="hardening",
@@ -1173,6 +1199,76 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
                 value_type=REG_DWORD,
                 action=ACTION_SET,
             ),
+        ),
+    ),
+    "hardening.office_macro_ole": TweakDefinition(
+        tweak_id="hardening.office_macro_ole",
+        category="hardening",
+        title="Block Office Internet Macros & Disable OLE Packager Shortcuts",
+        description=(
+            "Pre-hardens Microsoft Office 16.0+ (Word, Excel, PowerPoint) policy keys in HKCU to block "
+            "macros from the internet, disable VBA macros without notification, and disable OLE packager shortcuts "
+            "even when Office is not currently installed."
+        ),
+        source_url="https://learn.microsoft.com/en-us/microsoft-365-apps/security/internet-macros-blocked",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=tuple(
+            spec
+            for app in ("word", "excel", "powerpoint")
+            for spec in (
+                RegistrySpec(
+                    hive=HIVE_HKCU,
+                    key_path=rf"Software\Policies\Microsoft\Office\16.0\{app}\Security",
+                    value_name="blockcontentexecutionfrominternet",
+                    value_data=1,
+                    value_type=REG_DWORD,
+                    action=ACTION_SET,
+                    policy_checks=(
+                        PolicyConflictPath(
+                            hive=HIVE_HKLM,
+                            key_path=rf"SOFTWARE\Policies\Microsoft\Office\16.0\{app}\Security",
+                            value_name="blockcontentexecutionfrominternet",
+                            enforced_value=None,
+                        ),
+                    ),
+                ),
+                RegistrySpec(
+                    hive=HIVE_HKCU,
+                    key_path=rf"Software\Policies\Microsoft\Office\16.0\{app}\Security",
+                    value_name="vbawarnings",
+                    value_data=4,
+                    value_type=REG_DWORD,
+                    action=ACTION_SET,
+                    policy_checks=(
+                        PolicyConflictPath(
+                            hive=HIVE_HKLM,
+                            key_path=rf"SOFTWARE\Policies\Microsoft\Office\16.0\{app}\Security",
+                            value_name="vbawarnings",
+                            enforced_value=None,
+                        ),
+                    ),
+                ),
+                RegistrySpec(
+                    hive=HIVE_HKCU,
+                    key_path=rf"Software\Policies\Microsoft\Office\16.0\{app}\Security",
+                    value_name="packagershortcut",
+                    value_data=0,
+                    value_type=REG_DWORD,
+                    action=ACTION_SET,
+                    policy_checks=(
+                        PolicyConflictPath(
+                            hive=HIVE_HKLM,
+                            key_path=rf"SOFTWARE\Policies\Microsoft\Office\16.0\{app}\Security",
+                            value_name="packagershortcut",
+                            enforced_value=None,
+                        ),
+                    ),
+                ),
+            )
         ),
     ),
 }

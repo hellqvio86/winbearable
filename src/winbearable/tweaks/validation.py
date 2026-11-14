@@ -49,6 +49,14 @@ def _validate_provenance(tweak: TweakDefinition, errors: list[str]) -> None:
             f"{tweak.tweak_id}: provenance.reversibility={prov.reversibility!r} "
             f"does not match irreversible={tweak.irreversible}"
         )
+    if tweak.irreversible:
+        combined_notes = f"{tweak.description} {prov.risk_rationale}".lower()
+        warning_tokens = ("irreversible", "cannot be undone", "cannot be rolled back", "manual reinstall")
+        if not any(tok in combined_notes for tok in warning_tokens):
+            errors.append(
+                f"{tweak.tweak_id}: irreversible tweaks must include explicit warning text "
+                "in description or risk_rationale"
+            )
 
 
 def _validate_operations(

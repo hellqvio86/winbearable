@@ -2,6 +2,15 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.8.0] - 2026-11-14
+
+### Added
+
+- `hardening.office_macro_ole` (P2.1): Pre-harden Microsoft Office 16.0+ (Word, Excel, PowerPoint) `HKCU` policy keys (`blockcontentexecutionfrominternet=1`, `vbawarnings=4`, `packagershortcut=0`) with `HKLM` MDM/GPO `BLOCKED_BY_POLICY` detection.
+- `hardening.disable_netbios_broadcast` (P2.2): Disable NetBIOS broadcast name resolution (`NetBT\Parameters\NodeType=2`), plus corporate VPN/legacy LAN breakage notes in `README.md`.
+- VBS/HVCI/Credential Guard & Defender PUA/SmartScreen posture observability in `wb doctor` (P2.3, P2.4).
+- Stable CLI exit codes (`0/1/2/3/4`, `--detailed-exitcode`, `IncompleteJournalError`), irreversible warning validation, and per-tweak journal checkpointing (P2-Q.1–P2-Q.6).
+
 ## [0.2.0] - 2026-11-14
 
 ### Added

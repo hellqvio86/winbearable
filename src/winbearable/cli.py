@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -14,14 +15,28 @@ from .backends import (
     create_default_registry_backend,
     create_default_system_backend,
 )
-from .const import DEFAULT_WSL_MODE, JSON_SCHEMA_VERSION, MIN_SUPPORTED_BUILD, WSL_MODES, __version__
+from .const import (
+    DEFAULT_WSL_MODE,
+    EXIT_BLOCKED,
+    EXIT_ERROR,
+    EXIT_PENDING_CHANGES,
+    EXIT_SUCCESS,
+    EXIT_UNSUPPORTED_PLATFORM,
+    JSON_SCHEMA_VERSION,
+    MIN_SUPPORTED_BUILD,
+    WSL_MODES,
+    __version__,
+)
 from .engine import (
     ApplySummary,
     HighRiskConfirmationError,
+    IncompleteJournalError,
     IrreversibleActionError,
     apply_profile,
     calculate_hardening_score,
     evaluate_profile,
+    inspect_defender_smartscreen_posture,
+    inspect_vbs_credential_guard_posture,
     recover_incomplete_runs,
     rollback_runs,
 )
@@ -44,6 +59,16 @@ from .wsl import (
     install_wsl_distro,
     plan_or_apply_wsl,
 )
+
+
+def _detailed_exit_code(results: Sequence[Any], failed_ids: tuple[str, ...] = ()) -> int:
+    if failed_ids:
+        return EXIT_ERROR
+    if any(r.status == TweakStatus.BLOCKED_BY_POLICY for r in results):
+        return EXIT_BLOCKED
+    if any(r.status == TweakStatus.DRIFTED for r in results):
+        return EXIT_PENDING_CHANGES
+    return EXIT_SUCCESS
 
 
 def _require_windows_for_mutation(env: EnvironmentInfo, action: str) -> None:
@@ -150,16 +175,31 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show current tweak status and registry paths for a profile")
     status_parser.add_argument("--profile", default="user-only", help="Profile name or TOML path (default: user-only)")
     status_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    status_parser.add_argument(
+        "--detailed-exitcode",
+        action="store_true",
+        help="Return 2 on pending changes and 3 on policy-blocked tweaks",
+    )
 
     # wb plan
     plan_parser = subparsers.add_parser("plan", help="Preview registry changes required to converge a profile")
     plan_parser.add_argument("--profile", default="user-only", help="Profile name or TOML path (default: user-only)")
     plan_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    plan_parser.add_argument(
+        "--detailed-exitcode",
+        action="store_true",
+        help="Return 2 on pending changes and 3 on policy-blocked tweaks",
+    )
 
     # wb apply
     apply_parser = subparsers.add_parser("apply", help="Apply a profile (dry-run unless --apply is passed)")
     apply_parser.add_argument("--profile", default="user-only", help="Profile name or TOML path (default: user-only)")
     apply_parser.add_argument("--apply", action="store_true", help="Actually write changes to the system")
+    apply_parser.add_argument(
+        "--detailed-exitcode",
+        action="store_true",
+        help="Return 2 on pending changes (dry-run) and 3 on policy-blocked tweaks",
+    )
     apply_parser.add_argument(
         "--i-know-what-im-doing",
         dest="allow_high_risk",
@@ -368,6 +408,39 @@ def _run_cli_body(
                 r["tweak_id"] for r in audit.get("results", []) if r.get("status") == str(TweakStatus.BLOCKED_BY_POLICY)
             ]
             mirrored = bool(wsl_info.get("mirrored_networking")) if isinstance(wsl_info, dict) else False
+            posture: dict[str, Any] = (
+                inspect_defender_smartscreen_posture(reg_backend)
+                if (env.is_windows or env.host_auditable)
+                else {
+                    "defender_pua": {
+                        "state": "unknown",
+                        "confidence": "unknown",
+                        "managed_by_wb": False,
+                        "source": "none",
+                    },
+                    "smartscreen": {
+                        "state": "unknown",
+                        "confidence": "unknown",
+                        "managed_by_wb": False,
+                        "source": "none",
+                    },
+                    "note": "Windows host registry unavailable.",
+                }
+            )
+            vbs_cg: dict[str, Any] = (
+                inspect_vbs_credential_guard_posture(reg_backend)
+                if (env.is_windows or env.host_auditable)
+                else {
+                    "vbs": {"state": "unknown", "confidence": "unknown"},
+                    "hvci": {"state": "unknown", "confidence": "unknown"},
+                    "credential_guard": {
+                        "state": "unknown",
+                        "confidence": "unknown",
+                        "auto_enable_supported": False,
+                    },
+                    "wsl_performance_note": "Windows host registry unavailable.",
+                }
+            )
             refugee_summary = {
                 "windows_build_supported": env.windows_build >= MIN_SUPPORTED_BUILD if env.windows_build else False,
                 "secure_boot_enabled": env.secure_boot_enabled,
@@ -387,12 +460,18 @@ def _run_cli_body(
                 "credential_hygiene": linux_info.get("credential_hygiene", {}),
                 "incomplete_runs_count": len(incomplete_runs),
                 "policy_blocked_tweaks": policy_blocked,
+                "defender_pua_state": posture["defender_pua"]["state"],
+                "smartscreen_state": posture["smartscreen"]["state"],
+                "vbs_state": vbs_cg["vbs"]["state"],
+                "credential_guard_state": vbs_cg["credential_guard"]["state"],
             }
             payload = {
                 "version": __version__,
                 "environment": env.to_dict(),
                 "wsl": wsl_info,
                 "audit": audit,
+                "defender_smartscreen_posture": posture,
+                "vbs_credential_guard_posture": vbs_cg,
                 "refugee_summary": refugee_summary,
                 "incomplete_runs": [run.to_dict() for run in incomplete_runs],
                 "command_history": list(raw_history)[-10:] if isinstance(raw_history, list) else [],
@@ -458,6 +537,17 @@ def _run_cli_body(
                         f"Usability {usab.get('passed', 0)}/{usab.get('total_applicable', 0)} | "
                         f"Developer {dev.get('passed', 0)}/{dev.get('total_applicable', 0)}\n"
                         f"CIS Technical Checks (partial): {audit['cis_passed']}/{audit['cis_total']}\n"
+                        f"Defender PUA: {posture['defender_pua']['state']} "
+                        f"(confidence={posture['defender_pua']['confidence']}, "
+                        f"source={posture['defender_pua']['source']}) | "
+                        f"SmartScreen: {posture['smartscreen']['state']} "
+                        f"(confidence={posture['smartscreen']['confidence']}, "
+                        f"managed_by_wb={posture['smartscreen']['managed_by_wb']})\n"
+                        f"VBS/HVCI/Credential Guard: "
+                        f"vbs={vbs_cg['vbs']['state']} | "
+                        f"hvci={vbs_cg['hvci']['state']} | "
+                        f"credential_guard={vbs_cg['credential_guard']['state']} "
+                        f"(observe-only)\n"
                         f"Linux Refugee Summary: "
                         f"build_supported={refugee_summary['windows_build_supported']} "
                         f"| enterprise_leftovers={refugee_summary['domain_or_mdm_leftovers']} "
@@ -489,7 +579,9 @@ def _run_cli_body(
                 sys.stdout.write(f"Profile '{profile.name}': {applied_cnt}/{len(evaluations)} tweaks applied.\n")
                 for item in evaluations:
                     sys.stdout.write(f"  [{item.status}] {item.tweak_id}: {item.detail}\n")
-            return 0
+            if getattr(args, "detailed_exitcode", False):
+                return _detailed_exit_code(evaluations)
+            return EXIT_SUCCESS
 
         if args.command == "plan":
             profile = load_profile(args.profile)
@@ -514,7 +606,9 @@ def _run_cli_body(
                     sys.stdout.write(
                         "Note: Linux-side sysctl/git baseline requires running `wb wsl baseline --apply` separately.\n"
                     )
-            return 1 if summary.failed_ids else 0
+            if getattr(args, "detailed_exitcode", False):
+                return _detailed_exit_code(summary.results, summary.failed_ids)
+            return EXIT_ERROR if summary.failed_ids else EXIT_SUCCESS
 
         if args.command == "apply":
             if args.apply:
@@ -559,7 +653,9 @@ def _run_cli_body(
                     sys.stdout.write(
                         "Note: Linux-side sysctl/git baseline requires running `wb wsl baseline --apply` separately.\n"
                     )
-            return 1 if summary.failed_ids else 0
+            if getattr(args, "detailed_exitcode", False):
+                return _detailed_exit_code(summary.results, summary.failed_ids)
+            return EXIT_ERROR if summary.failed_ids else EXIT_SUCCESS
 
         if args.command in {"rollback", "recover"}:
             is_recover = args.command == "recover" or bool(getattr(args, "incomplete", False))
@@ -747,11 +843,22 @@ def _run_cli_body(
             sys.stdout.write("Restart WSL to apply: wsl.exe --shutdown\n")
         return 0
 
+    except UnsupportedPlatformError as exc:
+        if getattr(args, "debug", False):
+            raise
+        sys.stderr.write(f"ERROR: {exc}\n")
+        if getattr(args, "json", False):
+            _print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        return EXIT_UNSUPPORTED_PLATFORM
+    except (HighRiskConfirmationError, IrreversibleActionError, IncompleteJournalError) as exc:
+        if getattr(args, "debug", False):
+            raise
+        sys.stderr.write(f"ERROR: {exc}\n")
+        if getattr(args, "json", False):
+            _print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        return EXIT_BLOCKED
     except (
         ProfileValidationError,
-        HighRiskConfirmationError,
-        IrreversibleActionError,
-        UnsupportedPlatformError,
         UacCancelledError,
         UacElevationError,
         WslOperationError,
@@ -768,7 +875,7 @@ def _run_cli_body(
         sys.stderr.write(f"ERROR: {exc}\n")
         if getattr(args, "json", False):
             _print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
-        return 1
+        return EXIT_ERROR
     except Exception as exc:
         if getattr(args, "debug", False):
             raise

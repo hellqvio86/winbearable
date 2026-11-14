@@ -483,6 +483,145 @@ class TestEngineAndTweaks(unittest.TestCase):
                 {"passed", "failed", "blocked_by_policy", "not_applicable", "unknown"},
             )
 
+    def test_p2_1_office_macro_ole_apply_rollback_and_policy_block(self) -> None:
+        """P2.1: Office macro/OLE pre-hardening applies, rolls back, and yields to HKLM MDM policy."""
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(is_admin=True)
+        env = sys_b.detect_environment(reg)
+        profile = ProfileSpec(
+            name="office-macro-test",
+            description="Test Office macro/OLE policy pre-hardening",
+            tweaks={"hardening.office_macro_ole": True},
+        )
+
+        detect_res = evaluate_profile(profile, env, reg, sys_b)
+        self.assertEqual(detect_res[0].status, TweakStatus.DRIFTED)
+
+        plan_summary = apply_profile(profile, env, reg, sys_b, self.state_store, dry_run=True, allow_simulated=True)
+        self.assertTrue(plan_summary.dry_run)
+        self.assertEqual(plan_summary.results[0].status, TweakStatus.DRIFTED)
+        self.assertIsNone(
+            reg.get_value(HIVE_HKCU, r"Software\Policies\Microsoft\Office\16.0\word\Security", "vbawarnings")
+        )
+
+        apply_summary = apply_profile(profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
+        self.assertFalse(apply_summary.dry_run)
+        self.assertIsNotNone(apply_summary.run_id)
+        self.assertEqual(evaluate_profile(profile, env, reg, sys_b)[0].status, TweakStatus.APPLIED)
+        for app in ("word", "excel", "powerpoint"):
+            sec_key = rf"Software\Policies\Microsoft\Office\16.0\{app}\Security"
+            self.assertEqual(reg.get_value(HIVE_HKCU, sec_key, "blockcontentexecutionfrominternet"), (1, REG_DWORD))
+            self.assertEqual(reg.get_value(HIVE_HKCU, sec_key, "vbawarnings"), (4, REG_DWORD))
+            self.assertEqual(reg.get_value(HIVE_HKCU, sec_key, "packagershortcut"), (0, REG_DWORD))
+
+        rollback_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+        for app in ("word", "excel", "powerpoint"):
+            sec_key = rf"Software\Policies\Microsoft\Office\16.0\{app}\Security"
+            self.assertIsNone(reg.get_value(HIVE_HKCU, sec_key, "blockcontentexecutionfrominternet"))
+
+        # Simulate MDM/GPO machine policy owning Office security keys -> BLOCKED_BY_POLICY
+        reg.set_value(
+            HIVE_HKLM,
+            r"SOFTWARE\Policies\Microsoft\Office\16.0\word\Security",
+            "blockcontentexecutionfrominternet",
+            0,
+            REG_DWORD,
+        )
+        blocked_plan = evaluate_profile(profile, env, reg, sys_b)
+        self.assertEqual(blocked_plan[0].status, TweakStatus.BLOCKED_BY_POLICY)
+
+    def test_p2_4_defender_smartscreen_posture_honesty(self) -> None:
+        """P2.4: Defender PUA & SmartScreen posture reports partial/unknown confidence honestly."""
+        from winbearable.engine import inspect_defender_smartscreen_posture
+
+        reg = InMemoryRegistryBackend()
+        unset = inspect_defender_smartscreen_posture(reg)
+        self.assertEqual(unset["defender_pua"]["state"], "unset")
+        self.assertEqual(unset["defender_pua"]["confidence"], "unknown")
+        self.assertEqual(unset["smartscreen"]["state"], "unset")
+        self.assertFalse(unset["smartscreen"]["managed_by_wb"])
+
+        reg.set_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows Defender", "PUAProtection", 1, REG_DWORD)
+        reg.set_value(
+            HIVE_HKLM,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer",
+            "SmartScreenEnabled",
+            "RequireAdmin",
+            REG_SZ,
+        )
+        observed = inspect_defender_smartscreen_posture(reg)
+        self.assertEqual(observed["defender_pua"]["state"], "enabled")
+        self.assertEqual(observed["defender_pua"]["confidence"], "partial")
+        self.assertEqual(observed["smartscreen"]["state"], "enabled")
+        self.assertEqual(observed["smartscreen"]["confidence"], "partial")
+        self.assertFalse(observed["smartscreen"]["managed_by_wb"])
+
+    def test_p2_3_vbs_credential_guard_posture_detect(self) -> None:
+        """P2.3: VBS/HVCI/Credential Guard posture reports states honestly and never auto-enables CG."""
+        from winbearable.engine import inspect_vbs_credential_guard_posture
+
+        reg = InMemoryRegistryBackend()
+        unset = inspect_vbs_credential_guard_posture(reg)
+        self.assertEqual(unset["vbs"]["state"], "unset")
+        self.assertEqual(unset["hvci"]["state"], "unset")
+        self.assertEqual(unset["credential_guard"]["state"], "unset")
+        self.assertFalse(unset["credential_guard"]["auto_enable_supported"])
+        self.assertIn("WSL2", unset["wsl_performance_note"])
+
+        reg.set_value(
+            HIVE_HKLM,
+            r"SYSTEM\CurrentControlSet\Control\DeviceGuard",
+            "EnableVirtualizationBasedSecurity",
+            1,
+            REG_DWORD,
+        )
+        reg.set_value(
+            HIVE_HKLM,
+            r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+            "Enabled",
+            1,
+            REG_DWORD,
+        )
+        reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LsaCfgFlags", 1, REG_DWORD)
+        locked = inspect_vbs_credential_guard_posture(reg)
+        self.assertEqual(locked["vbs"]["state"], "enabled")
+        self.assertEqual(locked["hvci"]["state"], "enabled")
+        self.assertEqual(locked["credential_guard"]["state"], "enabled_with_uefi_lock")
+
+        reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LsaCfgFlags", 2, REG_DWORD)
+        unlocked = inspect_vbs_credential_guard_posture(reg)
+        self.assertEqual(unlocked["credential_guard"]["state"], "enabled_without_lock")
+
+    def test_p2_2_netbios_broadcast_apply_and_rollback(self) -> None:
+        """P2.2: NetBIOS NodeType=2 applies/rolls back and owner/paranoid cover LLMNR/mDNS/WPAD/NetBIOS."""
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(is_admin=True)
+        env = sys_b.detect_environment(reg)
+
+        owner = load_profile("owner")
+        paranoid = load_profile("paranoid")
+        for tid in (
+            "hardening.disable_llmnr",
+            "hardening.disable_mdns",
+            "hardening.disable_wpad",
+            "hardening.disable_netbios_broadcast",
+        ):
+            self.assertTrue(owner.tweaks.get(tid))
+            self.assertTrue(paranoid.tweaks.get(tid))
+
+        profile = ProfileSpec(
+            name="netbios-test",
+            description="Test NetBIOS broadcast disable",
+            tweaks={"hardening.disable_netbios_broadcast": True},
+        )
+        apply_profile(profile, env, reg, sys_b, self.state_store, dry_run=False, allow_simulated=True)
+        self.assertEqual(
+            reg.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters", "NodeType"),
+            (2, REG_DWORD),
+        )
+        rollback_runs(self.state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+        self.assertIsNone(reg.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters", "NodeType"))
+
 
 if __name__ == "__main__":
     unittest.main()

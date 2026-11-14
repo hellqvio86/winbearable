@@ -268,8 +268,22 @@ wb recover --apply      # Idempotently compensate and mark ROLLED_BACK
 (`wb rollback --incomplete --apply` is an equivalent alias.)
 
 - **Corrupted `state.json` & backup lifecycle:** `StateStore` automatically maintains `state.json.bak` on every atomic write, rotates completed runs above 100 entries, and prunes `.reg` backup directories above 50 completed runs (while never pruning incomplete transactions or their backups).
+- **Atomic vs. best-effort scope:** Registry keys, services, scheduled tasks, and `.wslconfig` have pre-mutation snapshots and are compensated automatically on mid-run failure or `wb rollback --apply`. Non-compensable side effects (process termination, `OneDriveSetup.exe` uninstall) are explicitly flagged in dry-run plans and cannot be rolled back.
+- **Profile vs. Linux baseline phasing:** `wb apply --profile <name> --apply` converges Windows-side tweaks and `.wslconfig`; run `wb wsl baseline --apply` separately to converge in-distro Linux sysctl/git/unattended-upgrades hardening (`--no-auto-patch` opts out of `unattended-upgrades`, `--dev-packages` opts in to dev packages).
+- **VBS, HVCI & Credential Guard (WSL2 trade-offs):** `hardening.enable_vbs_hvci` is `RiskLevel.HIGH` (requires `--i-know-what-im-doing` and a reboot, included only in `paranoid`), while Credential Guard is **observe-only** in `wb doctor`. Because VBS/HVCI/Credential Guard share the Hyper-V hypervisor with WSL2, enabling them isolates kernel/LSA memory at the cost of extra CPU, memory, and I/O overhead on constrained or nested-virtualization hosts.
+- **Name-resolution hardening & corporate VPNs:** `owner` and `paranoid` disable LLMNR, mDNS, WPAD, and NetBIOS broadcast resolution (`NodeType=2`). If you connect to a split-tunnel corporate VPN, legacy NAS/SMB appliance, or corporate PAC proxy that relies on WPAD or NetBIOS/LLMNR/mDNS fallback, override those tweaks to `false` in a custom TOML profile and run `wb rollback --apply`.
 - **Subprocess timeouts:** Set `WB_CMD_TIMEOUT=<seconds>` to override the default command timeout for slow `winget`/`dism`/`wsl` operations.
 - **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py` on the maintainer's Windows installation.
+
+### Stable CLI Exit Codes
+
+| Exit Code | Meaning |
+| :--- | :--- |
+| `0` | Success (or dry-run completed without `--detailed-exitcode`) |
+| `1` | Hard error / runtime or operation failure |
+| `2` | Dry-run pending changes (`status`, `plan`, or dry-run `apply` with `--detailed-exitcode`) |
+| `3` | Blocked (policy conflict with `--detailed-exitcode`, missing `--i-know-what-im-doing` / `--allow-irreversible`, or incomplete journal requiring `wb recover --apply`) |
+| `4` | Unsupported platform (e.g. mutating Windows/WSL2 commands run on Linux/macOS) |
 
 ---
 

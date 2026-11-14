@@ -102,6 +102,19 @@ class TestCatalogValidation(unittest.TestCase):
         self.assertIn("malformed scheduled task path", joined)
         self.assertIn("uninstall_onedrive=True must be marked irreversible=True", joined)
 
+    def test_irreversible_tweak_requires_explicit_warning_text(self) -> None:
+        """P2-Q.2: Irreversible tweaks must carry explicit warning text in description or risk_rationale."""
+        base = TWEAK_CATALOG["onedrive.uninstall"]
+        assert base.provenance is not None
+        silent_irrev = replace(
+            base,
+            tweak_id="test.silent_irrev",
+            description="Removes feature quietly.",
+            provenance=replace(base.provenance, risk_rationale="Medium risk."),
+        )
+        errors = validate_catalog({"test.silent_irrev": silent_irrev})
+        self.assertTrue(any("explicit warning text" in err for err in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

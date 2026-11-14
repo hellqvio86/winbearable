@@ -328,4 +328,29 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "registry_value",
         "Verified HKLM Policies\\Microsoft\\Edge and Policies\\Google\\Chrome baseline values.",
     ),
+    "hardening.office_macro_ole": _p(
+        "Pre-hardens Office 16.0+ (Word, Excel, PowerPoint) macro and OLE packager policy keys.",
+        "Microsoft 365 Apps Security Baseline / CIS Microsoft 365 Apps Benchmark",
+        (
+            "Low risk: blocks internet macros, disables VBA macros without notification, "
+            "and disables OLE packager shortcuts; inert when Office is absent."
+        ),
+        (
+            "Office blocks internet-origin macros, disables VBA macros without notification, "
+            "and blocks OLE packager shortcuts."
+        ),
+        "registry_value",
+        "Verified HKCU Software\\Policies\\Microsoft\\Office\\16.0\\{word,excel,powerpoint}\\Security policy values.",
+    ),
+    "hardening.disable_netbios_broadcast": _p(
+        "Disables NetBIOS broadcast name resolution by setting NetBT NodeType=2 (P-node).",
+        "Microsoft NetBIOS over TCP/IP Node Types / CIS-adjacent LAN Hardening",
+        (
+            "Medium risk: disables NetBIOS broadcast name resolution; "
+            "may break legacy NAS or corporate split-tunnel VPN name resolution."
+        ),
+        "NetBT stops broadcasting NetBIOS name queries on the LAN (reboot required).",
+        "registry_value",
+        "Verified HKLM SYSTEM\\CurrentControlSet\\Services\\NetBT\\Parameters NodeType=2.",
+    ),
 }

@@ -278,7 +278,7 @@ class TestCli(unittest.TestCase):
                     system=non_win_sys,
                     state_store=self.state_store,
                 )
-            self.assertEqual(code, 1)
+            self.assertEqual(code, 4)
             self.assertIn("non-Windows host", err_buf.getvalue())
             self.assertEqual(self.state_store.load_runs(), [])
 
@@ -369,6 +369,37 @@ class TestCli(unittest.TestCase):
         self.assertIn("IRREVERSIBLE", md_text)
         self.assertIn("REBOOT", md_text)
         self.assertIn("[onedrive_uninstall]", md_text)
+
+    def test_p2_q1_stable_exit_codes(self) -> None:
+        """P2-Q.1: --detailed-exitcode returns 2 on pending, 3 on blocked, and 0 on converged."""
+        from winbearable.const import EXIT_BLOCKED, EXIT_PENDING_CHANGES, EXIT_SUCCESS, HIVE_HKLM, REG_DWORD
+
+        code_pending, _, _ = self._invoke(["plan", "--profile", "user-only", "--detailed-exitcode"])
+        self.assertEqual(code_pending, EXIT_PENDING_CHANGES)
+
+        # High-risk tweak without --i-know-what-im-doing -> EXIT_BLOCKED (3)
+        self.registry.is_simulated = False
+        self.system.is_simulated = False
+        code_hr, _, _ = self._invoke(["apply", "--profile", "paranoid", "--apply"])
+        self.assertEqual(code_hr, EXIT_BLOCKED)
+
+        # Policy-blocked tweak with --detailed-exitcode -> EXIT_BLOCKED (3)
+        self.registry.set_value(
+            HIVE_HKLM,
+            r"SOFTWARE\Policies\Microsoft\Windows\OneDrive",
+            "DisableFileSyncNGSC",
+            0,
+            REG_DWORD,
+        )
+        code_pol, _, _ = self._invoke(["status", "--profile", "owner", "--detailed-exitcode"])
+        self.assertEqual(code_pol, EXIT_BLOCKED)
+
+        # Converged clean profile -> EXIT_SUCCESS (0)
+        custom = Path(self.temp_dir.name) / "clean.toml"
+        custom.write_text('name = "clean"\ndescription = "clean"\n[tweaks]\n"explorer.show_file_extensions" = true\n')
+        self._invoke(["apply", "--profile", str(custom), "--apply"])
+        code_ok, _, _ = self._invoke(["status", "--profile", str(custom), "--detailed-exitcode"])
+        self.assertEqual(code_ok, EXIT_SUCCESS)
 
 
 if __name__ == "__main__":

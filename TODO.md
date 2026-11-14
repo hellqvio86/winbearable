@@ -280,7 +280,9 @@ Default baseline does not install packages; opt-in path is dry-runable and docum
 
 Add only after P0 and after each item has detect + policy-conflict + rollback story.
 
-## [ ] P2.1 — Office macro / OLE hardening (owner + paranoid)
+## [x] P2.1 — Office macro / OLE hardening (owner + paranoid)
+
+> resolved: Added `hardening.office_macro_ole` to `catalog.py`, `provenance.py`, and `profiles/owner.toml` (inherited by `paranoid.toml`), pre-hardening `HKCU\Software\Policies\Microsoft\Office\16.0\{word,excel,powerpoint}\Security` (`blockcontentexecutionfrominternet=1`, `vbawarnings=4`, `packagershortcut=0`) even when Office is absent, with `BLOCKED_BY_POLICY` when `HKLM` MDM/GPO policy keys exist.
 
 **Suggested direction**  
 Policy keys to block Office macros from the internet / enforce hardened Office settings where CIS-adjacent and reversible. Skip if Office absent (honest observation).
@@ -288,17 +290,23 @@ Policy keys to block Office macros from the internet / enforce hardened Office s
 **Acceptance**  
 Detect/plan/apply/rollback tests with fakes; `BLOCKED_BY_POLICY` when MDM owns the keys.
 
-## [ ] P2.2 — NetBIOS / residual name-resolution surface
+## [x] P2.2 — NetBIOS / residual name-resolution surface
+
+> resolved: Confirmed LLMNR/mDNS/WPAD coverage, added reversible `hardening.disable_netbios_broadcast` (`NetBT\Parameters\NodeType=2`) to `catalog.py`, `provenance.py`, and `profiles/owner.toml`, and documented corporate VPN/legacy LAN breakages in `README.md`.
 
 **Required**  
 Confirm LLMNR/mDNS/WPAD coverage; add NetBIOS node-type / disable only where reversible and policy-safe. Document corporate VPN breakages.
 
-## [ ] P2.3 — VBS / Credential Guard documentation + detect
+## [x] P2.3 — VBS / Credential Guard documentation + detect
+
+> resolved: Added `inspect_vbs_credential_guard_posture` in `engine.py`, wired `vbs_credential_guard_posture` into `wb doctor` (`--json` and human output) with `auto_enable_supported=False`, and documented WSL2 hypervisor overhead in `README.md`.
 
 **Required**  
 `enable_vbs_hvci` already high-risk. Doctor should report Credential Guard / VBS observability and **performance implications for WSL** without auto-enabling Credential Guard until detect/rollback is solid.
 
-## [ ] P2.4 — SmartScreen / PUA posture honesty
+## [x] P2.4 — SmartScreen / PUA posture honesty
+
+> resolved: Added `inspect_defender_smartscreen_posture` in `engine.py` and wired it into `wb doctor` (`defender_smartscreen_posture` JSON + human output), reporting Defender PUA and SmartScreen states with `partial`/`unknown` confidence and `managed_by_wb=False` for SmartScreen.
 
 **Required**  
 Doctor reports Defender PUA + SmartScreen-related observations with confidence; avoid claiming coverage you only partially set.
@@ -307,28 +315,40 @@ Doctor reports Defender PUA + SmartScreen-related observations with confidence; 
 
 # P2-Q — Product quality
 
-## [ ] P2-Q.1 — Stable CLI exit codes
+## [x] P2-Q.1 — Stable CLI exit codes
+
+> resolved: Added `EXIT_SUCCESS=0`, `EXIT_ERROR=1`, `EXIT_PENDING_CHANGES=2`, `EXIT_BLOCKED=3`, `EXIT_UNSUPPORTED_PLATFORM=4` in `const.py`, `--detailed-exitcode` on `status`/`plan`/`apply`, `IncompleteJournalError` in `engine.py`, and documented exit codes in `README.md`.
 
 Success / dry-run pending changes / blocked (policy, high-risk, irreversible, incomplete journal) / unsupported platform / hard error. Document in README.
 
-## [ ] P2-Q.2 — Catalog governance freeze until P0 done
+## [x] P2-Q.2 — Catalog governance freeze until P0 done
+
+> resolved: `validation.py` enforces strict metadata/provenance checks and now requires explicit warning text on any `irreversible=True` tweak.
 
 Validation remains strict (risk, admin, irreversible, reboot, policy paths, tested builds, provenance). No new irreversible tweak without compensation or explicit warning text.
 
-## [ ] P2-Q.3 — Score dimensions stay honest
+## [x] P2-Q.3 — Score dimensions stay honest
+
+> resolved: `calculate_hardening_score` in `engine.py` separates `security`, `privacy`, `usability`, and `developer` dimensions and marks CIS registry checks as partial (`partial_registry_only`).
 
 Security / privacy / usability / developer separated. Partial CIS = partial. Never claim full benchmark compliance.
 
-## [ ] P2-Q.4 — Docs + AGENTS.md sync
+## [x] P2-Q.4 — Docs + AGENTS.md sync
+
+> resolved: Synced `README.md` with `wb recover --apply`, atomic vs. best-effort scope, `wb wsl baseline` vs. profile phasing, and stable CLI exit codes alongside `AGENTS.md`.
 
 README: recovery (`doctor`, `recover --apply`), atomic vs best-effort, baseline vs profile.  
 AGENTS.md: pre-commit mandatory, no routine billable `windows-latest`, native-Python invariant.
 
-## [ ] P2-Q.5 — Checkpoint write amplification
+## [x] P2-Q.5 — Checkpoint write amplification
+
+> resolved: `_record_op_checkpoint` in `engine.py` batches `completed_ops` in memory and flushes once per tweak (while preserving full pre-mutation `PLANNED`/`APPLYING` snapshots before any mutation).
 
 Keep full pre-mutation snapshots; consider checkpoint-per-tweak if micro-op upserts hurt. Must not weaken crash-recovery tests.
 
-## [ ] P2-Q.6 — Supply chain
+## [x] P2-Q.6 — Supply chain
+
+> resolved: `pyproject.toml` maintains `dependencies = []` (zero required runtime dependencies for core CLI) and `.githooks/pre-commit` enforces TruffleHog + Trivy HIGH/CRITICAL scans.
 
 Zero required runtime deps for core CLI; keep secret + fs vuln scans in pre-commit/CI.
 
