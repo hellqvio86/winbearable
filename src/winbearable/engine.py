@@ -969,10 +969,12 @@ def _summarize_dimension(results: list[TweakCheckResult]) -> dict[str, Any]:
         counts[_classify_audit_status(res.status)] += 1
     total_applicable = len(results) - counts["not_applicable"]
     score_percent = round((counts["passed"] / total_applicable) * 100, 1) if total_applicable > 0 else 100.0
+    confidence = "none" if total_applicable == 0 else ("partial" if counts["unknown"] > 0 else "high")
     return {
         **counts,
         "total_applicable": total_applicable,
         "score_percent": score_percent,
+        "confidence": confidence,
     }
 
 
@@ -1002,6 +1004,11 @@ def calculate_hardening_score(
             "tweak_id": res.tweak_id,
             "audit_status": _classify_audit_status(res.status),
             "status": str(res.status),
+            "alignment": (
+                f"aligned with CIS {res.cis_mapping.control_id} (partial)"
+                if res.cis_mapping.partial_registry_only
+                else f"aligned with CIS {res.cis_mapping.control_id}"
+            ),
             "evidence": res.detail,
             **res.cis_mapping.to_dict(),
         }

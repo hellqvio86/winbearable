@@ -412,11 +412,12 @@ def _run_cli_body(
                         f"| BitLocker: {_fmt_obs('bitlocker_protected', env.bitlocker_protected)}\n"
                         f"WSL Installed: {env.wsl_installed} (Version: {env.wsl_version}, Distros: {distros_str})\n"
                         f"{_fmt_linux_block(linux_info)}"
-                        f"Security Controls: {sec.get('passed', 0)}/{sec.get('total_applicable', 0)} "
-                        f"({sec.get('score_percent', 0.0)}%) | "
-                        f"Privacy: {priv.get('passed', 0)}/{priv.get('total_applicable', 0)} | "
-                        f"Usability: {usab.get('passed', 0)}/{usab.get('total_applicable', 0)} | "
-                        f"Developer: {dev.get('passed', 0)}/{dev.get('total_applicable', 0)}\n"
+                        f"Security Posture: {sec.get('passed', 0)}/{sec.get('total_applicable', 0)} "
+                        f"({sec.get('score_percent', 0.0)}%, confidence={sec.get('confidence', 'unknown')})\n"
+                        f"Comfort & Privacy Preferences: "
+                        f"Privacy {priv.get('passed', 0)}/{priv.get('total_applicable', 0)} | "
+                        f"Usability {usab.get('passed', 0)}/{usab.get('total_applicable', 0)} | "
+                        f"Developer {dev.get('passed', 0)}/{dev.get('total_applicable', 0)}\n"
                         f"CIS Technical Checks (partial): {audit['cis_passed']}/{audit['cis_total']}\n"
                     )
                 if incomplete_runs:

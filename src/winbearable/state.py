@@ -16,6 +16,7 @@ from .models import RunRecord, TransactionState
 
 STATE_SCHEMA_VERSION = 1
 DEFAULT_MAX_RUN_HISTORY = 100
+DEFAULT_MAX_BACKUP_DIRS = 50
 
 
 class StateStoreError(ValueError):
@@ -133,8 +134,32 @@ class StateStore:
             kept.append(run)
         return kept
 
+    def _prune_old_backups_unlocked(
+        self,
+        runs: list[RunRecord],
+        max_backup_dirs: int = DEFAULT_MAX_BACKUP_DIRS,
+    ) -> None:
+        backups_root = self.state_path.parent / "backups"
+        if not backups_root.is_dir():
+            return
+        incomplete_states = {
+            TransactionState.PLANNED,
+            TransactionState.APPLYING,
+            TransactionState.ROLLING_BACK,
+            TransactionState.FAILED,
+        }
+        protected_ids = {run.run_id for run in runs if run.state in incomplete_states}
+        subdirs = sorted(
+            (p for p in backups_root.iterdir() if p.is_dir() and p.name not in protected_ids),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for stale_dir in subdirs[max_backup_dirs:]:
+            shutil.rmtree(stale_dir, ignore_errors=True)
+
     def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
         runs = self._prune_old_runs(runs)
+        self._prune_old_backups_unlocked(runs)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.state_path.parent, 0o700)

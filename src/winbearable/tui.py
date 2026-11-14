@@ -49,6 +49,7 @@ def apply_from_tui(
     system: SystemBackend,
     state_store: StateStore,
     allow_high_risk: bool = False,
+    allow_irreversible: bool = False,
     allow_simulated: bool = False,
 ) -> ApplySummary:
     """Apply drifted tweaks in the profile from the TUI, recording rollback state."""
@@ -64,6 +65,7 @@ def apply_from_tui(
         state_store=state_store,
         dry_run=False,
         allow_high_risk=allow_high_risk,
+        allow_irreversible=allow_irreversible,
         allow_simulated=allow_simulated,
     )
 

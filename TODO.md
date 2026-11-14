@@ -251,6 +251,8 @@ Schema version is checked; corruption raises. There is no migration path and lim
 
 > Resolved: Expanded `tests/test_windows_integration.py` with `REG_QWORD` and `(Default)` HKCU round-trips and documented the maintainer's single-Windows pre-release test checklist in `README.md`.
 
+> Resolved: Expanded `tests/test_windows_integration.py` with `REG_QWORD` and `(Default)` HKCU round-trips and documented the maintainer's single-Windows pre-release test checklist in `README.md`.
+
 **Where:** `tests/test_windows_integration.py`, CI, `Dockerfile.windows`, AGENTS.md
 
 **Problem**  
@@ -272,7 +274,9 @@ CI is intentionally Linux-only (cost/principle). Windows integration tests exist
 
 # P2 — Quality, security posture, and product polish
 
-## [ ] P2.1 — Hardening score and audit honesty
+## [x] P2.1 — Hardening score and audit honesty
+
+> Resolved: Added dimension `confidence` and `"aligned with CIS <id> (partial)"` labels in `engine.calculate_hardening_score`, and separated `Security Posture` from `Comfort & Privacy Preferences` in `wb doctor` output.
 
 **Where:** `engine.calculate_hardening_score`, `AuditDimension`, posture observations
 
@@ -290,7 +294,9 @@ Mixing usability/privacy/developer tweaks into a “hardening” narrative confu
 
 - JSON and TUI never present a single misleading aggregate “secure” score without dimension breakdown and confidence.
 
-## [ ] P2.2 — Catalog governance
+## [x] P2.2 — Catalog governance
+
+> Resolved: `tweaks/validation.py` enforces provenance, conflicts, and risk/reversibility metadata; `AGENTS.md` documents why `winbearable` targets personal/unmanaged Windows machines vs Group Policy / Intune.
 
 **Where:** `tweaks/catalog.py`, `tweaks/validation.py`, `tweaks/provenance.py`
 
@@ -308,7 +314,9 @@ Mixing usability/privacy/developer tweaks into a “hardening” narrative confu
 
 - Catalog validation fails CI on missing metadata or unverifiable claims.
 
-## [ ] P2.3 — CLI / TUI UX consistency
+## [x] P2.3 — CLI / TUI UX consistency
+
+> Resolved: `JSON_SCHEMA_VERSION` is injected across all `_print_json` payloads, exit codes distinguish success/blocked/error/unsupported, and `apply_from_tui` now forwards `allow_irreversible` alongside `allow_high_risk` and `env.is_windows` guards.
 
 **Where:** `cli.py`, `tui.py`
 
@@ -319,7 +327,9 @@ Mixing usability/privacy/developer tweaks into a “hardening” narrative confu
 - TUI must not offer apply actions that CLI would reject (platform, high-risk, irreversible).
 - Progress / checkpoint feedback for long applies (especially WSL and winget).
 
-## [ ] P2.4 — Documentation accuracy
+## [x] P2.4 — Documentation accuracy
+
+> Resolved: `README.md` and `AGENTS.md` align with actual WSL sizing, recovery (`wb recover`, `state.json.bak`), backup lifecycle, single-Windows integration testing, and pre-commit/CI rules.
 
 **Where:** `README.md`, `docs/*`, `AGENTS.md`, `TODO.md` (this file supersedes older review TODOs)
 
@@ -330,7 +340,9 @@ Mixing usability/privacy/developer tweaks into a “hardening” narrative confu
 - Document what requires reboot / explorer restart and that some effects are best-effort.
 - Keep AGENTS.md as the source of truth for AI contributor workflow (hooks, no Windows CI burn, native-Python invariant).
 
-## [ ] P2.5 — Dependency and supply-chain hygiene
+## [x] P2.5 — Dependency and supply-chain hygiene
+
+> Resolved: Zero runtime core dependencies (+ optional Textual), SHA-pinned GitHub Actions in `.github/workflows/ci.yml`, `SHA256SUMS.txt`, SPDX SBOM via `anchore/sbom-action`, and PyPI OIDC publishing.
 
 **Where:** `pyproject.toml`, `uv.lock`, `.github/workflows/*`, `renovate.json`
 
@@ -340,7 +352,9 @@ Mixing usability/privacy/developer tweaks into a “hardening” narrative confu
 - Ensure release workflow produces verifiable artifacts (SBOM, provenance) if publishing continues.
 - Dependabot/Renovate: keep noise low; pin critical tools used in CI.
 
-## [ ] P2.6 — Performance and resource use
+## [x] P2.6 — Performance and resource use
+
+> Resolved: Journal checkpoints per tweak (rather than per micro-op) and `StateStore._prune_old_backups_unlocked` caps `backups/<run_id>` to 50 completed run directories while preserving incomplete run backups.
 
 **Where:** journal checkpoint frequency, registry export backups
 
@@ -378,8 +392,8 @@ Do **not** prioritize new tweaks or large catalog expansion before P0 and P1.1�
 - [x] WSL behavior matches documented profile/CLI contract; failures are structured.
 - [x] External tools have timeouts; hangs cannot wedge the CLI indefinitely.
 - [x] Windows integration tests cover the critical native paths on a supported build before release.
-- [ ] Hardening/privacy/usability scores are dimensioned and evidence-based.
-- [ ] Docs and AGENTS.md match actual safety model and recovery procedures.
+- [x] Hardening/privacy/usability scores are dimensioned and evidence-based.
+- [x] Docs and AGENTS.md match actual safety model and recovery procedures.
 
 ---
 

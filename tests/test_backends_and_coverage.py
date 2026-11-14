@@ -1496,6 +1496,54 @@ class TestBackendsAndCoverage(unittest.TestCase):
             self.assertEqual(len(pruned), 100)
             self.assertIn("inc1", [r.run_id for r in pruned])
 
+    def test_p2_audit_confidence_tui_irreversible_and_backup_pruning(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from winbearable.engine import IrreversibleActionError, calculate_hardening_score
+        from winbearable.models import ProfileSpec, RunRecord, TransactionState
+        from winbearable.state import StateStore
+        from winbearable.tui import apply_from_tui
+
+        reg = InMemoryRegistryBackend()
+        sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26100)
+        env = sys_b.detect_environment(reg)
+        audit = calculate_hardening_score(env, reg, sys_b)
+        self.assertIn("confidence", audit["dimensions"]["security"])
+        self.assertTrue(
+            any("aligned with CIS" in ctrl["alignment"] for ctrl in audit["cis_controls"]["controls"]),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = StateStore(root / "state.json")
+            irrev_prof = ProfileSpec(
+                name="irrev",
+                description="irrev",
+                tweaks={"onedrive.uninstall": True},
+            )
+            with self.assertRaises(IrreversibleActionError):
+                apply_from_tui(irrev_prof, env, reg, sys_b, store, allow_simulated=True)
+
+            backups_root = root / "backups"
+            for name in ("inc1", "old1", "new1", "new2"):
+                (backups_root / name).mkdir(parents=True, exist_ok=True)
+            os.utime(backups_root / "old1", (1000, 1000))
+            os.utime(backups_root / "new1", (2000, 2000))
+            os.utime(backups_root / "new2", (3000, 3000))
+            runs = [
+                RunRecord("inc1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.APPLYING),
+                RunRecord("old1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED),
+                RunRecord("new1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED),
+                RunRecord("new2", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED),
+            ]
+            store._prune_old_backups_unlocked(runs, max_backup_dirs=2)
+            self.assertTrue((backups_root / "inc1").exists())
+            self.assertFalse((backups_root / "old1").exists())
+            self.assertTrue((backups_root / "new1").exists())
+            self.assertTrue((backups_root / "new2").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
