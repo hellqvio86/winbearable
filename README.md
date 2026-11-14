@@ -183,76 +183,76 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 
 ### 1. Opinionated Developer Apps (`apps.*`)
 
-| Tweak ID | Admin? | Mechanism / Package ID | Scope | Extensions / Details |
-| :--- | :---: | :--- | :---: | :--- |
-| `apps.install_vscode` | No | `winget.exe install --id Microsoft.VisualStudioCode --exact` | `user` | Also installs `ms-vscode-remote.remote-wsl` via `code.cmd --install-extension` |
+| Tweak ID | What It Does | Admin? | Mechanism / Package ID | Scope | Extensions / Details |
+| :--- | :--- | :---: | :--- | :---: | :--- |
+| `apps.install_vscode` | Installs VS Code + Remote-WSL extension for seamless Linux editing | No | `winget.exe install --id Microsoft.VisualStudioCode --exact` | `user` | Also installs `ms-vscode-remote.remote-wsl` via `code.cmd --install-extension` |
 
 ### 2. OneDrive Eradication (`onedrive.*`)
 
-| Tweak ID | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value / Action |
-| :--- | :---: | :--- | :--- | :---: | :--- |
-| `onedrive.disable_tray_autorun` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | `OneDrive` | `REG_SZ` | **`DELETE`** (+ stops `OneDrive.exe`) |
-| `onedrive.unpin_explorer` | No | `HKCU\Software\Classes\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}` | `System.IsPinnedToNameSpaceTree` | `REG_DWORD` | `0` |
-| `onedrive.unpin_explorer` | No | `HKCU\Software\Classes\Wow6432Node\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}` | `System.IsPinnedToNameSpaceTree` | `REG_DWORD` | `0` |
-| `onedrive.disable_policy` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive` | `DisableFileSyncNGSC` | `REG_DWORD` | `1` |
-| `onedrive.uninstall` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive` | `DisableFileSyncNGSC` | `REG_DWORD` | `1` (+ runs `OneDriveSetup.exe /uninstall`) |
+| Tweak ID | What It Does | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value / Action |
+| :--- | :--- | :---: | :--- | :--- | :---: | :--- |
+| `onedrive.disable_tray_autorun` | Stops OneDrive background sync app and removes login autorun | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | `OneDrive` | `REG_SZ` | **`DELETE`** (+ stops `OneDrive.exe`) |
+| `onedrive.unpin_explorer` | Removes the OneDrive folder shortcut from File Explorer sidebar | No | `HKCU\Software\Classes\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}` | `System.IsPinnedToNameSpaceTree` | `REG_DWORD` | `0` |
+| `onedrive.unpin_explorer` | Removes 32-bit Explorer OneDrive sidebar pin | No | `HKCU\Software\Classes\Wow6432Node\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}` | `System.IsPinnedToNameSpaceTree` | `REG_DWORD` | `0` |
+| `onedrive.disable_policy` | Blocks OneDrive file sync machine-wide via Group Policy | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive` | `DisableFileSyncNGSC` | `REG_DWORD` | `1` |
+| `onedrive.uninstall` | Blocks OneDrive policy and **irreversibly** uninstalls OneDrive client | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive` | `DisableFileSyncNGSC` | `REG_DWORD` | `1` (+ runs `OneDriveSetup.exe /uninstall`) |
 
 ### 3. Search, Start Menu, Taskbar & File Explorer (`search.*`, `start.*`, `taskbar.*`, `explorer.*`)
 
-| Tweak ID | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value |
-| :--- | :---: | :--- | :--- | :---: | :--- |
-| `search.disable_bing` | No | `HKCU\Software\Policies\Microsoft\Windows\Explorer` | `DisableSearchBoxSuggestions` | `REG_DWORD` | `1` |
-| `search.disable_bing` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Search` | `BingSearchEnabled` | `REG_DWORD` | `0` |
-| `search.disable_highlights` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsDynamicSearchBoxEnabled` | `REG_DWORD` | `0` |
-| `search.hide_taskbar_box` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Search` | `SearchboxTaskbarMode` | `REG_DWORD` | `0` |
-| `search.disable_cloud_and_history` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsMSACloudSearchEnabled` | `REG_DWORD` | `0` |
-| `search.disable_cloud_and_history` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsAADCloudSearchEnabled` | `REG_DWORD` | `0` |
-| `search.disable_cloud_and_history` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsDeviceSearchHistoryEnabled` | `REG_DWORD` | `0` |
-| `search.disable_wsearch_service` | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\WSearch` | `Start` | `REG_DWORD` | `4` (`Disabled`) |
-| `start.disable_recommendations` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SystemPaneSuggestionsEnabled` | `REG_DWORD` | `0` |
-| `start.disable_recommendations` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SubscribedContent-338388Enabled` | `REG_DWORD` | `0` |
-| `start.disable_recommendations` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SubscribedContent-338389Enabled` | `REG_DWORD` | `0` |
-| `start.disable_recommendations` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SoftLandingEnabled` | `REG_DWORD` | `0` |
-| `start.disable_recommendations` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Start_IrisRecommendations` | `REG_DWORD` | `0` |
-| `taskbar.disable_widgets_and_chat` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarDa` | `REG_DWORD` | `0` |
-| `taskbar.disable_widgets_and_chat` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarMn` | `REG_DWORD` | `0` |
-| `taskbar.disable_widgets_and_chat` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowTaskViewButton` | `REG_DWORD` | `0` |
-| `explorer.classic_context_menu` | No | `HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32` | `(Default)` | `REG_SZ` | `""` |
-| `explorer.show_file_extensions` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `HideFileExt` | `REG_DWORD` | `0` (Always show file extensions) |
-| `explorer.show_hidden_files` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Hidden` | `REG_DWORD` | `1` (Show hidden files & dotfiles) |
+| Tweak ID | What It Does | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value |
+| :--- | :--- | :---: | :--- | :--- | :---: | :--- |
+| `search.disable_bing` | Stops Windows Search bar from sending queries to Bing web search | No | `HKCU\Software\Policies\Microsoft\Windows\Explorer` | `DisableSearchBoxSuggestions` | `REG_DWORD` | `1` |
+| `search.disable_bing` | Disables Bing web results inside local Windows Search | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Search` | `BingSearchEnabled` | `REG_DWORD` | `0` |
+| `search.disable_highlights` | Removes daily trending/promotional doodles in the search box | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsDynamicSearchBoxEnabled` | `REG_DWORD` | `0` |
+| `search.hide_taskbar_box` | Hides the taskbar Search box (Win key / Start still searches) | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Search` | `SearchboxTaskbarMode` | `REG_DWORD` | `0` |
+| `search.disable_cloud_and_history` | Stops syncing search queries with Microsoft personal cloud account | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsMSACloudSearchEnabled` | `REG_DWORD` | `0` |
+| `search.disable_cloud_and_history` | Stops syncing search queries with work/Entra cloud account | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsAADCloudSearchEnabled` | `REG_DWORD` | `0` |
+| `search.disable_cloud_and_history` | Disables local search history logging on the device | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsDeviceSearchHistoryEnabled` | `REG_DWORD` | `0` |
+| `search.disable_wsearch_service` | Disables `WSearch` (Windows Search background disk/file indexer daemon) | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\WSearch` | `Start` | `REG_DWORD` | `4` (`Disabled`) |
+| `start.disable_recommendations` | Disables Start menu app/content suggestions | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SystemPaneSuggestionsEnabled` | `REG_DWORD` | `0` |
+| `start.disable_recommendations` | Disables promoted Store app suggestions in Start | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SubscribedContent-338388Enabled` | `REG_DWORD` | `0` |
+| `start.disable_recommendations` | Disables Windows tips & tricks suggestions | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SubscribedContent-338389Enabled` | `REG_DWORD` | `0` |
+| `start.disable_recommendations` | Disables post-install promo notifications ("Windows Welcome") | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SoftLandingEnabled` | `REG_DWORD` | `0` |
+| `start.disable_recommendations` | Disables Windows 11 Start menu "Recommended" feed ads | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Start_IrisRecommendations` | `REG_DWORD` | `0` |
+| `taskbar.disable_widgets_and_chat` | Removes the MSN News/Weather Widgets button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarDa` | `REG_DWORD` | `0` |
+| `taskbar.disable_widgets_and_chat` | Removes the Microsoft Teams Chat icon from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarMn` | `REG_DWORD` | `0` |
+| `taskbar.disable_widgets_and_chat` | Hides the Task View (virtual desktops) button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowTaskViewButton` | `REG_DWORD` | `0` |
+| `explorer.classic_context_menu` | Restores full Windows 10 right-click menu (no "Show more options") | No | `HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32` | `(Default)` | `REG_SZ` | `""` |
+| `explorer.show_file_extensions` | Always shows real file extensions (like Linux `ls`; prevents `.exe` spoofing) | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `HideFileExt` | `REG_DWORD` | `0` (Always show file extensions) |
+| `explorer.show_hidden_files` | Shows hidden files and `.dotfiles` in File Explorer | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Hidden` | `REG_DWORD` | `1` (Show hidden files & dotfiles) |
 
 ### 4. AI, Privacy & Native CIS Hardening (`ai.*`, `privacy.*`, `hardening.*`)
 
-| Tweak ID | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value |
-| :--- | :---: | :--- | :--- | :---: | :--- |
-| `ai.disable_copilot_user` | No | `HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot` | `TurnOffWindowsCopilot` | `REG_DWORD` | `1` |
-| `ai.disable_copilot_user` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowCopilotButton` | `REG_DWORD` | `0` |
-| `ai.disable_copilot_machine` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot` | `TurnOffWindowsCopilot` | `REG_DWORD` | `1` |
-| `ai.disable_recall` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI` | `DisableAIDataAnalysis` | `REG_DWORD` | `1` |
-| `ai.disable_recall` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI` | `TurnOffSavingSnapshots` | `REG_DWORD` | `1` |
-| `privacy.disable_advertising_id` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo` | `Enabled` | `REG_DWORD` | `0` |
-| `privacy.disable_tailored_experiences` | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Privacy` | `TailoredExperiencesWithDiagnosticDataEnabled` | `REG_DWORD` | `0` |
-| `privacy.telemetry_minimal` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection` | `AllowTelemetry` | `REG_DWORD` | `0` |
-| `privacy.telemetry_minimal` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\System` | `PublishUserActivities` | `REG_DWORD` | `0` |
-| `privacy.telemetry_minimal` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\System` | `UploadUserActivities` | `REG_DWORD` | `0` |
-| `hardening.disable_wsh_user` | No | `HKCU\Software\Microsoft\Windows Script Host\Settings` | `Enabled` | `REG_DWORD` | `0` |
-| `hardening.disable_llmnr` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient` | `EnableMulticast` | `REG_DWORD` | `0` |
-| `hardening.disable_wpad` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings\Wpad` | `WpadOverride` | `REG_DWORD` | `1` |
-| `hardening.disable_autorun` | Yes | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer` | `NoDriveTypeAutoRun` | `REG_DWORD` | `255` |
-| `hardening.powershell_scriptblock_logging` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging` | `EnableScriptBlockLogging` | `REG_DWORD` | `1` |
-| `hardening.cmdline_process_audit` | Yes | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit` | `ProcessCreationIncludeCmdLine_Enabled` | `REG_DWORD` | `1` |
-| `hardening.enable_lsa_protection` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` | `RunAsPPL` | `REG_DWORD` | `1` |
-| `hardening.enable_vbs_hvci` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard` | `EnableVirtualizationBasedSecurity` | `REG_DWORD` | `1` |
-| `hardening.enable_vbs_hvci` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity` | `Enabled` | `REG_DWORD` | `1` |
-| `bloat.disable_consumer_features` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent` | `DisableWindowsConsumerFeatures` | `REG_DWORD` | `1` |
-| `bloat.disable_consumer_features` | Yes | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SilentInstalledAppsEnabled` | `REG_DWORD` | `0` |
-| `telemetry.disable_scheduled_tasks` | Yes | `schtasks.exe /Change /Disable` | `Compatibility Appraiser`, `ProgramDataUpdater`, `Consolidator`, `UsbCeip` | Task | `Disabled` |
-| `hardening.disable_smbv1` | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters` | `SMB1` | `REG_DWORD` | `0` (+ `dism.exe` `SMB1Protocol` disabled) |
-| `hardening.disable_mdns` | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters` | `EnableMDNS` | `REG_DWORD` | `0` |
-| `hardening.enable_firewall_all_profiles` | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\*Profile` | `EnableFirewall` / `DefaultInboundAction` | `REG_DWORD` | `1` / `1` |
-| `hardening.defender_cloud_and_pua` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender` | `PUAProtection` / `SpynetReporting` / `SubmitSamplesConsent` | `REG_DWORD` | `1` / `2` / `1` |
-| `hardening.disable_guest_and_blank_passwords` | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` | `LimitBlankPasswordUse` / `EnableGuestAccount` | `REG_DWORD` | `1` / `0` |
-| `hardening.browser_privacy_baseline` | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Edge` & `Google\Chrome` | `PasswordManagerEnabled` / `TrackingPrevention` | `REG_DWORD` | `0` / `2` |
+| Tweak ID | What It Does | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value |
+| :--- | :--- | :---: | :--- | :--- | :---: | :--- |
+| `ai.disable_copilot_user` | Disables Microsoft Copilot AI assistant for current user | No | `HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot` | `TurnOffWindowsCopilot` | `REG_DWORD` | `1` |
+| `ai.disable_copilot_user` | Hides Copilot button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowCopilotButton` | `REG_DWORD` | `0` |
+| `ai.disable_copilot_machine` | Disables Microsoft Copilot AI assistant machine-wide | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot` | `TurnOffWindowsCopilot` | `REG_DWORD` | `1` |
+| `ai.disable_recall` | Disables Windows Recall AI data analysis | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI` | `DisableAIDataAnalysis` | `REG_DWORD` | `1` |
+| `ai.disable_recall` | Disables Windows Recall continuous screen-snapshot recording | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI` | `TurnOffSavingSnapshots` | `REG_DWORD` | `1` |
+| `privacy.disable_advertising_id` | Disables per-user ad tracking ID for apps | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo` | `Enabled` | `REG_DWORD` | `0` |
+| `privacy.disable_tailored_experiences` | Stops Microsoft using diagnostic data for personalized ads/tips | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Privacy` | `TailoredExperiencesWithDiagnosticDataEnabled` | `REG_DWORD` | `0` |
+| `privacy.telemetry_minimal` | Sets Windows telemetry to lowest allowed level (`Security`/minimal) | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection` | `AllowTelemetry` | `REG_DWORD` | `0` |
+| `privacy.telemetry_minimal` | Disables publishing user activity timeline to Microsoft | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\System` | `PublishUserActivities` | `REG_DWORD` | `0` |
+| `privacy.telemetry_minimal` | Disables uploading user activity timeline to Microsoft cloud | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\System` | `UploadUserActivities` | `REG_DWORD` | `0` |
+| `hardening.disable_wsh_user` | Blocks Windows Script Host (`.vbs`/`.js` email malware execution) | No | `HKCU\Software\Microsoft\Windows Script Host\Settings` | `Enabled` | `REG_DWORD` | `0` |
+| `hardening.disable_llmnr` | Disables LLMNR multicast name resolution (prevents LAN NTLM hash theft) | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient` | `EnableMulticast` | `REG_DWORD` | `0` |
+| `hardening.disable_wpad` | Disables WPAD auto-proxy discovery (prevents LAN MitM proxy spoofing) | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings\Wpad` | `WpadOverride` | `REG_DWORD` | `1` |
+| `hardening.disable_autorun` | Disables USB/CD AutoRun & AutoPlay on all drives | Yes | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer` | `NoDriveTypeAutoRun` | `REG_DWORD` | `255` |
+| `hardening.powershell_scriptblock_logging` | Logs full PowerShell script blocks to Event Log for forensics | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging` | `EnableScriptBlockLogging` | `REG_DWORD` | `1` |
+| `hardening.cmdline_process_audit` | Logs CLI arguments in Windows process creation audit events (Event 4688) | Yes | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit` | `ProcessCreationIncludeCmdLine_Enabled` | `REG_DWORD` | `1` |
+| `hardening.enable_lsa_protection` | Runs LSASS credential process as Protected Process Light (`RunAsPPL`) | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` | `RunAsPPL` | `REG_DWORD` | `1` |
+| `hardening.enable_vbs_hvci` | Enables Virtualization-Based Security (hypervisor memory isolation) | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard` | `EnableVirtualizationBasedSecurity` | `REG_DWORD` | `1` |
+| `hardening.enable_vbs_hvci` | Enables HVCI (hypervisor-enforced kernel code integrity) | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity` | `Enabled` | `REG_DWORD` | `1` |
+| `bloat.disable_consumer_features` | Stops Windows from auto-installing promoted Store bloatware apps | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent` | `DisableWindowsConsumerFeatures` | `REG_DWORD` | `1` |
+| `bloat.disable_consumer_features` | Blocks silent background installation of suggested Store apps | Yes | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SilentInstalledAppsEnabled` | `REG_DWORD` | `0` |
+| `telemetry.disable_scheduled_tasks` | Disables built-in Windows telemetry & CEIP cron/scheduled tasks | Yes | `schtasks.exe /Change /Disable` | `Compatibility Appraiser`, `ProgramDataUpdater`, `Consolidator`, `UsbCeip` | Task | `Disabled` |
+| `hardening.disable_smbv1` | Disables legacy SMBv1 file-sharing protocol (WannaCry/EternalBlue vector) | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters` | `SMB1` | `REG_DWORD` | `0` (+ `dism.exe` `SMB1Protocol` disabled) |
+| `hardening.disable_mdns` | Disables mDNS multicast responder in Windows DNS Client | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters` | `EnableMDNS` | `REG_DWORD` | `0` |
+| `hardening.enable_firewall_all_profiles` | Enables Windows Firewall & blocks unsolicited inbound traffic on all profiles | Yes | `HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\*Profile` | `EnableFirewall` / `DefaultInboundAction` | `REG_DWORD` | `1` / `1` |
+| `hardening.defender_cloud_and_pua` | Enables Defender PUA/adware blocking and cloud protection | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender` | `PUAProtection` / `SpynetReporting` / `SubmitSamplesConsent` | `REG_DWORD` | `1` / `2` / `1` |
+| `hardening.disable_guest_and_blank_passwords` | Disables Guest account and blocks network logins with blank passwords | Yes | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` | `LimitBlankPasswordUse` / `EnableGuestAccount` | `REG_DWORD` | `1` / `0` |
+| `hardening.browser_privacy_baseline` | Disables built-in Edge/Chrome password manager & enforces tracking prevention | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Edge` & `Google\Chrome` | `PasswordManagerEnabled` / `TrackingPrevention` | `REG_DWORD` | `0` / `2` |
 
 ### Journal Recovery (`wb recover`)
 
