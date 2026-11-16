@@ -164,7 +164,7 @@ Every `--json` payload carries `schema_version` (`JSON_SCHEMA_VERSION`, added in
 
 ### DOC-07: Name reservation
 - status: blocked:needs-human · priority: P1
-- accept: PyPI, GitHub, winget manifest availability recorded in this file (the README already says "install from PyPI"; confirm the package really is published and owned)
+- accept: PyPI (`winbearable`) and GitHub (`hellqvio86/winbearable`) confirmed owned; winget (`hellqvio86.winbearable`) manifest prepared under `packaging/winget/` (see `docs/winget-releasing.md`) awaiting release asset upload & PR to `microsoft/winget-pkgs`
 
 ---
 
