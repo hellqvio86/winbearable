@@ -2,6 +2,16 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.0] - 2026-11-16
+
+### Added
+
+- Explicit Windows 11 `26H2+` (`Build >= 26300`) desktop-only support policy: Windows IoT (`IoTEnterprise`, `IoTEnterpriseS`), LTSC (`EnterpriseS`), and Server are strictly rejected (`TweakStatus.UNSUPPORTED_EDITION`) across engine, provenance validation, `wb doctor`, and documentation.
+- Engine & CLI (`ENG-01`..`ENG-11`): `ACTION_DELETE_KEY` + `key_path_glob` wildcard expansion, edition gating, managed-device guard (`SKIPPED_MANAGED` / `--allow-managed`), EDR service detection (`_observe_edr`), `--only`/`--skip`/`--category` selection flags, `wb list`/`wb show`/`wb schema`, `wb audit`, `bin/gen_docs.py`, profile schema v2 (`[packages]`, `[params]`, `[wsl.distro]`, `include`), and native adapters for `auditpol.exe`, `wevtutil.exe`, `netsh.exe advfirewall`, `fsutil.exe`, `powercfg.exe`, `git.exe`, `icacls.exe`, and `FileSpec`.
+- 59 new tweaks across `TWK-A`..`TWK-J` (input, terminal, taskbar, explorer, dev, power, privacy, edge, services, network/auth hardening, Defender audit/ASR, audit policy & event logs) and 5 new profiles (`corp-safe`, `dev-comfort`, `privacy`, `hardened-baseline`, `edge-quiet`).
+- Extended WSL2 management (`WSL-01`..`WSL-08`): version-gated `.wslconfig` and `/etc/wsl.conf` options, WSL policy & outdated-version detection, `wb wsl update`, `wb wsl sparse`, `wb wsl audit --deep`, and `.sha256` + retention on `wb wsl export`.
+- Allowlisted winget package catalog (`src/winbearable/packages.py`), structured `wb doctor --json` `blockers`, `wb init --no-admin`, locale-independent command parsing, UAC security review (`docs/uac-security-review.md`), and `docs/threat-model.md`.
+
 ## [0.8.0] - 2026-11-15
 
 ### Added
