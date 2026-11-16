@@ -112,13 +112,6 @@ PACKAGE_CATALOG: dict[str, PackageDefinition] = {
         scope="user",
         source_url="https://www.nerdfonts.com/",
     ),
-    "sysmon": PackageDefinition(
-        name="sysmon",
-        winget_id="Microsoft.Sysinternals.Sysmon",
-        scope="machine",
-        source_url="https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon",
-        requires_admin=True,
-    ),
 }
 
 PACKAGE_PRESETS: dict[str, tuple[str, ...]] = {

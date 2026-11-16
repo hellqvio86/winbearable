@@ -2,6 +2,17 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.1] - 2026-11-16
+
+### Changed & Added
+
+- Locale-independent hardening (`QA-01`): removed English-only `sc.exe` (`RUNNING`/`STOPPED`) and `manage-bde.exe` (`Protection On`/`Off`) text parsing in `backends/system.py`, added UTF-16LE `\x00`/`\ufeff` stripping in `wsl.py`, and added Swedish/German non-English fixture tests.
+- Hypothesis property-based tests (`QA-04`) in `src/tests/test_property_invariants.py` verifying `plan` purity, `apply`+`rollback` state restoration, and interrupted-`apply` recovery.
+- Real-Windows integration coverage (`QA-02`) extended with read-only `wb plan --json` across all built-in profiles and `wb audit --json`, verified on Windows 11 (`4 passed`).
+- Coverage improvements (`QA-05`) bringing `tweaks/validation.py` to 100%, `uac.py` to 99%, and `state.py` to 95%.
+- Added `uv-audit` (`uv lock --check` + `uv audit --frozen`) job to `.github/workflows/security.yml` (`QA-07`).
+- Removed `sysmon` from the package catalog and declined `hardening.install_sysmon` in `todo.md`.
+
 ## [0.9.0] - 2026-11-16
 
 ### Added

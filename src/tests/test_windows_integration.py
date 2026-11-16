@@ -129,3 +129,25 @@ def test_disposable_hkcu_apply_crash_and_recover() -> None:
             hkcu_handle = getattr(winreg_mod, "HKEY_CURRENT_USER", None)
             if callable(del_key) and hkcu_handle is not None:
                 del_key(hkcu_handle, test_root)
+
+
+def test_readonly_plan_all_profiles_and_audit() -> None:
+    """QA-02: Run read-only `wb plan --json` for every built-in profile and `wb audit --json` on real Windows."""
+    reg = WinregBackend()
+    sys_b = NativeSystemBackend()
+    for profile in ("user-only", "corp-safe", "dev-comfort", "privacy", "owner", "paranoid", "hardened-baseline"):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = run_cli(["plan", "--profile", profile, "--json"], registry=reg, system=sys_b)
+        assert code in (0, 2, 3, 4)
+        payload: dict[str, Any] = json.loads(buf.getvalue())
+        assert "schema_version" in payload
+        assert "results" in payload
+
+    audit_buf = io.StringIO()
+    with redirect_stdout(audit_buf):
+        audit_code = run_cli(["audit", "--json"], registry=reg, system=sys_b)
+    assert audit_code == 0
+    audit_payload: dict[str, Any] = json.loads(audit_buf.getvalue())
+    assert "findings" in audit_payload
+    assert len(audit_payload["findings"]) >= 10

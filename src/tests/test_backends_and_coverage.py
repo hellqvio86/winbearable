@@ -794,8 +794,13 @@ def test_evidence_based_posture_observations() -> None:
     assert 'extends = "user-only"' in toml_out
 
     # 3. Conflicting Defender indicators (DisableAntiSpyware=1 + WinDefend RUNNING) -> UNKNOWN
+    from winbearable.const import BITLOCKER_STATUS_KEY
+
     reg_conflict = InMemoryRegistryBackend(
-        initial_values={(HIVE_HKLM, DEFENDER_KEY, "DisableAntiSpyware"): (1, REG_DWORD)}
+        initial_values={
+            (HIVE_HKLM, DEFENDER_KEY, "DisableAntiSpyware"): (1, REG_DWORD),
+            (HIVE_HKLM, BITLOCKER_STATUS_KEY, "BootStatus"): (1, REG_DWORD),
+        }
     )
     win_sys = NativeSystemBackend(platform_override="win32")
     with patch.object(

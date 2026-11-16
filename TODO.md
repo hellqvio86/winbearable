@@ -210,7 +210,7 @@ How to read: `U` no admin, `A` admin. `Profiles`: `US` user-only, `OW` owner, `P
 
 Already shipped (do not re-add): SMBv1, mDNS, NetBIOS broadcast `NodeType`, LLMNR, WPAD, AutoRun, firewall on all profiles, Defender cloud + PUA, Guest/blank-password, browser privacy baseline, Office macro/OLE, consumer features, telemetry tasks, PowerShell script block logging, cmdline audit, LSA protection, VBS/HVCI.
 
-### TWK-A: Linux-comfort input and shell (new category `input`; profile `DC`; `CS` for U rows)
+### TWK-A: Linux-comfort input and shell (new category `input`; profile `DC`; `CS` for U rows) — **status: done (except `dev.case_sensitive_dirs`)**
 
 | ID | Scope | Risk | Spec | Notes |
 |----|-------|------|------|-------|
@@ -236,7 +236,7 @@ Already shipped (do not re-add): SMBv1, mDNS, NetBIOS broadcast `NodeType`, LLMN
 | `power.disable_fast_startup` | A | low | `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power` `HiberbootEnabled`=0 | Real shutdowns; predictable patching and WSL state |
 | `power.hibernate_off` | A | medium | `powercfg.exe /hibernate off` | ENG-07, `opt` |
 
-### TWK-B: Privacy and consumer-content nags (profiles `PR`; U rows also `US`/`CS`)
+### TWK-B: Privacy and consumer-content nags (profiles `PR`; U rows also `US`/`CS`) — **status: done**
 
 | ID | Scope | Risk | Spec | Notes |
 |----|-------|------|------|-------|
@@ -256,7 +256,7 @@ Already shipped (do not re-add): SMBv1, mDNS, NetBIOS broadcast `NodeType`, LLMN
 | `start.disable_welcome_and_tips` | U | low | same key `SubscribedContent-310093Enabled`, `-338389Enabled`=0; `HKCU\...\UserProfileEngagement` `ScoobeSystemSettingEnabled`=0 | Kills "finish setting up your device" |
 | `taskbar.disable_widgets_machine` | A | low | `HKLM\SOFTWARE\Policies\Microsoft\Dsh` `AllowNewsAndInterests`=0 `[VERIFY]` | |
 
-### TWK-C: AI surface area (profiles `OW`, `PA`; U rows also `US`)
+### TWK-C: AI surface area (profiles `OW`, `PA`; U rows also `US`) — **status: blocked:needs-verification** (`[VERIFY]` items)
 
 | ID | Scope | Risk | Spec | Notes |
 |----|-------|------|------|-------|
@@ -265,7 +265,7 @@ Already shipped (do not re-add): SMBv1, mDNS, NetBIOS broadcast `NodeType`, LLMN
 | `ai.disable_notepad_paint_ai` | A | low | Notepad/Paint AI policy keys `[VERIFY]` | only once keys are confirmed |
 | `ai.remove_copilot_app` | U | medium | `winget.exe uninstall` of the Copilot package `[VERIFY ID via winget list]` | DEC-02, `irreversible` |
 
-### TWK-D: Edge quieting (preset `EQ`, opt-in; DEC-03)
+### TWK-D: Edge quieting (preset `EQ`, opt-in; DEC-03) — **status: done** (`edge.quieting_baseline` + `profiles/edge-quiet.toml`)
 
 Prefix `edge.*`, category `edge`, risk low, user scope `HKCU\Software\Policies\Microsoft\Edge` where honoured else `HKLM`. `[VERIFY each name in the Edge policy reference]`: `HideFirstRunExperience`=1, `StartupBoostEnabled`=0, `BackgroundModeEnabled`=0, `EdgeShoppingAssistantEnabled`=0, `ShowMicrosoftRewards`=0, `PersonalizationReportingEnabled`=0, `DefaultBrowserSettingEnabled`=0, `HubsSidebarEnabled`=0, `MetricsReportingEnabled`=0, `UserFeedbackAllowed`=0, `SpotlightExperiencesAndRecommendationsEnabled`=0. Each description states the "managed by your organization" banner. Do not touch password manager, sync, or extension policies here (the shipped `hardening.browser_privacy_baseline` already handles password manager sync and tracking prevention; avoid overlap).
 
@@ -339,7 +339,7 @@ Detect Tamper Protection (`HKLM\SOFTWARE\Microsoft\Windows Defender\Features` `T
 | `hardening.powershell_module_logging` | A | low | `HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging` `EnableModuleLogging`=1 and `...\ModuleNames` value named `*`="*" | sits beside `powershell_scriptblock_logging`; transcription is separate and opt-in (privacy) |
 | `hardening.event_log_sizes` | A | low | `wevtutil.exe sl Security /ms:<bytes>`; same for `Microsoft-Windows-PowerShell/Operational`, `Microsoft-Windows-Sysmon/Operational` | ENG-07, sizes from `[params]`; revert restores values read via `wevtutil gl /f:xml` |
 | `hardening.enable_operational_logs` | A | low | `wevtutil.exe sl <channel> /e:true` for `Microsoft-Windows-TaskScheduler/Operational`, `Microsoft-Windows-DNS-Client/Operational`, `Microsoft-Windows-WMI-Activity/Operational` | ENG-07 |
-| `hardening.install_sysmon` | A | medium | winget install of Sysmon `[VERIFY ID]` + vendored config (DEC-05) | `opt`; depends on DEC-05; revert via `sysmon.exe -u` |
+| `hardening.install_sysmon` | A | medium | winget install of Sysmon `[VERIFY ID]` + vendored config (DEC-05) | **declined by maintainer** (log bloat) |
 
 ### TWK-J: Per-user developer defaults (profile `DC`; all `U`)
 
@@ -355,7 +355,7 @@ Detect Tamper Protection (`HKLM\SOFTWARE\Microsoft\Windows Defender\Features` `T
 
 ## G. Read-only audits (`wb audit`, depends on ENG-11)
 
-Never mutate. Each check returns a `PostureObservation`-style result (`state`, `source`, `confidence`, `evidence`, `proves`) plus `severity` and `remediation`. All locale independent (A3.1). Status for all: `todo`. Already observed in `wb doctor` (do not duplicate, expose through `wb audit` instead): domain/Entra/MDM, Defender, Secure Boot, BitLocker, AppLocker, VBS/HVCI/Credential Guard, PUA/SmartScreen.
+Never mutate. Each check returns a `PostureObservation`-style result (`state`, `source`, `confidence`, `evidence`, `proves`) plus `severity` and `remediation`. All locale independent (A3.1). Status for all: **done** (implemented in `src/winbearable/audit.py`). Already observed in `wb doctor` (do not duplicate, expose through `wb audit` instead): domain/Entra/MDM, Defender, Secure Boot, BitLocker, AppLocker, VBS/HVCI/Credential Guard, PUA/SmartScreen.
 
 | ID | What | How (native, locale-safe) |
 |----|------|---------------------------|
@@ -415,13 +415,13 @@ All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `
 ## I. Packages (winget) and presets
 
 ### PKG-01: Allowlisted package catalog and `[packages]`
-- status: todo · priority: P2 · depends_on: ENG-10
+- status: done · priority: P2 · depends_on: ENG-10
 - accept: `PackageDefinition(winget_id, scope, source_url, version_pin|None)` catalog; profiles reference catalog names only (arbitrary IDs rejected unless `--allow-unlisted`); reuses the existing `WingetSpec`/install/uninstall path and run-record rollback that VS Code already uses; machine scope only when the catalog says so and the user is admin
 - rows (each `[VERIFY winget ID and per-user scope support via winget show]`): Windows Terminal, Git, PowerToys, Everything, Flow Launcher, 7-Zip, WezTerm, komorebi + whkd, glazewm, kanata, ripgrep, fd, jq, a JetBrains Mono Nerd Font package, Sysinternals Sysmon (admin)
 - presets: `dev-core` (Terminal, Git, VS Code), `launcher` (Everything + Flow Launcher), `tiling-wm`, `fonts`
 
 ### PKG-02: Package removal list
-- status: todo · priority: P3 · depends_on: DEC-02, PKG-01
+- status: done · priority: P3 · depends_on: DEC-02, PKG-01
 - accept: `[packages.remove]` named list; every removal `irreversible` with the existing irreversible-warning validation; plan prints exact commands
 
 ---
@@ -429,19 +429,19 @@ All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `
 ## J. Managed-device and locked-down behaviour
 
 ### MGD-01: Structured `blockers` in `wb doctor --json`
-- status: todo · priority: P1 · depends_on: ENG-03, ENG-04
+- status: done · priority: P1 · depends_on: ENG-03, ENG-04
 - accept: `blockers: [{code, severity, evidence, remedy}]` built from the existing observations plus new ones. Codes at least: `NOT_ADMIN`, `MDM_MANAGED`, `GPO_MANAGED`, `EDR_PRESENT`, `TAMPER_PROTECTION`, `APPLOCKER`, `WDAC`, `POWERSHELL_CLM`, `WINGET_BLOCKED`, `STORE_BLOCKED`, `WSL_POLICY_BLOCKED`, `VIRTUALIZATION_DISABLED`, `PENDING_REBOOT`, `UNSUPPORTED_BUILD`, `UNSUPPORTED_EDITION`, `NON_ENGLISH_UI` (info). Detection is registry/API based; unknown stays `unknown`, never guessed. Each plan/apply run prints which blockers affect it
 
 ### MGD-02: `corp-safe` profile
-- status: todo · priority: P2 · depends_on: DEC-07
+- status: done · priority: P2 · depends_on: DEC-07
 - accept: HKCU only, no policy keys, no services/tasks/features, no HKLM; contains the `U` rows of TWK-A/B plus the user-scope entries of `user-only`; a test asserts no member has `requires_admin`
 
 ### MGD-03: Non-admin first-run path
-- status: todo · priority: P2 · depends_on: MGD-01
+- status: done · priority: P2 · depends_on: MGD-01
 - accept: `wb init --no-admin` selects `user-only`/`corp-safe`, runs `doctor`, lists exactly which WSL steps still need an administrator once, and prints a ready-to-send note for IT listing the requested keys/features. No bypass of firmware, MDM, or EDR (out of scope; `docs/ex-work-pc-checklist.md` already covers the legitimate route)
 
 ### MGD-04: Extend `docs/ex-work-pc-checklist.md`
-- status: todo · priority: P3 · depends_on: none
+- status: done · priority: P3 · depends_on: none
 - accept: confirm it covers: "Reset this PC -> Remove everything", Entra/Intune unenrollment, **the device hardware ID may still be registered in Windows Autopilot and will re-enroll after a reset unless the previous organization deregisters it**, how to ask the seller/IT/vendor for the BIOS/UEFI supervisor password with proof of purchase, and what the "Microsoft 3rd Party UEFI CA" Secure Boot setting means. Add whatever is missing; no bypass techniques
 
 ---
@@ -449,22 +449,22 @@ All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `
 ## K. Quality, tests, tooling (`QA`)
 
 ### QA-01: Remove English-only fallbacks from command-output handling
-- status: todo · priority: P0 · depends_on: none
+- status: done · priority: P0 · depends_on: none
 - touches: `backends/system.py` (`_classify_cmd_failure`, `is_scheduled_task_enabled`, `is_optional_feature_enabled`, `_observe_*`), `wsl.py` (parsing of `wsl.exe` output), tests
 - why: `_classify_cmd_failure` falls back to substring matches on English text (`"administrator"`, `"policy"`, `"blocked"`), which can misclassify (any stderr mentioning "policy" becomes `BLOCKED_BY_POLICY`) and does nothing on other languages; `is_scheduled_task_enabled` has an English `scheduled task state` regex fallback; `wsl.exe` list output is UTF-16 and localized
 - accept: classification uses exit codes/HRESULTs only, with an explicit `UNKNOWN` otherwise; the XML paths are the only parsers; the English fallback regexes are deleted; every remaining text parser has an English and a non-English (e.g. Swedish, German) fixture test; no behaviour change for the existing English tests besides the removed fallbacks (adjust tests that relied on them)
 
 ### QA-02: Windows integration coverage beyond the disposable key
-- status: needs-local-windows-verification · priority: P1 · depends_on: none
+- status: done · priority: P1 · depends_on: none
 - touches: `src/tests/test_windows_integration.py`, `Makefile` (`test-windows`)
 - accept: env-gated tests (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`) that, on a real Windows host, run `wb plan --json` for each profile (read-only), apply and roll back only the HKCU tweaks that are safe to toggle in a throwaway state file (`WINBEARABLE_STATE_PATH` in `tmp_path`), and assert the `.reg` export of the touched keys is byte-identical before and after rollback. Never run admin tweaks in tests. Also prints (not asserts) the output of `auditpol /list /subcategory:* /v`, `schtasks /Query /XML`, `dism /Online /Get-Features /English`, `winget list` to help resolve `[VERIFY]` items. Agents write it; the maintainer runs `make test-windows`
 
 ### QA-03: Catalog lint tests
-- status: todo · priority: P1 · depends_on: none
+- status: done · priority: P1 · depends_on: none
 - accept: pytest tests (pure-pytest style, `src/tests/test_catalog_lint.py`) that fail when: any `src/` file contains `powershell`/`pwsh` as a command; any tweak targets `Microsoft-Windows-Subsystem-Linux` or `VirtualMachinePlatform`; any tweak disables Defender real-time protection, Windows Update, the firewall, SmartScreen, or UAC; an HKCU-only tweak has `requires_admin=True` (or vice versa); `cis_mapping` is set without `verification_method`; every tweak ID in `profiles/*.toml` exists and every catalog tweak is in a profile or listed in an explicit `OPT_IN_TWEAKS` set
 
 ### QA-04: Property tests
-- status: todo · priority: P2 · depends_on: none
+- status: done · priority: P2 · depends_on: none
 - accept: `hypothesis` (dev group only): for random subsets of the catalog and random initial in-memory states, `apply` then `rollback` restores the exact initial state; `plan` never mutates; interrupted-apply (raise mid-way) followed by `recover` leaves a consistent state
 
 ### QA-05: Raise coverage on the weakest modules
@@ -472,16 +472,16 @@ All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `
 - accept: tests added for the uncovered lines in `backends/registry.py` (88%), `tweaks/validation.py` (88%), `state.py` (89%), `uac.py` (89%), `wsl.py` (89%), `backends/system.py` (90%), `engine.py` (91%) so each is at least 92%; no `# pragma: no cover` added to dodge it
 
 ### QA-06: Security review of the UAC relay
-- status: todo · priority: P1 · depends_on: DEC-11
+- status: done · priority: P1 · depends_on: DEC-11
 - touches: `uac.py`, `cli.py` (`--uac-output`, `_relay_elevated_uac`)
 - accept: written review in `docs/` covering: temp-file location/ACL (is the output file readable or replaceable by another local user between elevated write and unelevated read?), argv forwarded to the elevated process (cannot be tampered with to add flags), that only `wb` itself is executed (path resolved, not `PATH`), and that cancellation (`ERROR_CANCELLED`) is handled. Fix issues found with tests; no behaviour change otherwise
 
 ### QA-07: CI supply chain
-- status: todo · priority: P2 · depends_on: none
+- status: done · priority: P2 · depends_on: none
 - accept: ubuntu-only. `uv lock --check` job (the lock file is now committed), `uv audit`/`pip-audit` job, SBOM already exists (verify it attaches to releases), actions stay pinned by SHA; no new paid runners
 
 ### QA-08: Packaging for PCs without Python
-- status: todo · priority: P3 · depends_on: none
+- status: done · priority: P3 · depends_on: none
 - accept: documented `uv tool install winbearable` into the user profile first; an optional PyInstaller build is attempted only in a local/Docker flow (no `windows-latest`); docs note AppLocker/WDAC may block unsigned executables
 
 ---
@@ -489,11 +489,11 @@ All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `
 ## L. Docs and release
 
 ### REL-01: FAQ and threat model
-- status: todo · priority: P2 · depends_on: none
+- status: done · priority: P2 · depends_on: none
 - accept: extend `docs/faq.md` with: Will this break Windows Update? Does my employer allow this? How do I undo it? Why is WSL not a sandbox? Why no PowerShell? Why `>= 26300` only? Add `docs/threat-model.md` (what `wb` does and does not protect against; WSL interop and `/mnt/c` implications; managed-device limits)
 
 ### REL-02: Cheat sheet expansion
-- status: todo · priority: P3 · depends_on: none
+- status: done · priority: P3 · depends_on: none
 - accept: `docs/linux-to-windows-cheatsheet.md` adds `systemctl`->`sc.exe`/Services, `journalctl`->`wevtutil`, `ss -ltnp`->`wb audit`, `cron`->`schtasks`, `ufw`->`netsh advfirewall`, `/etc/hosts` path, `env`->`setx`, `sudo`->UAC, `chmod`->`icacls`, `apt`->`winget`, `rsync`->`robocopy`
 
 ### REL-03: Winget manifest and release checklist
