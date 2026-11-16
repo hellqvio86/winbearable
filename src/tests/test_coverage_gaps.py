@@ -385,8 +385,9 @@ def test_wsl_operations_export_update_sparse_and_baseline_branches(tmp_path: Pat
         apply_wsl_linux_baseline(sys_b, "Alpine", dev_packages=True, auto_patch=False, dry_run=False)
 
 
-def test_native_system_extended_command_wrappers(tmp_path: Path) -> None:
+def test_native_system_extended_command_wrappers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Cover NativeSystemBackend auditpol, wevtutil, netsh, fsutil, powercfg, git, and icacls wrappers."""
+    monkeypatch.setenv("USERNAME", "testuser")
     from winbearable.backends.registry import InMemoryRegistryBackend
     from winbearable.backends.system import NativeSystemBackend
     from winbearable.const import HIVE_HKLM, REG_DWORD, REG_SZ
