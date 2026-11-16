@@ -10,9 +10,15 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .backends.registry import is_wsl2
+from .backends.registry import RegistryBackend, is_wsl2
 from .backends.system import GIB_BYTES, SystemBackend
-from .const import DEFAULT_WSL_DISTRO
+from .const import (
+    DEFAULT_WSL_DISTRO,
+    HIVE_HKLM,
+    MIN_RECOMMENDED_WSL_VERSION,
+    WSL_MIN_VERSION_BY_OPTION,
+    WSL_POLICIES_KEY,
+)
 from .models import EnvironmentInfo, WslConfigSpec
 
 
@@ -97,7 +103,53 @@ def merge_ini_preserving_comments(existing_text: str, desired_sections: dict[str
     return "\n".join(output_lines).rstrip("\n") + "\n"
 
 
-def build_wslconfig_sections(spec: WslConfigSpec, host_memory_bytes: int) -> dict[str, dict[str, str]]:
+def _parse_version_tuple(version_str: str | None) -> tuple[int, ...] | None:
+    if not version_str:
+        return None
+    nums = re.findall(r"\d+", version_str)
+    if not nums:
+        return None
+    return tuple(int(n) for n in nums[:3])
+
+
+def is_wsl_version_outdated(version_str: str | None) -> bool:
+    """Return True when installed WSL version is below MIN_RECOMMENDED_WSL_VERSION."""
+    parsed = _parse_version_tuple(version_str)
+    min_parsed = _parse_version_tuple(MIN_RECOMMENDED_WSL_VERSION)
+    if parsed is None or min_parsed is None:
+        return False
+    return parsed < min_parsed
+
+
+def detect_wsl_policies(registry: RegistryBackend) -> dict[str, Any]:
+    """Read host-side WSL policies under HKLM\\SOFTWARE\\Policies\\Microsoft\\WSL."""
+    policy_names = (
+        "AllowWSL",
+        "AllowWSL1",
+        "AllowCustomKernel",
+        "AllowCustomKernelUserSetting",
+        "DefaultNetworkingMode",
+    )
+    policies: dict[str, Any] = {}
+    blocked = False
+    for name in policy_names:
+        try:
+            val = registry.get_value(HIVE_HKLM, WSL_POLICIES_KEY, name)
+        except PermissionError:
+            val = None
+        if val is not None:
+            policies[name] = val[0]
+            if name == "AllowWSL" and val[0] == 0:
+                blocked = True
+    return {"blocked": blocked, "policies": policies}
+
+
+def build_wslconfig_sections(
+    spec: WslConfigSpec,
+    host_memory_bytes: int,
+    installed_wsl_version: str | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, dict[str, str]]:
     """Build desired [wsl2] and [experimental] sections for %UserProfile%\\.wslconfig (75% host RAM)."""
     sized_memory_gb = spec.memory_gb if spec.memory_gb is not None else calculate_wsl_memory_gib(host_memory_bytes)
     swap_gb = max(2, sized_memory_gb // 4)
@@ -112,11 +164,52 @@ def build_wslconfig_sections(spec: WslConfigSpec, host_memory_bytes: int) -> dic
     }
     if spec.processors is not None:
         wsl2_sec["processors"] = str(spec.processors)
+    if spec.vm_idle_timeout is not None:
+        wsl2_sec["vmIdleTimeout"] = str(spec.vm_idle_timeout)
+
+    if spec.mode == "strict":
+        wsl2_sec["guiApplications"] = "false" if spec.gui_applications is None else str(spec.gui_applications).lower()
+        wsl2_sec["nestedVirtualization"] = (
+            "false" if spec.nested_virtualization is None else str(spec.nested_virtualization).lower()
+        )
+        wsl2_sec["debugConsole"] = "false" if spec.debug_console is None else str(spec.debug_console).lower()
+    else:
+        if spec.gui_applications is not None:
+            wsl2_sec["guiApplications"] = str(spec.gui_applications).lower()
+        if spec.nested_virtualization is not None:
+            wsl2_sec["nestedVirtualization"] = str(spec.nested_virtualization).lower()
+        if spec.debug_console is not None:
+            wsl2_sec["debugConsole"] = str(spec.debug_console).lower()
+
+    if spec.kernel_command_line is not None:
+        wsl2_sec["kernelCommandLine"] = spec.kernel_command_line
+    if spec.default_vhd_size is not None:
+        wsl2_sec["defaultVhdSize"] = spec.default_vhd_size
 
     experimental_sec: dict[str, str] = {
         "autoMemoryReclaim": "gradual",
         "sparseVhd": "true",
     }
+    if spec.host_address_loopback is not None:
+        experimental_sec["hostAddressLoopback"] = str(spec.host_address_loopback).lower()
+    if spec.ignored_ports is not None:
+        experimental_sec["ignoredPorts"] = ",".join(str(p) for p in spec.ignored_ports)
+    if spec.best_effort_dns_parsing is not None:
+        experimental_sec["bestEffortDnsParsing"] = str(spec.best_effort_dns_parsing).lower()
+
+    installed_ver = _parse_version_tuple(installed_wsl_version)
+    if installed_ver is not None:
+        for sec_dict in (wsl2_sec, experimental_sec):
+            for key in list(sec_dict.keys()):
+                min_req = _parse_version_tuple(WSL_MIN_VERSION_BY_OPTION.get(key))
+                if min_req is not None and installed_ver < min_req:
+                    sec_dict.pop(key)
+                    if warnings is not None:
+                        warnings.append(
+                            f"Skipped .wslconfig key '{key}' (requires WSL >= {WSL_MIN_VERSION_BY_OPTION[key]}, "
+                            f"installed {installed_wsl_version})."
+                        )
+
     return {
         "wsl2": wsl2_sec,
         "experimental": experimental_sec,
@@ -127,7 +220,7 @@ def build_distro_wsl_conf_sections(spec: WslConfigSpec) -> dict[str, dict[str, s
     """Build desired /etc/wsl.conf sections for either 'strict' or 'convenient' mode."""
     boot_sec = {"systemd": str(spec.systemd).lower()}
     if spec.mode == "strict":
-        return {
+        sections: dict[str, dict[str, str]] = {
             "boot": boot_sec,
             "automount": {
                 "enabled": "false",
@@ -137,17 +230,40 @@ def build_distro_wsl_conf_sections(spec: WslConfigSpec) -> dict[str, dict[str, s
                 "appendWindowsPath": "false",
             },
         }
-    return {
-        "boot": boot_sec,
-        "automount": {
+    else:
+        automount_sec: dict[str, str] = {
             "enabled": "true",
             "options": '"metadata,umask=22,fmask=11"',
-        },
-        "interop": {
-            "enabled": "true",
-            "appendWindowsPath": "false",
-        },
-    }
+        }
+        if spec.automount_root is not None:
+            automount_sec["root"] = spec.automount_root
+        if spec.cross_distro is not None:
+            automount_sec["crossDistro"] = str(spec.cross_distro).lower()
+        sections = {
+            "boot": boot_sec,
+            "automount": automount_sec,
+            "interop": {
+                "enabled": "true",
+                "appendWindowsPath": "false",
+            },
+        }
+
+    if spec.default_user is not None:
+        if spec.default_user.strip().lower() == "root":
+            raise WslOperationError("Refusing to set /etc/wsl.conf [user] default=root.")
+        sections["user"] = {"default": spec.default_user.strip()}
+
+    net_sec: dict[str, str] = {}
+    if spec.hostname is not None:
+        net_sec["hostname"] = spec.hostname
+    if spec.generate_hosts is not None:
+        net_sec["generateHosts"] = str(spec.generate_hosts).lower()
+    if spec.generate_resolv_conf is not None:
+        net_sec["generateResolvConf"] = str(spec.generate_resolv_conf).lower()
+    if net_sec:
+        sections["network"] = net_sec
+
+    return sections
 
 
 def get_default_wslconfig_path() -> Path:
@@ -221,7 +337,8 @@ def plan_or_apply_wsl(
     host_memory_gib_str = format_host_memory_gib(host_memory_bytes)
     memory_gib = spec.memory_gb if spec.memory_gb is not None else calculate_wsl_memory_gib(host_memory_bytes)
 
-    desired_wslconfig_sections = build_wslconfig_sections(spec, host_memory_bytes)
+    warnings: list[str] = []
+    desired_wslconfig_sections = build_wslconfig_sections(spec, host_memory_bytes, warnings=warnings)
     merged_wslconfig = merge_ini_preserving_comments(existing_wslconfig, desired_wslconfig_sections)
     wslconfig_changed = merged_wslconfig != existing_wslconfig
     backup_path: Path | None = None
@@ -264,7 +381,9 @@ def plan_or_apply_wsl(
         "wslconfig_content": merged_wslconfig,
         "distro": distro,
         "distro_changed": distro_changed,
+        "distro_restart_required": distro_changed,
         "distro_wsl_conf_content": merged_distro_conf,
+        "warnings": warnings,
     }
 
 
@@ -476,12 +595,80 @@ def detect_default_wsl_distro(
     return None
 
 
+_DISTRO_EOL_VERSIONS: dict[str, set[str]] = {
+    "ubuntu": {"18.04", "20.04", "22.10", "23.04", "23.10"},
+    "debian": {"10", "11"},
+    "fedora": {"38", "39", "40"},
+}
+
+
+def deep_audit_wsl_distro(system: SystemBackend, distro: str) -> dict[str, Any]:
+    """Run read-only deep exposure checks inside a WSL2 distro via fixed-argv commands (WSL-04)."""
+    issues: list[str] = []
+    uid_res = system.run_wsl_command(["-d", distro, "--", "id", "-u"])
+    default_uid = uid_res.stdout.strip() if uid_res.returncode == 0 else None
+    default_is_root = default_uid == "0"
+    if default_is_root:
+        issues.append(f"Distro '{distro}' default user is root (uid=0).")
+
+    sudo_res = system.run_wsl_command(
+        ["-d", distro, "-u", "root", "--", "grep", "-rn", "NOPASSWD", "/etc/sudoers", "/etc/sudoers.d"]
+    )
+    nopasswd_lines = (
+        [ln.strip() for ln in sudo_res.stdout.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        if sudo_res.returncode == 0
+        else []
+    )
+    if nopasswd_lines:
+        issues.append(f"Distro '{distro}' has NOPASSWD sudoers rules ({len(nopasswd_lines)}).")
+
+    path_res = system.run_wsl_command(["-d", distro, "--", "printenv", "PATH"])
+    win_in_path = "/mnt/c/" in path_res.stdout.lower() if path_res.returncode == 0 else False
+    if win_in_path:
+        issues.append(f"Distro '{distro}' includes Windows /mnt/c paths in $PATH.")
+
+    os_rel = system.run_wsl_command(["-d", distro, "--", "cat", "/etc/os-release"])
+    distro_id = ""
+    version_id = ""
+    if os_rel.returncode == 0:
+        for ln in os_rel.stdout.splitlines():
+            if ln.startswith("ID="):
+                distro_id = ln.split("=", 1)[1].strip().strip('"').lower()
+            elif ln.startswith("VERSION_ID="):
+                version_id = ln.split("=", 1)[1].strip().strip('"')
+    eol = version_id in _DISTRO_EOL_VERSIONS.get(distro_id, set())
+    if eol:
+        issues.append(f"Distro '{distro}' ({distro_id} {version_id}) is End-of-Life.")
+
+    ss_res = system.run_wsl_command(["-d", distro, "--", "ss", "-ltnH"])
+    listeners = [ln.strip() for ln in ss_res.stdout.splitlines() if ln.strip()] if ss_res.returncode == 0 else []
+
+    sd_res = system.run_wsl_command(["-d", distro, "--", "test", "-d", "/run/systemd/system"])
+    systemd_running = sd_res.returncode == 0
+
+    return {
+        "distro": distro,
+        "default_uid": default_uid,
+        "default_is_root": default_is_root,
+        "nopasswd_sudoers_count": len(nopasswd_lines),
+        "windows_paths_in_path": win_in_path,
+        "os_id": distro_id,
+        "version_id": version_id,
+        "distro_eol": eol,
+        "listening_sockets_count": len(listeners),
+        "systemd_running": systemd_running,
+        "issues": issues,
+    }
+
+
 def audit_wsl(
     env: EnvironmentInfo,
     wslconfig_path: Path | None = None,
     system: SystemBackend | None = None,
+    registry: RegistryBackend | None = None,
+    deep: bool = False,
 ) -> dict[str, Any]:
-    """Audit host WSL2 status, distros, .wslconfig presence, and Linux-side configuration."""
+    """Audit host WSL2 status, distros, .wslconfig presence, policy blocks, and Linux-side configuration."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     has_wslconfig = target_wslconfig.is_file()
     wslconfig_text = target_wslconfig.read_text(encoding="utf-8") if has_wslconfig else ""
@@ -498,10 +685,17 @@ def audit_wsl(
         if (default_is_fedora or (has_fedora and not has_ubuntu))
         else None
     )
+    policy_info = detect_wsl_policies(registry) if registry is not None else {"blocked": False, "policies": {}}
+    deep_results: list[dict[str, Any]] = []
+    if deep and system is not None and env.is_windows and env.wsl_distros:
+        for d in env.wsl_distros:
+            deep_results.append(deep_audit_wsl_distro(system, d))
 
     return {
         "wsl_installed": env.wsl_installed,
         "wsl_version": env.wsl_version,
+        "wsl_outdated": is_wsl_version_outdated(env.wsl_version),
+        "wsl_policies": policy_info,
         "distros": list(env.wsl_distros),
         "default_wsl_distro": default_wsl_distro,
         "default_distro_is_fedora": default_is_fedora,
@@ -513,6 +707,9 @@ def audit_wsl(
         "firewall_enabled": wsl2_sec.get("firewall", "").lower() == "true",
         "dns_tunneling": wsl2_sec.get("dnsTunneling", "").lower() == "true",
         "linux": audit_linux_side(),
+        "deep": {"distros": deep_results, "issues": [iss for dr in deep_results for iss in dr["issues"]]}
+        if deep
+        else None,
     }
 
 
@@ -585,9 +782,70 @@ def export_wsl_distro(
     distro: str,
     output_file: Path,
     dry_run: bool = True,
+    keep_last: int | None = None,
 ) -> dict[str, Any]:
-    """Export a WSL2 distribution to a backup tarball via wsl.exe --export."""
+    """Export a WSL2 distribution to a backup tarball via wsl.exe --export and record sha256."""
+    import hashlib
+
     cmd = ["--export", distro, str(output_file)]
+    returncode = 0
+    sha256_hex: str | None = None
+    pruned_files: list[str] = []
+    if not dry_run:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        res = system.run_wsl_command(cmd)
+        returncode = res.returncode
+        if returncode == 0 and output_file.is_file():
+            sha256_hex = hashlib.sha256(output_file.read_bytes()).hexdigest()
+            output_file.with_suffix(f"{output_file.suffix}.sha256").write_text(
+                f"{sha256_hex}  {output_file.name}\n",
+                encoding="utf-8",
+            )
+            if keep_last is not None and keep_last > 0:
+                existing = sorted(
+                    output_file.parent.glob(f"{distro}-*.tar*"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for stale in existing[keep_last:]:
+                    stale.unlink(missing_ok=True)
+                    pruned_files.append(str(stale))
+    return {
+        "dry_run": dry_run,
+        "distro": distro,
+        "output_file": str(output_file),
+        "sha256": sha256_hex,
+        "pruned_files": pruned_files,
+        "command": ["wsl.exe", *cmd],
+        "returncode": returncode,
+    }
+
+
+def update_wsl(system: SystemBackend, dry_run: bool = True) -> dict[str, Any]:
+    """Run `wsl.exe --update` and `wsl.exe --set-default-version 2` (dry-run by default)."""
+    cmds = [["--update"], ["--set-default-version", "2"]]
+    returncode = 0
+    if not dry_run:
+        for c in cmds:
+            res = system.run_wsl_command(c)
+            if res.returncode != 0:
+                returncode = res.returncode
+                break
+    return {
+        "dry_run": dry_run,
+        "commands": [["wsl.exe", *c] for c in cmds],
+        "returncode": returncode,
+    }
+
+
+def set_wsl_distro_sparse(
+    system: SystemBackend,
+    distro: str,
+    sparse: bool = True,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Configure sparse VHD mode for a WSL2 distro via `wsl.exe --manage <distro> --set-sparse`."""
+    cmd = ["--manage", distro, "--set-sparse", "true" if sparse else "false"]
     returncode = 0
     if not dry_run:
         res = system.run_wsl_command(cmd)
@@ -595,7 +853,7 @@ def export_wsl_distro(
     return {
         "dry_run": dry_run,
         "distro": distro,
-        "output_file": str(output_file),
+        "sparse": sparse,
         "command": ["wsl.exe", *cmd],
         "returncode": returncode,
     }

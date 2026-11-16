@@ -288,6 +288,14 @@ def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> 
                 REG_SZ,
             ),
             (HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\WSearch", "Start"): (2, REG_DWORD),
+            (
+                HIVE_HKLM,
+                r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces\Tcpip_{TEST}",
+                "NetbiosOptions",
+            ): (
+                0,
+                REG_DWORD,
+            ),
         }
     )
     system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
@@ -328,7 +336,8 @@ def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> 
     )
 
     reverted_score = calculate_hardening_score(env, registry, system)
-    assert reverted_score["passed"] == 0
+    still_applied = [r["tweak_id"] for r in reverted_score["results"] if r["status"] == "applied"]
+    assert still_applied == ["dev.fix_ssh_key_permissions"]
 
 
 def test_write_ahead_journal_and_compensation_on_failure(state_store: StateStore) -> None:
@@ -434,7 +443,18 @@ def test_irreversible_guard_and_graceful_process_stop(state_store: StateStore) -
 
 def test_separated_audit_dimensions_and_cis_provenance(state_store: StateStore) -> None:
     """UI-only profiles cannot raise security score, and CIS controls carry traceable mappings."""
-    reg = InMemoryRegistryBackend()
+    reg = InMemoryRegistryBackend(
+        initial_values={
+            (
+                HIVE_HKLM,
+                r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces\Tcpip_{TEST}",
+                "NetbiosOptions",
+            ): (
+                0,
+                REG_DWORD,
+            ),
+        }
+    )
     sys_b = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
     env = sys_b.detect_environment(reg)
 

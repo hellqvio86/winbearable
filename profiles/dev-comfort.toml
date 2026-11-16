@@ -1,0 +1,24 @@
+name = "dev-comfort"
+extends = "user-only"
+description = "Linux-comfort input, terminal, Explorer, and developer defaults (DEC-04: Developer Mode stays opt-in)."
+
+[tweaks]
+"input.caps_to_ctrl" = true
+"input.keyboard_repeat" = true
+"input.disable_sticky_keys_prompts" = true
+"input.disable_beep" = true
+"input.natural_scroll_touchpad" = true
+"terminal.default_host_windows_terminal" = true
+"taskbar.align_left" = true
+"taskbar.never_combine" = true
+"taskbar.enable_end_task" = true
+"taskbar.show_seconds" = true
+"explorer.launch_to_this_pc" = true
+"explorer.disable_recent_frequent" = true
+"explorer.disable_sync_provider_notifications" = true
+"explorer.alt_tab_windows_only" = true
+"explorer.disable_snap_flyout" = true
+"dev.long_paths" = true
+"power.disable_fast_startup" = true
+"dev.git_sane_defaults" = true
+"dev.fix_ssh_key_permissions" = true

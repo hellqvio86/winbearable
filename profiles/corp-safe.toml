@@ -1,0 +1,49 @@
+name = "corp-safe"
+description = "Corporate-safe HKCU-only baseline: zero HKLM keys, zero policy keys, zero services/tasks/features."
+
+[wsl]
+enabled = true
+mode = "convenient"
+networking_mode = "mirrored"
+dns_tunneling = true
+firewall = true
+auto_proxy = true
+systemd = true
+
+[tweaks]
+"apps.install_vscode" = true
+"onedrive.disable_tray_autorun" = true
+"onedrive.unpin_explorer" = true
+"search.disable_highlights" = true
+"search.hide_taskbar_box" = true
+"search.disable_cloud_and_history" = true
+"start.disable_recommendations" = true
+"start.disable_lockscreen_tips" = true
+"start.disable_settings_suggestions" = true
+"start.disable_welcome_and_tips" = true
+"taskbar.disable_widgets_and_chat" = true
+"taskbar.align_left" = true
+"taskbar.never_combine" = true
+"taskbar.enable_end_task" = true
+"taskbar.show_seconds" = true
+"explorer.classic_context_menu" = true
+"explorer.show_file_extensions" = true
+"explorer.show_hidden_files" = true
+"explorer.launch_to_this_pc" = true
+"explorer.disable_recent_frequent" = true
+"explorer.disable_sync_provider_notifications" = true
+"explorer.alt_tab_windows_only" = true
+"explorer.disable_snap_flyout" = true
+"privacy.disable_advertising_id" = true
+"privacy.disable_tailored_experiences" = true
+"privacy.language_list_optout" = true
+"privacy.disable_app_launch_tracking" = true
+"privacy.disable_feedback_prompts" = true
+"privacy.disable_inking_typing_collection" = true
+"input.keyboard_repeat" = true
+"input.disable_sticky_keys_prompts" = true
+"input.disable_beep" = true
+"input.natural_scroll_touchpad" = true
+"terminal.default_host_windows_terminal" = true
+"dev.git_sane_defaults" = true
+"dev.fix_ssh_key_permissions" = true

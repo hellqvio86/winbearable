@@ -1,11 +1,13 @@
 """Native Windows registry backend using stdlib winreg and in-memory test fake."""
 
+import fnmatch
 import importlib
 import os
 import platform
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -19,7 +21,14 @@ from ..const import (
     REG_QWORD,
     REG_SZ,
 )
-from ..models import PolicyConflictPath, RegistryValueData, RegistryValueSnapshot, RegistryView
+from ..models import (
+    PolicyConflictPath,
+    RegistryKeySnapshot,
+    RegistrySpec,
+    RegistryValueData,
+    RegistryValueSnapshot,
+    RegistryView,
+)
 
 
 class RegistryBackend(Protocol):
@@ -72,8 +81,51 @@ class RegistryBackend(Protocol):
     def restore_snapshot(self, snapshot: RegistryValueSnapshot) -> None:
         """Restore a registry value to its snapshotted state."""
 
+    def delete_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
+        """Recursively delete a registry key if present. Return True if deleted."""
+
+    def snapshot_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryKeySnapshot:
+        """Capture current key subtree state prior to key deletion."""
+
+    def restore_key_snapshot(self, snapshot: RegistryKeySnapshot) -> None:
+        """Restore a deleted registry key subtree from its snapshot."""
+
     def check_policy_conflict(self, policy_checks: tuple[PolicyConflictPath, ...]) -> str | None:
         """Return a policy conflict description if GPO/MDM enforces a conflicting setting."""
+
+
+def expand_registry_spec(spec: RegistrySpec, registry: RegistryBackend) -> list[RegistrySpec]:
+    """Expand a single-wildcard RegistrySpec.key_path_glob via list_subkeys into concrete RegistrySpecs."""
+    if spec.key_path_glob is None:
+        return [spec]
+    norm_glob = _normalize_key_path(spec.key_path_glob)
+    segments = norm_glob.split("\\")
+    star_indices = [idx for idx, seg in enumerate(segments) if "*" in seg]
+    if len(star_indices) != 1:
+        raise ValueError(f"Invalid key_path_glob {spec.key_path_glob!r}: must contain exactly one '*' segment.")
+    star_idx = star_indices[0]
+    parent_path = "\\".join(segments[:star_idx])
+    pattern = segments[star_idx].lower()
+    suffix_segments = segments[star_idx + 1 :]
+    if not parent_path:
+        raise ValueError(f"Invalid key_path_glob {spec.key_path_glob!r}: wildcard cannot be at hive root.")
+    matched: list[RegistrySpec] = []
+    for sub in registry.list_subkeys(spec.hive, parent_path, view=spec.view):
+        if fnmatch.fnmatchcase(sub.lower(), pattern):
+            concrete_parts = [parent_path, sub, *suffix_segments]
+            concrete_path = "\\".join(concrete_parts)
+            matched.append(replace(spec, key_path=concrete_path, key_path_glob=None))
+    return matched
 
 
 def _normalize_key_path(key_path: str) -> str:
@@ -221,6 +273,77 @@ class InMemoryRegistryBackend:
                 value_name=snapshot.value_name,
                 view=snapshot.view,
             )
+
+    def delete_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
+        norm = _normalize_key_path(key_path)
+        if not norm or not self.key_exists(hive, norm, view=view):
+            return False
+        prefix = f"{norm}\\"
+        keys_to_remove = {
+            (cand_hive, cand_path)
+            for cand_hive, cand_path in self._keys
+            if cand_hive == hive and (cand_path == norm or cand_path.startswith(prefix))
+        }
+        vals_to_remove = [k for k in self._values if k[0] == hive and (k[1] == norm or k[1].startswith(prefix))]
+        for k in vals_to_remove:
+            del self._values[k]
+        self._keys -= keys_to_remove
+        return True
+
+    def snapshot_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryKeySnapshot:
+        norm = _normalize_key_path(key_path)
+        existed = self.key_exists(hive, norm, view=view)
+        if not existed:
+            return RegistryKeySnapshot(hive=hive, key_path=norm, existed=False, view=view)
+        prefix = f"{norm}\\"
+        subkeys = sorted(
+            cand_path
+            for cand_hive, cand_path in self._keys
+            if cand_hive == hive and (cand_path == norm or cand_path.startswith(prefix))
+        )
+        val_snaps: list[RegistryValueSnapshot] = []
+        for (vhive, vpath, vname), (vdata, vtype) in sorted(self._values.items()):
+            if vhive == hive and (vpath == norm or vpath.startswith(prefix)):
+                val_snaps.append(
+                    RegistryValueSnapshot(
+                        hive=vhive,
+                        key_path=vpath,
+                        value_name=vname,
+                        key_existed=True,
+                        value_existed=True,
+                        previous_data=vdata,
+                        previous_type=vtype,
+                        view=view,
+                    )
+                )
+        return RegistryKeySnapshot(
+            hive=hive,
+            key_path=norm,
+            existed=True,
+            values=tuple(val_snaps),
+            subkeys=tuple(subkeys),
+            view=view,
+        )
+
+    def restore_key_snapshot(self, snapshot: RegistryKeySnapshot) -> None:
+        if not snapshot.existed:
+            self.delete_key(snapshot.hive, snapshot.key_path, view=snapshot.view)
+            return
+        self._ensure_key_hierarchy(snapshot.hive, snapshot.key_path)
+        for sub in snapshot.subkeys:
+            self._ensure_key_hierarchy(snapshot.hive, sub)
+        for val_snap in snapshot.values:
+            self.restore_snapshot(val_snap)
 
     def check_policy_conflict(self, policy_checks: tuple[PolicyConflictPath, ...]) -> str | None:
         for policy in policy_checks:
@@ -439,6 +562,111 @@ class WinregBackend:
                 return f"Enforced by policy at {policy.hive}\\{policy.key_path}\\{policy.value_name}={current_val!r}"
         return None
 
+    def _enum_key_values(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> list[RegistryValueSnapshot]:
+        root = self._resolve_hive(hive)
+        norm = _normalize_key_path(key_path)
+        access = self._resolve_access(int(self._winreg.KEY_READ), view)
+        enum_val_fn = getattr(self._winreg, "EnumValue", None)
+        if not callable(enum_val_fn):
+            return []
+        snaps: list[RegistryValueSnapshot] = []
+        try:
+            with self._winreg.OpenKey(root, norm, 0, access) as handle:
+                idx = 0
+                while True:
+                    try:
+                        vname, raw_data, raw_type = enum_val_fn(handle, idx)
+                        idx += 1
+                        reg_type = self._int_to_type.get(int(raw_type), REG_SZ)
+                        snaps.append(
+                            RegistryValueSnapshot(
+                                hive=hive,
+                                key_path=norm,
+                                value_name=str(vname),
+                                key_existed=True,
+                                value_existed=True,
+                                previous_data=raw_data,
+                                previous_type=reg_type,
+                                view=view,
+                            )
+                        )
+                    except OSError:
+                        break
+        except OSError:
+            return []
+        return snaps
+
+    def snapshot_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryKeySnapshot:
+        norm = _normalize_key_path(key_path)
+        if not self.key_exists(hive, norm, view=view):
+            return RegistryKeySnapshot(hive=hive, key_path=norm, existed=False, view=view)
+        all_subkeys: list[str] = []
+        all_values: list[RegistryValueSnapshot] = []
+
+        def _walk(cur_path: str) -> None:
+            all_subkeys.append(cur_path)
+            all_values.extend(self._enum_key_values(hive, cur_path, view=view))
+            for child in self.list_subkeys(hive, cur_path, view=view):
+                _walk(f"{cur_path}\\{child}")
+
+        _walk(norm)
+        return RegistryKeySnapshot(
+            hive=hive,
+            key_path=norm,
+            existed=True,
+            values=tuple(all_values),
+            subkeys=tuple(all_subkeys),
+            view=view,
+        )
+
+    def delete_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
+        norm = _normalize_key_path(key_path)
+        if not norm or not self.key_exists(hive, norm, view=view):
+            return False
+        for child in self.list_subkeys(hive, norm, view=view):
+            self.delete_key(hive, f"{norm}\\{child}", view=view)
+        root = self._resolve_hive(hive)
+        del_key_ex = getattr(self._winreg, "DeleteKeyEx", None)
+        del_key = getattr(self._winreg, "DeleteKey", None)
+        access = self._resolve_access(int(self._winreg.KEY_WRITE), view)
+        try:
+            if callable(del_key_ex):
+                del_key_ex(root, norm, access, 0)
+            elif callable(del_key):
+                del_key(root, norm)
+            else:
+                return False
+            return True
+        except OSError:
+            return False
+
+    def restore_key_snapshot(self, snapshot: RegistryKeySnapshot) -> None:
+        if not snapshot.existed:
+            self.delete_key(snapshot.hive, snapshot.key_path, view=snapshot.view)
+            return
+        root = self._resolve_hive(snapshot.hive)
+        access = self._resolve_access(int(self._winreg.KEY_WRITE), snapshot.view)
+        for sub in snapshot.subkeys or (snapshot.key_path,):
+            with self._winreg.CreateKeyEx(root, _normalize_key_path(sub), 0, access):
+                pass
+        for val_snap in snapshot.values:
+            self.restore_snapshot(val_snap)
+
 
 def is_wsl2() -> bool:
     """Return True when running inside a WSL2 Linux distribution."""
@@ -607,6 +835,27 @@ class WslInteropRegistryBackend:
         )
 
     def restore_snapshot(self, snapshot: RegistryValueSnapshot) -> None:
+        raise RuntimeError("WslInteropRegistryBackend is read-only; run `wb rollback --apply` from Windows.")
+
+    def delete_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
+        raise RuntimeError("WslInteropRegistryBackend is read-only; run `wb apply --apply` from Windows.")
+
+    def snapshot_key(
+        self,
+        hive: str,
+        key_path: str,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> RegistryKeySnapshot:
+        norm = _normalize_key_path(key_path)
+        existed = self.key_exists(hive, norm, view=view)
+        return RegistryKeySnapshot(hive=hive, key_path=norm, existed=existed, view=view)
+
+    def restore_key_snapshot(self, snapshot: RegistryKeySnapshot) -> None:
         raise RuntimeError("WslInteropRegistryBackend is read-only; run `wb rollback --apply` from Windows.")
 
     def check_policy_conflict(self, policy_checks: tuple[PolicyConflictPath, ...]) -> str | None:

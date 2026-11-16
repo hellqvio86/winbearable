@@ -22,6 +22,7 @@ from ..const import (
     ENV_BUILD_OVERRIDE,
     ENV_CMD_TIMEOUT,
     HIVE_HKLM,
+    KNOWN_EDR_SERVICES,
     MDM_ENROLLMENTS_KEY,
     MIN_SUPPORTED_BUILD,
     NT_CURRENT_VERSION_KEY,
@@ -239,9 +240,10 @@ def _observe_defender(
     if run_cmd is not None:
         sc_res = run_cmd(["sc.exe", "query", "WinDefend"])
         if sc_res.returncode == 0:
-            if "RUNNING" in sc_res.stdout.upper():
+            upper_out = sc_res.stdout.upper()
+            if re.search(r"STATE\s*:\s*4\b", upper_out) or "RUNNING" in upper_out:
                 svc_running = True
-            elif "STOPPED" in sc_res.stdout.upper():
+            elif re.search(r"STATE\s*:\s*1\b", upper_out) or "STOPPED" in upper_out:
                 svc_running = False
 
     if disabled_by_reg and svc_running is True:
@@ -453,6 +455,55 @@ def _observe_applocker(registry: RegistryBackend) -> tuple[PostureObservation, b
     )
 
 
+def _observe_edr(registry: RegistryBackend) -> tuple[PostureObservation, bool | None]:
+    proves = (
+        "Indicates presence of known EDR/endpoint-management service registry keys; "
+        "absence of a known service name is not proof of EDR absence."
+    )
+    found: list[str] = []
+    inaccessible = False
+    for svc_name, vendor_label in KNOWN_EDR_SERVICES:
+        svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{svc_name}"
+        ok, start_val = _safe_get_reg(registry, svc_key, "Start")
+        if not ok:
+            inaccessible = True
+            continue
+        if start_val is not None and isinstance(start_val[0], int) and start_val[0] in (0, 1, 2, 3):
+            found.append(f"{svc_name} ({vendor_label}, Start={start_val[0]})")
+    if found:
+        return (
+            PostureObservation(
+                state=ObservationState.ENABLED,
+                source="registry:SYSTEM\\CurrentControlSet\\Services",
+                confidence=ObservationConfidence.HIGH,
+                evidence="; ".join(found),
+                proves=proves,
+            ),
+            True,
+        )
+    if inaccessible:
+        return (
+            PostureObservation(
+                state=ObservationState.INACCESSIBLE,
+                source="registry:SYSTEM\\CurrentControlSet\\Services",
+                confidence=ObservationConfidence.NONE,
+                evidence="Access denied inspecting EDR service keys",
+                proves=proves,
+            ),
+            None,
+        )
+    return (
+        PostureObservation(
+            state=ObservationState.ABSENT,
+            source="registry:SYSTEM\\CurrentControlSet\\Services",
+            confidence=ObservationConfidence.LOW,
+            evidence="No known EDR service keys active (absence of known service is not proof of absence)",
+            proves=proves,
+        ),
+        False,
+    )
+
+
 def _collect_posture_observations(
     registry: RegistryBackend,
     is_windows: bool,
@@ -468,6 +519,7 @@ def _collect_posture_observations(
         "secure_boot_enabled",
         "bitlocker_protected",
         "applocker_configured",
+        "edr",
     )
     if not is_windows:
         obs = {
@@ -495,6 +547,7 @@ def _collect_posture_observations(
     sb_obs, sb_bool = _observe_secure_boot(registry)
     bl_obs, bl_bool = _observe_bitlocker(registry, edition, run_cmd)
     al_obs, al_bool = _observe_applocker(registry)
+    edr_obs, edr_bool = _observe_edr(registry)
 
     observations = {
         "domain_joined": dom_obs,
@@ -504,6 +557,7 @@ def _collect_posture_observations(
         "secure_boot_enabled": sb_obs,
         "bitlocker_protected": bl_obs,
         "applocker_configured": al_obs,
+        "edr": edr_obs,
     }
     flags: dict[str, bool | None] = {
         "domain_joined": dom_bool,
@@ -513,6 +567,7 @@ def _collect_posture_observations(
         "secure_boot_enabled": sb_bool,
         "bitlocker_protected": bl_bool,
         "applocker_configured": al_bool,
+        "edr": edr_bool,
     }
     return observations, flags
 
@@ -585,6 +640,65 @@ class SystemBackend(Protocol):
     def get_total_memory_bytes(self) -> int:
         """Return detected host physical RAM in bytes."""
 
+    def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
+        """Query auditpol subcategory setting by GUID (e.g. 'Success and Failure', 'No Auditing')."""
+
+    def set_auditpol_subcategory(self, subcategory_guid: str, success: bool, failure: bool) -> bool:
+        """Configure auditpol subcategory by GUID via auditpol.exe /set."""
+
+    def backup_auditpol(self, output_csv: Path) -> bool:
+        """Export auditpol policy backup via auditpol.exe /backup."""
+
+    def restore_auditpol(self, input_csv: Path) -> bool:
+        """Restore auditpol policy backup via auditpol.exe /restore."""
+
+    def get_event_log_config(self, channel: str) -> tuple[bool | None, int | None]:
+        """Return (enabled, max_size_bytes) for an Event Log channel via wevtutil.exe gl /f:xml."""
+
+    def set_event_log_config(
+        self,
+        channel: str,
+        enabled: bool | None = None,
+        max_size_bytes: int | None = None,
+    ) -> bool:
+        """Configure Event Log channel enabled/maxSize via wevtutil.exe sl."""
+
+    def is_firewall_group_enabled(self, registry: RegistryBackend, group_resource_id: str) -> bool | None:
+        """Return True if any firewall rule in the resource-ID group is active."""
+
+    def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
+        """Enable or disable a Windows Firewall rule group by resource ID via netsh.exe."""
+
+    def export_firewall_policy(self, output_wfw: Path) -> bool:
+        """Export Windows Firewall policy via netsh.exe advfirewall export."""
+
+    def import_firewall_policy(self, input_wfw: Path) -> bool:
+        """Import Windows Firewall policy via netsh.exe advfirewall import."""
+
+    def is_dir_case_sensitive(self, directory: str) -> bool | None:
+        """Return True if directory has NTFS case sensitivity enabled."""
+
+    def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
+        """Enable or disable NTFS case sensitivity via fsutil.exe."""
+
+    def is_hibernate_enabled(self, registry: RegistryBackend) -> bool | None:
+        """Return True if Windows hibernation is enabled."""
+
+    def set_hibernate_enabled(self, registry: RegistryBackend, enabled: bool) -> bool:
+        """Enable or disable hibernation via powercfg.exe /hibernate."""
+
+    def get_git_global_config(self, key: str) -> str | None:
+        """Read global git configuration value via git.exe config --global."""
+
+    def set_git_global_config(self, key: str, value: str | None) -> bool:
+        """Set or unset global git configuration value via git.exe config --global."""
+
+    def is_ssh_acl_restricted(self, path_str: str) -> bool:
+        """Return True if path ACL is restricted to the current user."""
+
+    def restrict_acl_to_current_user(self, path_str: str) -> bool:
+        """Restrict directory/file ACL to current user via icacls.exe."""
+
 
 class InMemorySystemBackend:
     """Deterministic fake system backend for unit testing on Linux and Windows."""
@@ -623,6 +737,9 @@ class InMemorySystemBackend:
             else {
                 r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser": True,
                 r"\Microsoft\Windows\Customer Experience Improvement Program\Consolidator": True,
+                r"\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip": True,
+                r"\Microsoft\Windows\Feedback\Siuf\DmClient": True,
+                r"\Microsoft\Windows\Windows Error Reporting\QueueReporting": True,
             }
         )
         self.optional_features: dict[str, bool] = dict(
@@ -637,6 +754,23 @@ class InMemorySystemBackend:
         self.wsl_commands_executed: list[tuple[list[str], str | None]] = []
         self.wsl_etc_conf: dict[str, str] = {}
         self.last_outcome: OperationOutcome | None = None
+        self.auditpol_subcategories: dict[str, str] = {}
+        self.auditpol_backups: dict[str, dict[str, str]] = {}
+        self.event_log_configs: dict[str, tuple[bool, int]] = {
+            "Security": (True, 20971520),
+            "Microsoft-Windows-PowerShell/Operational": (True, 15728640),
+            "Microsoft-Windows-Sysmon/Operational": (True, 67108864),
+            "Microsoft-Windows-TaskScheduler/Operational": (False, 1052672),
+            "Microsoft-Windows-DNS-Client/Operational": (False, 1052672),
+            "Microsoft-Windows-WMI-Activity/Operational": (True, 1052672),
+        }
+        self.firewall_groups: dict[str, bool] = {}
+        self.firewall_exports: dict[str, dict[str, bool]] = {}
+        self.case_sensitive_dirs: dict[str, bool] = {}
+        self.hibernate_enabled: bool = True
+        self.git_global_config: dict[str, str] = {}
+        self.git_installed: bool = True
+        self.restricted_acls: set[str] = set()
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         ok_b, build_val = _safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
@@ -774,6 +908,116 @@ class InMemorySystemBackend:
     def get_total_memory_bytes(self) -> int:
         return self.total_memory_bytes
 
+    def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
+        guid_key = subcategory_guid.upper()
+        return self.auditpol_subcategories.get(guid_key, "No Auditing")
+
+    def set_auditpol_subcategory(self, subcategory_guid: str, success: bool, failure: bool) -> bool:
+        guid_key = subcategory_guid.upper()
+        if success and failure:
+            val = "Success and Failure"
+        elif success:
+            val = "Success"
+        elif failure:
+            val = "Failure"
+        else:
+            val = "No Auditing"
+        self.auditpol_subcategories[guid_key] = val
+        return True
+
+    def backup_auditpol(self, output_csv: Path) -> bool:
+        self.auditpol_backups[str(output_csv)] = dict(self.auditpol_subcategories)
+        return True
+
+    def restore_auditpol(self, input_csv: Path) -> bool:
+        saved = self.auditpol_backups.get(str(input_csv))
+        if saved is not None:
+            self.auditpol_subcategories = dict(saved)
+            return True
+        return False
+
+    def get_event_log_config(self, channel: str) -> tuple[bool | None, int | None]:
+        return self.event_log_configs.get(channel, (False, 1052672))
+
+    def set_event_log_config(
+        self,
+        channel: str,
+        enabled: bool | None = None,
+        max_size_bytes: int | None = None,
+    ) -> bool:
+        cur_en, cur_sz = self.event_log_configs.get(channel, (False, 1052672))
+        new_en = enabled if enabled is not None else cur_en
+        new_sz = max_size_bytes if max_size_bytes is not None else cur_sz
+        self.event_log_configs[channel] = (new_en, new_sz)
+        return True
+
+    def is_firewall_group_enabled(self, registry: RegistryBackend, group_resource_id: str) -> bool | None:
+        return self.firewall_groups.get(group_resource_id, True)
+
+    def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
+        self.firewall_groups[group_resource_id] = enabled
+        return True
+
+    def export_firewall_policy(self, output_wfw: Path) -> bool:
+        self.firewall_exports[str(output_wfw)] = dict(self.firewall_groups)
+        return True
+
+    def import_firewall_policy(self, input_wfw: Path) -> bool:
+        saved = self.firewall_exports.get(str(input_wfw))
+        if saved is not None:
+            self.firewall_groups = dict(saved)
+            return True
+        return False
+
+    def is_dir_case_sensitive(self, directory: str) -> bool | None:
+        return self.case_sensitive_dirs.get(directory, False)
+
+    def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
+        if not enabled:
+            p = Path(directory)
+            if p.is_dir() and any(p.iterdir()):
+                return False
+        self.case_sensitive_dirs[directory] = enabled
+        return True
+
+    def is_hibernate_enabled(self, registry: RegistryBackend) -> bool | None:
+        val = registry.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled")
+        if val is not None and isinstance(val[0], int):
+            return val[0] == 1
+        return self.hibernate_enabled
+
+    def set_hibernate_enabled(self, registry: RegistryBackend, enabled: bool) -> bool:
+        self.hibernate_enabled = enabled
+        registry.set_value(
+            HIVE_HKLM,
+            r"SYSTEM\CurrentControlSet\Control\Power",
+            "HibernateEnabled",
+            1 if enabled else 0,
+            REG_DWORD,
+        )
+        return True
+
+    def get_git_global_config(self, key: str) -> str | None:
+        if not self.git_installed:
+            return None
+        return self.git_global_config.get(key)
+
+    def set_git_global_config(self, key: str, value: str | None) -> bool:
+        if not self.git_installed:
+            return False
+        if value is None:
+            self.git_global_config.pop(key, None)
+        else:
+            self.git_global_config[key] = value
+        return True
+
+    def is_ssh_acl_restricted(self, path_str: str) -> bool:
+        return path_str in self.restricted_acls
+
+    def restrict_acl_to_current_user(self, path_str: str) -> bool:
+        self.restricted_acls.add(path_str)
+        return True
+
 
 class NativeSystemBackend:
     """Native Windows/WSL system backend using ctypes, winreg, and direct Win32 executables."""
@@ -829,9 +1073,14 @@ class NativeSystemBackend:
 
     @staticmethod
     def _classify_cmd_failure(returncode: int, stdout: str, stderr: str) -> OperationStatus:
-        """Classify non-zero native command failures using exit/Win32 codes first, then en-US text fallback."""
+        """Classify non-zero native command failures using exit codes and HRESULT hex codes only (locale-safe)."""
         low_err = f"{stderr}\n{stdout}".lower()
-        if returncode in (5, 740, -2147024891) or "0x80070005" in low_err or "win32 error 5" in low_err:
+        if (
+            returncode in (5, 740, 1314, -2147024891)
+            or "0x80070005" in low_err
+            or "0x00000522" in low_err
+            or "win32 error 5" in low_err
+        ):
             return OperationStatus.ACCESS_DENIED
         if returncode in (1260, 1625, -2147023636) or "0x800704ec" in low_err:
             return OperationStatus.BLOCKED_BY_POLICY
@@ -839,11 +1088,6 @@ class NativeSystemBackend:
             return OperationStatus.TOOL_MISSING
         if returncode in (124, 1460):
             return OperationStatus.TIMEOUT
-        # Fallback for en-US Windows locales when tools exit with generic code 1
-        if "access is denied" in low_err or "administrator" in low_err or "elevation" in low_err:
-            return OperationStatus.ACCESS_DENIED
-        if "blocked" in low_err or "policy" in low_err:
-            return OperationStatus.BLOCKED_BY_POLICY
         return OperationStatus.UNKNOWN
 
     def _terminate_process_tree(self, pid: int) -> None:
@@ -1044,9 +1288,6 @@ class NativeSystemBackend:
         xml_match = re.search(r"<enabled>\s*(true|false)\s*</enabled>", lower_out)
         if xml_match is not None:
             return xml_match.group(1) == "true"
-        state_match = re.search(r"scheduled task state\s*:\s*(enabled|disabled)\b", lower_out)
-        if state_match is not None:
-            return state_match.group(1) == "enabled"
         return None
 
     def set_scheduled_task_enabled(self, task_path: str, enabled: bool) -> bool:
@@ -1274,12 +1515,265 @@ class NativeSystemBackend:
                     return max(4 * GIB_BYTES, int(mem_kb.value) * 1024)
             except Exception:
                 pass
-        try:
-            page_size = os.sysconf("SC_PAGE_SIZE")
-            page_count = os.sysconf("SC_PHYS_PAGES")
-            return max(4 * GIB_BYTES, int(page_size) * int(page_count))
-        except (AttributeError, ValueError, OSError):
-            return 16 * GIB_BYTES
+        sysconf = getattr(os, "sysconf", None)
+        if callable(sysconf):
+            try:
+                page_size = sysconf("SC_PAGE_SIZE")
+                page_count = sysconf("SC_PHYS_PAGES")
+                return max(4 * GIB_BYTES, int(page_size) * int(page_count))
+            except (AttributeError, ValueError, OSError):
+                pass
+        return 16 * GIB_BYTES
+
+    @staticmethod
+    def _sys32_exe(exe_name: str) -> str:
+        """Resolve a system binary from %SystemRoot%\\System32 so a hostile PATH cannot substitute it."""
+        sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+        cand = Path(sys_root) / "System32" / exe_name
+        return str(cand) if cand.is_file() else exe_name
+
+    @staticmethod
+    def _resolve_git_exe() -> str | None:
+        """Resolve git.exe from trusted Program Files / user Winget paths first, then PATH."""
+        prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        candidates = [
+            Path(prog) / "Git" / "cmd" / "git.exe",
+            Path(local_app) / "Programs" / "Git" / "cmd" / "git.exe" if local_app else None,
+        ]
+        for cand in candidates:
+            if cand is not None and cand.is_file():
+                return str(cand)
+        import shutil
+
+        return shutil.which("git.exe") or shutil.which("git")
+
+    def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
+        if self._platform != "win32":
+            return None
+        guid_arg = subcategory_guid if subcategory_guid.startswith("{") else f"{{{subcategory_guid}}}"
+        res = self._run_native_cmd([self._sys32_exe("auditpol.exe"), "/get", f"/subcategory:{guid_arg}", "/r", "/v"])
+        if res.returncode != 0:
+            return None
+        value_map = {
+            "0": "No Auditing",
+            "1": "Success",
+            "2": "Failure",
+            "3": "Success and Failure",
+        }
+        for line in res.stdout.splitlines():
+            if guid_arg.lower() in line.lower():
+                parts = [p.strip().strip('"') for p in line.split(",")]
+                if parts and parts[-1] in value_map:
+                    return value_map[parts[-1]]
+                if len(parts) >= 5:
+                    return parts[4]
+        return None
+
+    def set_auditpol_subcategory(self, subcategory_guid: str, success: bool, failure: bool) -> bool:
+        if self._platform != "win32":
+            return False
+        guid_arg = subcategory_guid if subcategory_guid.startswith("{") else f"{{{subcategory_guid}}}"
+        succ_flag = "enable" if success else "disable"
+        fail_flag = "enable" if failure else "disable"
+        res = self._run_native_cmd(
+            [
+                self._sys32_exe("auditpol.exe"),
+                "/set",
+                f"/subcategory:{guid_arg}",
+                f"/success:{succ_flag}",
+                f"/failure:{fail_flag}",
+            ]
+        )
+        return res.returncode == 0
+
+    def backup_auditpol(self, output_csv: Path) -> bool:
+        if self._platform != "win32":
+            return False
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        if output_csv.exists():
+            output_csv.unlink()
+        res = self._run_native_cmd([self._sys32_exe("auditpol.exe"), "/backup", f"/file:{output_csv}"])
+        return res.returncode == 0
+
+    def restore_auditpol(self, input_csv: Path) -> bool:
+        if self._platform != "win32" or not input_csv.is_file():
+            return False
+        res = self._run_native_cmd([self._sys32_exe("auditpol.exe"), "/restore", f"/file:{input_csv}"])
+        return res.returncode == 0
+
+    def get_event_log_config(self, channel: str) -> tuple[bool | None, int | None]:
+        if self._platform != "win32":
+            return None, None
+        res = self._run_native_cmd([self._sys32_exe("wevtutil.exe"), "gl", channel, "/f:xml"])
+        if res.returncode != 0:
+            return None, None
+        out = res.stdout
+        en_attr = re.search(r'<channel\b[^>]*\benabled="(true|false)"', out, re.IGNORECASE)
+        en_tag = re.search(r"<enabled>\s*(true|false)\s*</enabled>", out, re.IGNORECASE)
+        enabled: bool | None = None
+        if en_attr is not None:
+            enabled = en_attr.group(1).lower() == "true"
+        elif en_tag is not None:
+            enabled = en_tag.group(1).lower() == "true"
+        sz_match = re.search(r"<maxSize>\s*(\d+)\s*</maxSize>", out, re.IGNORECASE)
+        max_size = int(sz_match.group(1)) if sz_match is not None else None
+        return enabled, max_size
+
+    def set_event_log_config(
+        self,
+        channel: str,
+        enabled: bool | None = None,
+        max_size_bytes: int | None = None,
+    ) -> bool:
+        if self._platform != "win32":
+            return False
+        cmd = [self._sys32_exe("wevtutil.exe"), "sl", channel]
+        if enabled is not None:
+            cmd.append(f"/e:{'true' if enabled else 'false'}")
+        if max_size_bytes is not None:
+            cmd.append(f"/ms:{max_size_bytes}")
+        res = self._run_native_cmd(cmd)
+        return res.returncode == 0
+
+    def is_firewall_group_enabled(self, registry: RegistryBackend, group_resource_id: str) -> bool | None:
+        fw_rules_key = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+        target_embed = f"embedctxt={group_resource_id.lower()}"
+        if hasattr(registry, "_values") and isinstance(registry._values, dict):
+            matched = False
+            for (vhive, vpath, _), (vdata, _) in registry._values.items():
+                if vhive == HIVE_HKLM and vpath.lower() == fw_rules_key.lower() and isinstance(vdata, str):
+                    low_val = vdata.lower()
+                    if target_embed in low_val:
+                        matched = True
+                        if "active=true" in low_val:
+                            return True
+            if matched:
+                return False
+        return False
+
+    def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
+        if self._platform != "win32":
+            return False
+        en_str = "yes" if enabled else "no"
+        res = self._run_native_cmd(
+            [
+                self._sys32_exe("netsh.exe"),
+                "advfirewall",
+                "firewall",
+                "set",
+                "rule",
+                f"group={group_resource_id}",
+                "new",
+                f"enable={en_str}",
+            ]
+        )
+        return res.returncode == 0
+
+    def export_firewall_policy(self, output_wfw: Path) -> bool:
+        if self._platform != "win32":
+            return False
+        output_wfw.parent.mkdir(parents=True, exist_ok=True)
+        if output_wfw.exists():
+            output_wfw.unlink()
+        res = self._run_native_cmd([self._sys32_exe("netsh.exe"), "advfirewall", "export", str(output_wfw)])
+        return res.returncode == 0
+
+    def import_firewall_policy(self, input_wfw: Path) -> bool:
+        if self._platform != "win32" or not input_wfw.is_file():
+            return False
+        res = self._run_native_cmd([self._sys32_exe("netsh.exe"), "advfirewall", "import", str(input_wfw)])
+        return res.returncode == 0
+
+    def is_dir_case_sensitive(self, directory: str) -> bool | None:
+        if self._platform != "win32":
+            return None
+        res = self._run_native_cmd([self._sys32_exe("fsutil.exe"), "file", "queryCaseSensitiveInfo", directory])
+        if res.returncode != 0:
+            return None
+        # fsutil outputs numeric/standard status; check last token or 1/enabled
+        low = res.stdout.strip().lower()
+        if "enabled" in low or low.endswith("1."):
+            return True
+        if "disabled" in low or low.endswith("0."):
+            return False
+        return None
+
+    def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
+        if self._platform != "win32":
+            return False
+        dir_path = Path(directory)
+        if not enabled and dir_path.is_dir() and any(dir_path.iterdir()):
+            return False
+        dir_path.mkdir(parents=True, exist_ok=True)
+        flag = "enable" if enabled else "disable"
+        res = self._run_native_cmd([self._sys32_exe("fsutil.exe"), "file", "setCaseSensitiveInfo", directory, flag])
+        return res.returncode == 0
+
+    def is_hibernate_enabled(self, registry: RegistryBackend) -> bool | None:
+        val = registry.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled")
+        if val is not None and isinstance(val[0], int):
+            return val[0] == 1
+        return None
+
+    def set_hibernate_enabled(self, registry: RegistryBackend, enabled: bool) -> bool:
+        if self._platform != "win32":
+            return False
+        flag = "on" if enabled else "off"
+        res = self._run_native_cmd([self._sys32_exe("powercfg.exe"), "/hibernate", flag])
+        return res.returncode == 0
+
+    def get_git_global_config(self, key: str) -> str | None:
+        git_exe = self._resolve_git_exe()
+        if git_exe is None:
+            return None
+        res = self._run_native_cmd([git_exe, "config", "--global", "--get", key])
+        if res.returncode != 0:
+            return None
+        return res.stdout.strip()
+
+    def set_git_global_config(self, key: str, value: str | None) -> bool:
+        git_exe = self._resolve_git_exe()
+        if git_exe is None:
+            return False
+        if value is None:
+            res = self._run_native_cmd([git_exe, "config", "--global", "--unset", key])
+            return res.returncode in (0, 5)
+        res = self._run_native_cmd([git_exe, "config", "--global", key, value])
+        return res.returncode == 0
+
+    def is_ssh_acl_restricted(self, path_str: str) -> bool:
+        expanded = os.path.expandvars(os.path.expanduser(path_str))
+        if not Path(expanded).exists():
+            return True
+        if self._platform != "win32":
+            return False
+        res = self._run_native_cmd([self._sys32_exe("icacls.exe"), expanded])
+        if res.returncode != 0:
+            return False
+        lines = [
+            ln.strip() for ln in res.stdout.splitlines() if ln.strip() and not ln.lower().startswith("successfully")
+        ]
+        return len(lines) == 1
+
+    def restrict_acl_to_current_user(self, path_str: str) -> bool:
+        if self._platform != "win32":
+            return False
+        expanded = os.path.expandvars(os.path.expanduser(path_str))
+        target = Path(expanded)
+        if not target.exists():
+            return True
+        username = os.environ.get("USERNAME") or os.getlogin()
+        res = self._run_native_cmd(
+            [
+                self._sys32_exe("icacls.exe"),
+                str(target),
+                "/inheritance:r",
+                "/grant:r",
+                f"{username}:(OI)(CI)F" if target.is_dir() else f"{username}:F",
+            ]
+        )
+        return res.returncode == 0
 
 
 def create_default_system_backend() -> SystemBackend:

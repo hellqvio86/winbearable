@@ -51,3 +51,13 @@ If you own the machine and still want a single-file `.exe`, you can build one wi
 ```cmd
 uv run --with pyinstaller pyinstaller --onefile --name wb src/winbearable/__main__.py
 ```
+
+## 6. Why is WSL2 not a security sandbox?
+
+By default (`convenient` mode), WSL2 mounts your Windows `C:` drive at `/mnt/c` and enables Windows binary interop (`[interop] enabled=true`), meaning any process inside WSL2 can read your Windows user profile and invoke `.exe` binaries on the host. Even in `strict` mode (`[automount] enabled=false`, `[interop] enabled=false`), all WSL2 distributions share a single utility VM kernel. Treat WSL2 as part of your user session, not a hostile-code sandbox.
+
+## 7. Why only Windows 11 Build `>= 26300` (`26H2+`) and NO Windows IoT / LTSC?
+
+We only support the exact Windows 11 desktop installation the maintainer runs (`26H2+`, Build `>= 26300`). Maintaining legacy compatibility shims for older Windows builds or embedded SKUs is out of scope:
+- **No Windows IoT (`IoTEnterprise`, `IoTEnterpriseS`) or LTSC (`EnterpriseS`):** IoT and LTSC editions strip or alter Store, Winget, servicing, and consumer policy surfaces. They are rejected with `unsupported_edition`.
+- **No older builds (`< 26300`):** Older Windows 11 builds and Windows 10 are rejected with `unsupported_build`.

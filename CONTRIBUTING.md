@@ -6,29 +6,33 @@ Thank you for contributing to `winbearable`!
 
 1. **Pure Native Python — Never Wrap PowerShell:**
    - Do not shell out to `powershell.exe` or `pwsh.exe`.
-   - Use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, or direct native binaries (`sc.exe`, `wsl.exe`, `taskkill.exe`) with `shell=False` argument lists.
-2. **Respect Policy Boundaries:**
+   - Use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, or direct native binaries (`sc.exe`, `schtasks.exe`, `dism.exe`, `winget.exe`, `wsl.exe`, `taskkill.exe`) with `shell=False` argument lists.
+2. **Only the Maintainer's Current Windows 11 Desktop (`>= 26300`, No IoT/LTSC):**
+   - `MIN_SUPPORTED_BUILD = 26300` (`DEFAULT_TESTED_BUILDS = (26300,)`).
+   - Never add legacy compatibility shims for older builds or Windows IoT (`IoTEnterprise` / `IoTEnterpriseS`) / LTSC (`EnterpriseS`).
+3. **Respect Policy Boundaries:**
    - Never attempt to bypass MDM, Group Policy, Defender Tamper Protection, AppLocker, or WDAC.
-   - Always include `policy_check_paths` on user tweaks that have a machine/user policy equivalent so `BLOCKED_BY_POLICY` is detected accurately.
-3. **Every Tweak Requires Full Metadata & Revert Tests:**
-   - Unique `id` (e.g., `onedrive.disable_tray_autorun`)
+   - Always include `policy_checks` (`PolicyConflictPath` entries) on user tweaks that have a machine/user policy equivalent so `BLOCKED_BY_POLICY` is detected accurately.
+4. **Every Tweak Requires Full Metadata, Provenance & Pure-Pytest Revert Tests:**
+   - Unique `tweak_id` in `src/winbearable/tweaks/catalog.py` (e.g., `onedrive.disable_tray_autorun`)
    - Clear `title` and `description`
    - Authoritative `source_url` (Microsoft Learn docs, CIS benchmark, or verified registry reference)
-   - `tested_builds` list (e.g., `[19045, 22631, 26100, 26200]`)
-   - `requires_admin` boolean and `risk` (`low`, `medium`, `high`)
-   - Unit test verifying `detect` -> `apply` -> `detect` -> `revert` -> `detect` against `InMemoryRegistryBackend`
+   - `min_build=MIN_SUPPORTED_BUILD` and `tested_builds=DEFAULT_TESTED_BUILDS` (`(26300,)`)
+   - `requires_admin`, `risk` (`RiskLevel.LOW`, `RiskLevel.MEDIUM`, `RiskLevel.HIGH`), `requires_reboot`, `requires_explorer_restart`, and `irreversible`
+   - Mandatory `TWEAK_PROVENANCE` entry in `src/winbearable/tweaks/provenance.py` (`rationale`, `authoritative_source`, `risk_rationale`, `impact`, `reversibility`, `verification_method`, `review_evidence`, `supported_editions`) so `validate_catalog(TWEAK_CATALOG) == []`
+   - Pure-`pytest` top-level `def test_*` functions (no `unittest.TestCase`) verifying `detect` -> `apply` -> `detect` -> `revert` -> `detect`, policy conflict, and unsupported build/edition against `InMemoryRegistryBackend` and `InMemorySystemBackend`
 
 ## Mandatory Pre-Commit & Dev Container Workflow (`uv`)
 
-We do **not** run `pytest` on native Windows Python or pay Microsoft for `windows-latest` CI runners. When developing on Windows, open the repository inside the Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) via WSL2/Docker.
+We never add paid `windows-latest` CI runners; GitHub Actions runs exclusively on `ubuntu-latest`. When developing on Windows, run inside the Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2, and run `make test-windows` on the host for real Win32 verification.
 
 **Every contributor and AI agent MUST install and run `.githooks/pre-commit` locally before every commit:**
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
 make hooks         # Install mandatory .githooks/pre-commit hook
-make pre-commit    # Run format check, ruff lint, mypy, pytest (>=80%), TruffleHog, and Trivy
+make pre-commit    # Run format check, ruff lint, mypy src, pytest (>=80%), TruffleHog, and Trivy
 make lint          # Run ruff check and ruff format --check
-make test          # Run mypy --strict and pytest with >=80% coverage
+make test          # Run mypy src and pytest with >=80% coverage
 make release-check # Run lint, test, TruffleHog, and Trivy
 ```

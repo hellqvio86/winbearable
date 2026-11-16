@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import difflib
 import io
 import json
 import sys
@@ -9,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .audit import build_doctor_blockers, run_security_audit
 from .backends import (
     RegistryBackend,
     SystemBackend,
@@ -35,21 +37,25 @@ from .engine import (
     IrreversibleActionError,
     apply_profile,
     calculate_hardening_score,
+    detect_tweak,
     evaluate_profile,
     inspect_defender_smartscreen_posture,
     inspect_vbs_credential_guard_posture,
+    is_managed_device,
     recover_incomplete_runs,
     rollback_runs,
 )
-from .models import EnvironmentInfo, TweakStatus, UnsupportedPlatformError, WslConfigSpec
+from .models import EnvironmentInfo, ObservationState, TweakStatus, UnsupportedPlatformError, WslConfigSpec
 from .profiles import (
     ProfileValidationError,
     generate_init_profile_toml,
+    get_builtin_profiles_dir,
     get_default_user_profile_path,
     load_profile,
 )
 from .state import StateStore, StateStoreError
 from .tui import launch_tui
+from .tweaks import TWEAK_CATALOG, get_all_tweaks, get_tweak
 from .uac import UacCancelledError, UacElevationError, run_elevated_wb
 from .wsl import (
     WslOperationError,
@@ -60,6 +66,8 @@ from .wsl import (
     install_wsl_distro,
     plan_or_apply_wsl,
     set_default_wsl_distro,
+    set_wsl_distro_sparse,
+    update_wsl,
 )
 
 
@@ -137,7 +145,9 @@ def _format_summary_markdown(summary: ApplySummary) -> str:
         f"{len(summary.already_applied_ids)} already applied, "
         f"{len(summary.skipped_admin_ids)} skipped (needs admin), "
         f"{len(summary.skipped_policy_ids)} blocked by policy, "
-        f"{len(summary.skipped_build_ids)} unsupported build."
+        f"{len(summary.skipped_build_ids)} unsupported build, "
+        f"{len(summary.skipped_edition_ids)} unsupported edition, "
+        f"{len(summary.skipped_managed_ids)} skipped (managed)."
     )
     irreversible_notes = [
         f"{item.tweak_id} ({op.operation_type}: {op.target})"
@@ -155,6 +165,74 @@ def _format_summary_markdown(summary: ApplySummary) -> str:
             "Run with `--apply` to execute these changes (registry backups and rollback state will be recorded)."
         )
     return "\n".join(lines) + "\n"
+
+
+def _parse_id_list(raw: str | None) -> set[str] | None:
+    if not raw:
+        return None
+    ids = {item.strip() for item in raw.split(",") if item.strip()}
+    for tid in sorted(ids):
+        if tid not in TWEAK_CATALOG:
+            matches = difflib.get_close_matches(tid, sorted(TWEAK_CATALOG.keys()), n=3, cutoff=0.4)
+            hint = f" Did you mean: {', '.join(matches)}?" if matches else ""
+            raise KeyError(f"Unknown tweak ID '{tid}'.{hint}")
+    return ids
+
+
+def _add_selection_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--only", default=None, help="Comma-separated tweak IDs to evaluate/apply")
+    p.add_argument("--skip", default=None, help="Comma-separated tweak IDs to skip")
+    p.add_argument("--category", default=None, help="Filter tweaks by category")
+    p.add_argument(
+        "--allow-managed",
+        action="store_true",
+        help="Allow machine-scope tweaks on domain/Entra/MDM-managed devices",
+    )
+
+
+_JSON_SCHEMAS: dict[str, dict[str, Any]] = {
+    "profile": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "winbearable TOML Profile v2",
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "extends": {"type": "string"},
+            "include": {"type": "array", "items": {"type": "string"}},
+            "wsl": {"type": "object"},
+            "tweaks": {"type": "object", "additionalProperties": {"type": "boolean"}},
+            "packages": {"type": "object"},
+            "params": {"type": "object"},
+        },
+        "additionalProperties": False,
+    },
+    "plan": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "wb plan / apply --json",
+        "type": "object",
+        "required": ["schema_version", "profile_name", "dry_run", "applied_ids", "results"],
+    },
+    "status": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "wb status --json",
+        "type": "object",
+        "required": ["schema_version", "profile", "environment", "results"],
+    },
+    "doctor": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "wb doctor --json",
+        "type": "object",
+        "required": ["schema_version", "version", "environment", "managed", "blockers", "audit", "wsl"],
+    },
+    "list": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "wb list --json",
+        "type": "object",
+        "required": ["schema_version", "count", "tweaks"],
+    },
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -182,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Return 2 on pending changes and 3 on policy-blocked tweaks",
     )
+    _add_selection_args(status_parser)
 
     # wb plan
     plan_parser = subparsers.add_parser("plan", help="Preview registry changes required to converge a profile")
@@ -192,6 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Return 2 on pending changes and 3 on policy-blocked tweaks",
     )
+    _add_selection_args(plan_parser)
 
     # wb apply
     apply_parser = subparsers.add_parser("apply", help="Apply a profile (dry-run unless --apply is passed)")
@@ -226,6 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
     )
     apply_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    _add_selection_args(apply_parser)
 
     # wb rollback
     rollback_parser = subparsers.add_parser("rollback", help="Revert changes from the last run (or --to <run-id>)")
@@ -264,6 +345,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write to file instead of ~/.config/winbearable/profile.toml",
     )
     init_parser.add_argument("--stdout", action="store_true", help="Print generated TOML to stdout")
+    init_parser.add_argument(
+        "--no-admin",
+        action="store_true",
+        help="Non-admin first-run path: select corp-safe/user-only and print IT request summary for WSL steps",
+    )
+
+    # wb list
+    list_parser = subparsers.add_parser("list", help="List catalog tweaks with optional filters")
+    list_parser.add_argument("--category", default=None, help="Filter by category")
+    admin_grp = list_parser.add_mutually_exclusive_group()
+    admin_grp.add_argument("--admin", action="store_true", help="Only tweaks requiring Administrator")
+    admin_grp.add_argument("--no-admin", action="store_true", help="Only user-scope tweaks")
+    list_parser.add_argument("--risk", choices=("low", "medium", "high"), default=None, help="Filter by risk level")
+    list_parser.add_argument("--profile", default=None, help="Filter by membership in a profile")
+    list_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    # wb show
+    show_parser = subparsers.add_parser("show", help="Show full definition, provenance, and live status for a tweak")
+    show_parser.add_argument("tweak_id", help="Tweak ID to inspect")
+    show_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    # wb schema
+    schema_parser = subparsers.add_parser("schema", help="Print JSON Schema for winbearable contracts")
+    schema_parser.add_argument("target", choices=tuple(_JSON_SCHEMAS.keys()), help="Schema target")
+
+    # wb audit
+    audit_parser = subparsers.add_parser("audit", help="Run read-only native security & posture checks")
+    audit_parser.add_argument("--category", default=None, help="Filter findings by category")
+    audit_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb tui
     tui_parser = subparsers.add_parser("tui", help="Launch optional Textual TUI")
@@ -275,6 +385,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     wsl_audit_p = wsl_sub.add_parser("audit", help="Audit WSL2 installation, distros, and .wslconfig")
     wsl_audit_p.add_argument("--wslconfig", default=None, help="Custom .wslconfig path")
+    wsl_audit_p.add_argument("--deep", action="store_true", help="Run deep per-distro exposure checks")
     wsl_audit_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     wsl_plan_p = wsl_sub.add_parser("plan", help="Preview merged .wslconfig (75%% host RAM) and /etc/wsl.conf")
@@ -355,6 +466,15 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_def_p.add_argument("--apply", action="store_true", help="Execute wsl.exe --set-default")
     wsl_def_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
+    wsl_upd_p = wsl_sub.add_parser("update", help="Update WSL2 kernel and set default WSL version to 2")
+    wsl_upd_p.add_argument("--apply", action="store_true", help="Execute wsl.exe --update")
+    wsl_upd_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    wsl_sp_p = wsl_sub.add_parser("sparse", help="Enable sparse VHD mode for a WSL2 distribution")
+    wsl_sp_p.add_argument("distro", nargs="?", default=DEFAULT_WSL_DISTRO, help="Target WSL distro")
+    wsl_sp_p.add_argument("--apply", action="store_true", help="Execute wsl.exe --manage --set-sparse")
+    wsl_sp_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
     return parser
 
 
@@ -425,7 +545,14 @@ def _run_cli_body(
                     "cis_passed": 0,
                     "cis_total": 0,
                 }
-            wsl_info = audit_wsl(env, system=sys_backend)
+            wsl_info = audit_wsl(env, system=sys_backend, registry=reg_backend)
+            security_findings = (
+                run_security_audit(env, reg_backend, sys_backend, wsl_audit_data=wsl_info)
+                if (env.is_windows or env.host_auditable)
+                else []
+            )
+            blockers = build_doctor_blockers(env, reg_backend, security_findings)
+            managed = is_managed_device(env)
             incomplete_runs = store.get_incomplete_runs()
             raw_history = getattr(sys_backend, "command_history", ())
             last_outcome = getattr(sys_backend, "last_outcome", None)
@@ -498,8 +625,11 @@ def _run_cli_body(
             payload = {
                 "version": __version__,
                 "environment": env.to_dict(),
+                "managed": managed,
+                "blockers": blockers,
                 "wsl": wsl_info,
                 "audit": audit,
+                "security_findings": [f.to_dict() for f in security_findings],
                 "defender_smartscreen_posture": posture,
                 "vbs_credential_guard_posture": vbs_cg,
                 "refugee_summary": refugee_summary,
@@ -591,11 +721,33 @@ def _run_cli_body(
                         f"({', '.join(f'{r.run_id}:{r.state}' for r in incomplete_runs)}). "
                         "Run `wb recover --apply` to clean up.\n"
                     )
+                edr_obs = env.observations.get("edr")
+                if edr_obs is not None and edr_obs.state == ObservationState.ENABLED:
+                    sys.stdout.write(
+                        f"WARNING: EDR/management agent detected ({edr_obs.evidence}) — "
+                        "service/audit/firewall changes may generate alerts.\n"
+                    )
+                if wsl_info.get("wsl_outdated"):
+                    sys.stdout.write(
+                        f"WARNING: WSL version {wsl_info.get('wsl_version')} is out of date; "
+                        "run `wb wsl update --apply`.\n"
+                    )
             return 0
 
         if args.command == "status":
             profile = load_profile(args.profile)
-            evaluations = evaluate_profile(profile, env, reg_backend, sys_backend)
+            only_ids = _parse_id_list(getattr(args, "only", None))
+            skip_ids = _parse_id_list(getattr(args, "skip", None))
+            evaluations = evaluate_profile(
+                profile,
+                env,
+                reg_backend,
+                sys_backend,
+                only_ids=only_ids,
+                skip_ids=skip_ids,
+                category_filter=getattr(args, "category", None),
+                allow_managed=bool(getattr(args, "allow_managed", False)),
+            )
             if args.json:
                 _print_json(
                     {
@@ -615,6 +767,9 @@ def _run_cli_body(
 
         if args.command == "plan":
             profile = load_profile(args.profile)
+            only_ids = _parse_id_list(getattr(args, "only", None))
+            skip_ids = _parse_id_list(getattr(args, "skip", None))
+            allow_managed = bool(getattr(args, "allow_managed", False))
             summary = apply_profile(
                 profile=profile,
                 env=env,
@@ -623,11 +778,20 @@ def _run_cli_body(
                 state_store=store,
                 dry_run=True,
                 allow_high_risk=True,
+                allow_managed=allow_managed,
+                only_ids=only_ids,
+                skip_ids=skip_ids,
+                category_filter=getattr(args, "category", None),
             )
             if args.json:
                 _print_json(summary.to_dict())
             else:
                 sys.stdout.write(_format_summary_markdown(summary))
+                if is_managed_device(env) and not allow_managed:
+                    sys.stdout.write(
+                        "Notice: managed device detected (domain/Entra/MDM) — machine-scope tweaks skipped "
+                        "(pass `--allow-managed` to override).\n"
+                    )
                 if any(not op.reversible for r in summary.results for op in r.operations):
                     sys.stdout.write(
                         "Note: non-compensable side effects (process stops / uninstalls) cannot be rolled back.\n"
@@ -644,11 +808,23 @@ def _run_cli_body(
             if args.apply:
                 _require_windows_for_mutation(env, "wb apply --apply")
             profile = load_profile(args.profile)
+            only_ids = _parse_id_list(getattr(args, "only", None))
+            skip_ids = _parse_id_list(getattr(args, "skip", None))
+            allow_managed = bool(getattr(args, "allow_managed", False))
             if args.apply and not env.is_admin and not args.uac_output:
                 if args.elevate:
                     return _relay_elevated_uac(raw_argv)
                 if not args.json and sys.stdin.isatty():
-                    preview_eval = evaluate_profile(profile, env, reg_backend, sys_backend)
+                    preview_eval = evaluate_profile(
+                        profile,
+                        env,
+                        reg_backend,
+                        sys_backend,
+                        only_ids=only_ids,
+                        skip_ids=skip_ids,
+                        category_filter=getattr(args, "category", None),
+                        allow_managed=allow_managed,
+                    )
                     admin_needed = [item for item in preview_eval if item.status == TweakStatus.REQUIRES_ADMIN]
                     if admin_needed:
                         answer = input(
@@ -670,6 +846,10 @@ def _run_cli_body(
                 allow_high_risk=bool(args.allow_high_risk),
                 allow_irreversible=bool(args.allow_irreversible),
                 force_kill_processes=bool(args.force_kill),
+                allow_managed=allow_managed,
+                only_ids=only_ids,
+                skip_ids=skip_ids,
+                category_filter=getattr(args, "category", None),
             )
             if args.json:
                 _print_json(summary.to_dict())
@@ -747,7 +927,13 @@ def _run_cli_body(
             return 0
 
         if args.command == "init":
-            toml_text = generate_init_profile_toml(env)
+            if getattr(args, "no_admin", False):
+                from dataclasses import replace as _dc_replace
+
+                env_no_admin = _dc_replace(env, is_admin=False)
+                toml_text = generate_init_profile_toml(env_no_admin)
+            else:
+                toml_text = generate_init_profile_toml(env)
             if args.stdout:
                 sys.stdout.write(toml_text)
                 return 0
@@ -755,6 +941,125 @@ def _run_cli_body(
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(toml_text, encoding="utf-8")
             sys.stdout.write(f"Generated profile at {out_path}\n")
+            if getattr(args, "no_admin", False):
+                sys.stdout.write(
+                    "\nNon-admin next steps:\n"
+                    "  1. Run `wb apply --profile user-only --apply` (no admin required).\n"
+                    "  2. Ask IT once to enable Windows optional features `Microsoft-Windows-Subsystem-Linux` "
+                    "and `VirtualMachinePlatform` (or run `wsl --install` as Administrator).\n"
+                )
+            return 0
+
+        if args.command == "list":
+            tweaks = get_all_tweaks()
+            prof_filter: set[str] | None = None
+            if args.profile:
+                loaded_p = load_profile(args.profile)
+                prof_filter = {tid for tid, enabled in loaded_p.tweaks.items() if enabled}
+            filtered = []
+            for t in tweaks:
+                if args.category and t.category.lower() != args.category.lower():
+                    continue
+                if args.admin and not t.requires_admin:
+                    continue
+                if args.no_admin and t.requires_admin:
+                    continue
+                if args.risk and str(t.risk) != args.risk:
+                    continue
+                if prof_filter is not None and t.tweak_id not in prof_filter:
+                    continue
+                filtered.append(t)
+            if args.json:
+                _print_json(
+                    {
+                        "count": len(filtered),
+                        "tweaks": [
+                            {
+                                "tweak_id": t.tweak_id,
+                                "category": t.category,
+                                "title": t.title,
+                                "risk": str(t.risk),
+                                "requires_admin": t.requires_admin,
+                                "irreversible": t.irreversible,
+                            }
+                            for t in filtered
+                        ],
+                    }
+                )
+            else:
+                for t in filtered:
+                    adm = "admin" if t.requires_admin else "user"
+                    sys.stdout.write(f"{t.tweak_id} [{t.category} | {t.risk} | {adm}] - {t.title}\n")
+            return 0
+
+        if args.command == "show":
+            tweak = get_tweak(args.tweak_id)
+            detect_res = detect_tweak(tweak, env, reg_backend, sys_backend, allow_managed=True)
+            memberships: list[str] = []
+            p_dir = get_builtin_profiles_dir()
+            if p_dir.is_dir():
+                for p_file in sorted(p_dir.glob("*.toml")):
+                    loaded = load_profile(str(p_file))
+                    if loaded.tweaks.get(tweak.tweak_id):
+                        memberships.append(loaded.name)
+            prov_dict: dict[str, Any] | None = None
+            if tweak.provenance is not None:
+                prov_dict = {
+                    "rationale": tweak.provenance.rationale,
+                    "authoritative_source": tweak.provenance.authoritative_source,
+                    "risk_rationale": tweak.provenance.risk_rationale,
+                    "impact": tweak.provenance.impact,
+                    "reversibility": tweak.provenance.reversibility,
+                    "verification_method": tweak.provenance.verification_method,
+                    "review_evidence": tweak.provenance.review_evidence,
+                    "supported_editions": list(tweak.provenance.supported_editions),
+                }
+            payload = {
+                "tweak_id": tweak.tweak_id,
+                "category": tweak.category,
+                "title": tweak.title,
+                "description": tweak.description,
+                "source_url": tweak.source_url,
+                "risk": str(tweak.risk),
+                "requires_admin": tweak.requires_admin,
+                "irreversible": tweak.irreversible,
+                "requires_reboot": tweak.requires_reboot,
+                "requires_explorer_restart": tweak.requires_explorer_restart,
+                "profiles": memberships,
+                "provenance": prov_dict,
+                "current_status": detect_res.to_dict(),
+            }
+            if args.json:
+                _print_json(payload)
+            else:
+                sys.stdout.write(
+                    f"{tweak.tweak_id}: {tweak.title}\n"
+                    f"  Category: {tweak.category} | Risk: {tweak.risk} | Admin: {tweak.requires_admin}\n"
+                    f"  Profiles: {', '.join(memberships) or 'opt-in'}\n"
+                    f"  Status: {detect_res.status} ({detect_res.detail})\n"
+                )
+            return 0
+
+        if args.command == "schema":
+            sys.stdout.write(json.dumps(_JSON_SCHEMAS[args.target], indent=2, sort_keys=True) + "\n")
+            return 0
+
+        if args.command == "audit":
+            wsl_info = audit_wsl(env, system=sys_backend, registry=reg_backend)
+            findings = run_security_audit(
+                env,
+                reg_backend,
+                sys_backend,
+                category_filter=args.category,
+                wsl_audit_data=wsl_info,
+            )
+            if args.json:
+                _print_json({"count": len(findings), "findings": [f.to_dict() for f in findings]})
+            else:
+                for f in findings:
+                    sys.stdout.write(
+                        f"[{f.severity.upper()}] {f.check_id} ({f.observation.state}): {f.observation.evidence}\n"
+                    )
             return 0
 
         if args.command == "tui":
@@ -763,7 +1068,13 @@ def _run_cli_body(
 
         wslconfig_path = Path(args.wslconfig) if getattr(args, "wslconfig", None) else None
         if args.wsl_command == "audit":
-            wsl_report = audit_wsl(env, wslconfig_path=wslconfig_path, system=sys_backend)
+            wsl_report = audit_wsl(
+                env,
+                wslconfig_path=wslconfig_path,
+                system=sys_backend,
+                registry=reg_backend,
+                deep=bool(getattr(args, "deep", False)),
+            )
             if args.json:
                 _print_json(wsl_report)
             else:
@@ -777,10 +1088,36 @@ def _run_cli_body(
                     sys.stdout.write(f"WARNING: {wsl_report['fedora_vscode_warning']}\n")
             return 0
 
-        if args.wsl_command in {"install", "export", "import", "baseline", "apply", "set-default"} and bool(
-            getattr(args, "apply", False)
-        ):
+        if args.wsl_command in {
+            "install",
+            "export",
+            "import",
+            "baseline",
+            "apply",
+            "set-default",
+            "update",
+            "sparse",
+        } and bool(getattr(args, "apply", False)):
             _require_windows_for_mutation(env, f"wb wsl {args.wsl_command} --apply")
+
+        if args.wsl_command == "update":
+            upd_res = update_wsl(system=sys_backend, dry_run=not args.apply)
+            if args.json:
+                _print_json(upd_res)
+            else:
+                tag = "DRY-RUN" if upd_res["dry_run"] else "EXECUTED"
+                for c in upd_res["commands"]:
+                    sys.stdout.write(f"[{tag}] {' '.join(c)}\n")
+            return 1 if upd_res["returncode"] != 0 else 0
+
+        if args.wsl_command == "sparse":
+            sp_res = set_wsl_distro_sparse(system=sys_backend, distro=args.distro, sparse=True, dry_run=not args.apply)
+            if args.json:
+                _print_json(sp_res)
+            else:
+                tag = "DRY-RUN" if sp_res["dry_run"] else "EXECUTED"
+                sys.stdout.write(f"[{tag}] {' '.join(sp_res['command'])}\n")
+            return 1 if sp_res["returncode"] != 0 else 0
 
         if args.wsl_command == "set-default":
             def_res = set_default_wsl_distro(

@@ -84,12 +84,13 @@ def run_elevated_wb(
         elevated_args = build_elevated_cmdline_args(argv, out_path)
         params = subprocess.list2cmdline(["-m", "winbearable", *elevated_args])
 
+        resolved_exe = str(Path(executable or sys.executable).resolve())
         sei = _ShellExecuteInfoW()
         sei.cbSize = ctypes.sizeof(_ShellExecuteInfoW)
         sei.fMask = SEE_MASK_NOCLOSEPROCESS
         sei.hwnd = None
         sei.lpVerb = "runas"
-        sei.lpFile = executable or sys.executable
+        sei.lpFile = resolved_exe
         sei.lpParameters = params
         sei.lpDirectory = cwd or os.getcwd()
         sei.nShow = SW_HIDE

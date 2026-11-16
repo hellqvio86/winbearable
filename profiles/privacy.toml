@@ -1,0 +1,18 @@
+name = "privacy"
+extends = "owner"
+description = "Privacy and anti-nag baseline extending owner with TWK-B controls."
+
+[tweaks]
+"privacy.language_list_optout" = true
+"privacy.disable_app_launch_tracking" = true
+"privacy.disable_feedback_prompts" = true
+"privacy.disable_inking_typing_collection" = true
+"privacy.disable_clipboard_cloud_machine" = true
+"privacy.disable_spotlight_user" = true
+"privacy.disable_advertising_id_machine" = true
+"privacy.disable_error_reporting" = true
+"privacy.delivery_optimization_http_only" = true
+"start.disable_lockscreen_tips" = true
+"start.disable_settings_suggestions" = true
+"start.disable_welcome_and_tips" = true
+"taskbar.disable_widgets_machine" = true

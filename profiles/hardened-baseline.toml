@@ -1,0 +1,32 @@
+name = "hardened-baseline"
+extends = "owner"
+description = "Comprehensive network, auth, Defender audit, service, and audit-policy hardening."
+
+[tweaks]
+"hardening.update_no_autoreboot_with_users" = true
+"services.disable_diagtrack" = true
+"services.disable_dmwappushservice" = true
+"services.disable_remote_registry" = true
+"services.disable_ssdp_upnp" = true
+"services.disable_wer" = true
+"services.disable_xbox" = true
+"services.disable_maps_retail" = true
+"services.disable_winrm" = true
+"telemetry.disable_extended_tasks" = true
+"hardening.smb_require_signing" = true
+"hardening.smb_block_insecure_guest" = true
+"hardening.disable_netbios_tcp" = true
+"hardening.harden_ip_stack" = true
+"hardening.ntlm_hardening" = true
+"hardening.wdigest_off" = true
+"hardening.uac_secure_desktop" = true
+"hardening.disable_rdp" = true
+"hardening.firewall_log_dropped" = true
+"hardening.firewall_disable_risky_groups" = true
+"hardening.defender_network_protection_audit" = true
+"hardening.defender_asr_audit" = true
+"hardening.enforce_smartscreen" = true
+"hardening.audit_core_subcategories" = true
+"hardening.powershell_module_logging" = true
+"hardening.event_log_sizes" = true
+"hardening.enable_operational_logs" = true
