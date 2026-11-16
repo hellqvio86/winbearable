@@ -122,3 +122,88 @@ def test_wsl_plan_and_apply_strict_and_convenient(
     assert audit_res["wslconfig_exists"]
     assert audit_res["mirrored_networking"]
     assert audit_res["firewall_enabled"]
+    assert audit_res["default_distro_recommendation"] == "Ubuntu"
+    assert audit_res["fedora_vscode_warning"] is None
+
+
+def test_wsl_default_distro_is_ubuntu_and_warns_on_fedora_only(
+    tmp_path: Path,
+    registry: InMemoryRegistryBackend,
+) -> None:
+    """Default WSL distro is Ubuntu; install sets it as default and audit warns if only Fedora is present."""
+    from winbearable.wsl import apply_wsl_linux_baseline, install_wsl_distro
+
+    fedora_sys = InMemorySystemBackend(wsl_distros=("FedoraLinux-42",))
+    fedora_env = fedora_sys.detect_environment(registry)
+    audit_fedora = audit_wsl(fedora_env, wslconfig_path=tmp_path / ".wslconfig")
+    assert audit_fedora["fedora_vscode_warning"] is not None
+    assert "Ubuntu" in audit_fedora["fedora_vscode_warning"]
+
+    inst_res = install_wsl_distro(fedora_sys, dry_run=False)
+    assert inst_res["distro"] == "Ubuntu"
+    assert inst_res["returncode"] == 0
+    assert inst_res["default_returncode"] == 0
+    executed = [cmd for cmd, _ in fedora_sys.wsl_commands_executed]
+    assert ["--install", "-d", "Ubuntu"] in executed
+    assert ["--set-default", "Ubuntu"] in executed
+
+    base_res = apply_wsl_linux_baseline(fedora_sys, dry_run=True)
+    assert base_res["distro"] == "Ubuntu"
+
+
+def test_detect_default_wsl_distro_flags_fedora_default(
+    tmp_path: Path,
+    registry: InMemoryRegistryBackend,
+) -> None:
+    """detect_default_wsl_distro parses `wsl.exe --list --verbose` and flags Fedora default."""
+    from winbearable.backends.system import CommandResult
+    from winbearable.wsl import set_default_wsl_distro
+
+    sys_b = InMemorySystemBackend(wsl_distros=("Ubuntu", "FedoraLinux-42"))
+
+    def _fake_wsl(args: list[str], input_text: str | None = None) -> CommandResult:
+        if args == ["--list", "--verbose"]:
+            return CommandResult(
+                args=("wsl.exe", *args),
+                returncode=0,
+                stdout=(
+                    "  NAME              STATE           VERSION\n"
+                    "  Ubuntu            Stopped         2\n"
+                    "* FedoraLinux-42    Running         2\n"
+                ),
+                stderr="",
+            )
+        return CommandResult(args=("wsl.exe", *args), returncode=0, stdout="", stderr="")
+
+    sys_b.run_wsl_command = _fake_wsl  # type: ignore[method-assign]
+    env = sys_b.detect_environment(registry)
+    report = audit_wsl(env, wslconfig_path=tmp_path / ".wslconfig", system=sys_b)
+    assert report["default_wsl_distro"] == "FedoraLinux-42"
+    assert report["default_distro_is_fedora"] is True
+    assert report["fedora_vscode_warning"] is not None
+
+    dry_def = set_default_wsl_distro(sys_b, dry_run=True)
+    assert dry_def["distro"] == "Ubuntu"
+    assert dry_def["dry_run"] is True
+
+
+def test_wsl_baseline_distro_aware_package_manager() -> None:
+    """P2.1: apply_wsl_linux_baseline detects package manager and handles unsupported distros cleanly."""
+    from winbearable.backends.system import CommandResult
+    from winbearable.wsl import WslOperationError, apply_wsl_linux_baseline
+
+    sys_b = InMemorySystemBackend(wsl_distros=("CustomLinux",))
+
+    def _fake_unsupported(args: list[str], input_text: str | None = None) -> CommandResult:
+        if "command -v apt-get" in (args[-1] if args else ""):
+            return CommandResult(args=("wsl.exe", *args), returncode=0, stdout="unsupported\n", stderr="")
+        return CommandResult(args=("wsl.exe", *args), returncode=0, stdout="", stderr="")
+
+    sys_b.run_wsl_command = _fake_unsupported  # type: ignore[method-assign]
+
+    res = apply_wsl_linux_baseline(sys_b, distro="CustomLinux", auto_patch=True, dry_run=False)
+    assert res["package_manager"] == "unsupported"
+    assert any("Unsupported package manager" in w for w in res["warnings"])
+
+    with pytest.raises(WslOperationError, match="Unsupported package manager"):
+        apply_wsl_linux_baseline(sys_b, distro="CustomLinux", dev_packages=True, dry_run=False)

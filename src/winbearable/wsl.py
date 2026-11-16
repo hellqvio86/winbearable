@@ -12,6 +12,7 @@ from typing import Any
 
 from .backends.registry import is_wsl2
 from .backends.system import GIB_BYTES, SystemBackend
+from .const import DEFAULT_WSL_DISTRO
 from .models import EnvironmentInfo, WslConfigSpec
 
 
@@ -453,7 +454,33 @@ def audit_linux_side(
     }
 
 
-def audit_wsl(env: EnvironmentInfo, wslconfig_path: Path | None = None) -> dict[str, Any]:
+def detect_default_wsl_distro(
+    system: SystemBackend | None,
+    env: EnvironmentInfo,
+) -> str | None:
+    """Parse `wsl.exe --list --verbose` output to determine the active default distro (`*`)."""
+    if system is None or not env.wsl_installed or not env.is_windows:
+        return None
+    try:
+        res = system.run_wsl_command(["--list", "--verbose"])
+    except OSError:
+        return None
+    if res.returncode != 0 or not res.stdout:
+        return None
+    for raw_line in res.stdout.splitlines():
+        cleaned = raw_line.replace("\x00", "").lstrip("\ufeff").strip()
+        if cleaned.startswith("*"):
+            tokens = cleaned[1:].strip().split()
+            if tokens:
+                return tokens[0]
+    return None
+
+
+def audit_wsl(
+    env: EnvironmentInfo,
+    wslconfig_path: Path | None = None,
+    system: SystemBackend | None = None,
+) -> dict[str, Any]:
     """Audit host WSL2 status, distros, .wslconfig presence, and Linux-side configuration."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     has_wslconfig = target_wslconfig.is_file()
@@ -461,10 +488,25 @@ def audit_wsl(env: EnvironmentInfo, wslconfig_path: Path | None = None) -> dict[
     sections = _parse_ini_sections(wslconfig_text) if has_wslconfig else {}
     wsl2_sec = sections.get("wsl2", {})
 
+    default_wsl_distro = detect_default_wsl_distro(system, env)
+    has_fedora = any(d.lower().startswith("fedora") for d in env.wsl_distros)
+    has_ubuntu = any(d.lower().startswith("ubuntu") for d in env.wsl_distros)
+    default_is_fedora = bool(default_wsl_distro and default_wsl_distro.lower().startswith("fedora"))
+    fedora_warning = (
+        "Modern Fedora WSL distros can break VS Code Remote-WSL; "
+        f"Ubuntu ('{DEFAULT_WSL_DISTRO}') is recommended as the default WSL distro."
+        if (default_is_fedora or (has_fedora and not has_ubuntu))
+        else None
+    )
+
     return {
         "wsl_installed": env.wsl_installed,
         "wsl_version": env.wsl_version,
         "distros": list(env.wsl_distros),
+        "default_wsl_distro": default_wsl_distro,
+        "default_distro_is_fedora": default_is_fedora,
+        "default_distro_recommendation": DEFAULT_WSL_DISTRO,
+        "fedora_vscode_warning": fedora_warning,
         "wslconfig_path": str(target_wslconfig),
         "wslconfig_exists": has_wslconfig,
         "mirrored_networking": wsl2_sec.get("networkingMode", "").lower() == "mirrored",
@@ -489,14 +531,43 @@ kernel.unprivileged_bpf_disabled = 1
 
 def install_wsl_distro(
     system: SystemBackend,
-    distro: str,
+    distro: str = DEFAULT_WSL_DISTRO,
     web_download: bool = False,
     dry_run: bool = True,
+    set_default: bool = True,
 ) -> dict[str, Any]:
-    """Install a WSL2 distribution via wsl.exe --install (with optional --web-download Store bypass)."""
+    """Install a WSL2 distribution via wsl.exe --install and optionally set it as default."""
     cmd = ["--install", "-d", distro]
     if web_download:
         cmd.append("--web-download")
+    returncode = 0
+    default_returncode: int | None = None
+    if not dry_run:
+        res = system.run_wsl_command(cmd)
+        returncode = res.returncode
+        if returncode == 0 and set_default:
+            def_res = system.run_wsl_command(["--set-default", distro])
+            default_returncode = def_res.returncode
+            if default_returncode != 0:
+                returncode = default_returncode
+    return {
+        "dry_run": dry_run,
+        "distro": distro,
+        "web_download": web_download,
+        "set_default": set_default,
+        "default_returncode": default_returncode,
+        "command": ["wsl.exe", *cmd],
+        "returncode": returncode,
+    }
+
+
+def set_default_wsl_distro(
+    system: SystemBackend,
+    distro: str = DEFAULT_WSL_DISTRO,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Set the default Windows WSL2 distribution via `wsl.exe --set-default`."""
+    cmd = ["--set-default", distro]
     returncode = 0
     if not dry_run:
         res = system.run_wsl_command(cmd)
@@ -504,7 +575,6 @@ def install_wsl_distro(
     return {
         "dry_run": dry_run,
         "distro": distro,
-        "web_download": web_download,
         "command": ["wsl.exe", *cmd],
         "returncode": returncode,
     }
@@ -559,9 +629,24 @@ def _is_windows_credential_helper(helper: str) -> bool:
     return any(token in low for token in ("wincred", "gcm", ".exe", "/mnt/c/"))
 
 
+def detect_wsl_package_manager(system: SystemBackend, distro: str) -> str:
+    """Detect the primary Linux package manager inside a WSL distro."""
+    probe = (
+        "if command -v apt-get >/dev/null; then echo apt; "
+        "elif command -v dnf >/dev/null; then echo dnf; "
+        "elif command -v pacman >/dev/null; then echo pacman; "
+        "else echo unsupported; fi"
+    )
+    res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sh", "-c", probe])
+    if res.returncode != 0:
+        return "unsupported"
+    out = res.stdout.strip().splitlines()[-1].strip().lower() if res.stdout.strip() else ""
+    return out if out in {"apt", "dnf", "pacman"} else "unsupported"
+
+
 def apply_wsl_linux_baseline(
     system: SystemBackend,
-    distro: str,
+    distro: str = DEFAULT_WSL_DISTRO,
     dotfiles_repo: str | None = None,
     dev_packages: bool = False,
     auto_patch: bool = True,
@@ -583,6 +668,9 @@ def apply_wsl_linux_baseline(
         steps.append("Install minimal dev packages (git, curl, jq, build-essential/base-devel)")
     if dotfiles_repo:
         steps.append(f"Apply dotfiles via chezmoi init --apply {dotfiles_repo}")
+
+    warnings: list[str] = []
+    package_manager: str | None = None
 
     if not dry_run:
         r1 = system.run_wsl_command(
@@ -622,27 +710,44 @@ def apply_wsl_linux_baseline(
                         )
         elif r3_get.returncode not in (1, 5):
             raise WslOperationError(f"Failed to inspect git credential.helper in '{distro}': {r3_get.stderr}")
+        if auto_patch or dev_packages:
+            package_manager = detect_wsl_package_manager(system, distro)
         if auto_patch:
-            patch_cmd = (
-                "if command -v apt-get >/dev/null; then "
-                "DEBIAN_FRONTEND=noninteractive apt-get update && "
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades && "
-                'printf \'APT::Periodic::Update-Package-Lists "1";\\n'
-                'APT::Periodic::Unattended-Upgrade "1";\\n\' '
-                "> /etc/apt/apt.conf.d/20auto-upgrades; "
-                "elif command -v dnf >/dev/null; then "
-                "dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer || true; fi"
-            )
-            r_patch = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sh", "-c", patch_cmd])
-            if r_patch.returncode != 0:
-                raise WslOperationError(f"Failed to enable auto-patching in '{distro}': {r_patch.stderr}")
+            if package_manager == "apt":
+                patch_cmd = (
+                    "DEBIAN_FRONTEND=noninteractive apt-get update && "
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades && "
+                    'printf \'APT::Periodic::Update-Package-Lists "1";\\n'
+                    'APT::Periodic::Unattended-Upgrade "1";\\n\' '
+                    "> /etc/apt/apt.conf.d/20auto-upgrades"
+                )
+            elif package_manager == "dnf":
+                patch_cmd = "dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer || true"
+            else:
+                patch_cmd = ""
+                warnings.append(
+                    f"Unsupported package manager '{package_manager}' in '{distro}'; "
+                    "skipped automatic security updates."
+                )
+            if patch_cmd:
+                r_patch = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sh", "-c", patch_cmd])
+                if r_patch.returncode != 0:
+                    raise WslOperationError(f"Failed to enable auto-patching in '{distro}': {r_patch.stderr}")
         if dev_packages:
-            pkg_cmd = (
-                "command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get update && "
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y git curl jq build-essential || "
-                "(command -v dnf >/dev/null && dnf install -y git curl jq gcc gcc-c++ make) || "
-                "(command -v pacman >/dev/null && pacman -Sy --noconfirm git curl jq base-devel)"
-            )
+            if package_manager == "apt":
+                pkg_cmd = (
+                    "DEBIAN_FRONTEND=noninteractive apt-get update && "
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y git curl jq build-essential"
+                )
+            elif package_manager == "dnf":
+                pkg_cmd = "dnf install -y git curl jq gcc gcc-c++ make"
+            elif package_manager == "pacman":
+                pkg_cmd = "pacman -Sy --noconfirm git curl jq base-devel"
+            else:
+                raise WslOperationError(
+                    f"Unsupported package manager '{package_manager}' in '{distro}' for --dev-packages "
+                    "(requires apt-get, dnf, or pacman)."
+                )
             r_pkg = system.run_wsl_command(["-d", distro, "-u", "root", "--", "sh", "-c", pkg_cmd])
             if r_pkg.returncode != 0:
                 raise WslOperationError(f"Failed to install dev packages in '{distro}': {r_pkg.stderr}")
@@ -659,5 +764,7 @@ def apply_wsl_linux_baseline(
         "auto_patch": auto_patch,
         "dev_packages": dev_packages,
         "dotfiles_repo": dotfiles_repo,
+        "package_manager": package_manager,
+        "warnings": warnings,
         "steps": steps,
     }
