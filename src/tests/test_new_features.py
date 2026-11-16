@@ -426,6 +426,46 @@ def test_locale_independent_parsers_swedish_and_german(registry: InMemoryRegistr
     ):
         assert detect_default_wsl_distro(mem_sys, mem_sys.detect_environment(registry)) == "Ubuntu"
 
+    # Swedish sc.exe query WinDefend ("TILLSTÅND : 4  KÖRS") -> numeric state 4 recognized without English words
+    from winbearable.backends.system import _observe_defender
+    from winbearable.const import DEFENDER_KEY, HIVE_HKLM, REG_DWORD
+    from winbearable.models import ObservationState
+
+    reg_def = InMemoryRegistryBackend(initial_values={(HIVE_HKLM, DEFENDER_KEY, "DisableAntiSpyware"): (1, REG_DWORD)})
+    obs_sv, _ = _observe_defender(
+        reg_def,
+        lambda _args: type("R", (), {"returncode": 0, "stdout": "TILLSTÅND : 4  KÖRS\n", "stderr": ""})(),
+    )
+    assert obs_sv.state == ObservationState.UNKNOWN
+
+    # German sc.exe query WinDefend ("ZUSTAND : 1  GESTOPPT") -> numeric state 1 recognized
+    reg_def_ok = InMemoryRegistryBackend()
+    obs_de, def_bool = _observe_defender(
+        reg_def_ok,
+        lambda _args: type("R", (), {"returncode": 0, "stdout": "ZUSTAND : 1  GESTOPPT\n", "stderr": ""})(),
+    )
+    assert def_bool is False
+    assert obs_de.state == ObservationState.DISABLED
+
+    # wsl --list --verbose with UTF-16LE null bytes & BOM & localized header
+    with patch.object(
+        mem_sys,
+        "run_wsl_command",
+        return_value=type(
+            "R",
+            (),
+            {
+                "returncode": 0,
+                "stdout": (
+                    "\ufeff  N\x00A\x00M\x00N\x00\n"
+                    "*\x00 \x00U\x00b\x00u\x00n\x00t\x00u\x00  K\x00ö\x00r\x00s\x00  2\x00\n"
+                ),
+                "stderr": "",
+            },
+        )(),
+    ):
+        assert detect_default_wsl_distro(mem_sys, mem_sys.detect_environment(registry)) == "Ubuntu"
+
 
 def test_randomized_apply_rollback_and_recover_property(tmp_path: Path) -> None:
     """QA-04: Random subsets: plan never mutates, apply+rollback restores state, recover cleans up."""

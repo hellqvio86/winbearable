@@ -241,9 +241,10 @@ def _observe_defender(
         sc_res = run_cmd(["sc.exe", "query", "WinDefend"])
         if sc_res.returncode == 0:
             upper_out = sc_res.stdout.upper()
-            if re.search(r"STATE\s*:\s*4\b", upper_out) or "RUNNING" in upper_out:
+            # Match Win32 SERVICE_RUNNING (4) / SERVICE_STOPPED (1) numeric state codes only (locale-safe).
+            if re.search(r":\s*4\b", upper_out):
                 svc_running = True
-            elif re.search(r"STATE\s*:\s*1\b", upper_out) or "STOPPED" in upper_out:
+            elif re.search(r":\s*1\b", upper_out):
                 svc_running = False
 
     if disabled_by_reg and svc_running is True:
@@ -343,7 +344,6 @@ def _observe_secure_boot(registry: RegistryBackend) -> tuple[PostureObservation,
 def _observe_bitlocker(
     registry: RegistryBackend,
     edition: str,
-    run_cmd: Callable[[list[str]], CommandResult] | None,
 ) -> tuple[PostureObservation, bool | None]:
     proves = "Indicates OS volume BitLocker protection status; does not prove key escrow or TPM PIN policy."
     if any(tag in edition.lower() for tag in ("home", "core")):
@@ -357,32 +357,6 @@ def _observe_bitlocker(
             ),
             None,
         )
-    if run_cmd is not None:
-        bde_res = run_cmd(["manage-bde.exe", "-status", "C:"])
-        if bde_res.returncode == 0:
-            lower_out = bde_res.stdout.lower()
-            if "protection on" in lower_out:
-                return (
-                    PostureObservation(
-                        state=ObservationState.ENABLED,
-                        source="manage-bde.exe -status C:",
-                        confidence=ObservationConfidence.HIGH,
-                        evidence="Protection Status: Protection On",
-                        proves=proves,
-                    ),
-                    True,
-                )
-            if "protection off" in lower_out:
-                return (
-                    PostureObservation(
-                        state=ObservationState.DISABLED,
-                        source="manage-bde.exe -status C:",
-                        confidence=ObservationConfidence.HIGH,
-                        evidence="Protection Status: Protection Off",
-                        proves=proves,
-                    ),
-                    False,
-                )
     ok, bl_val = _safe_get_reg(registry, BITLOCKER_STATUS_KEY, "BootStatus")
     if not ok:
         return (
@@ -545,7 +519,7 @@ def _collect_posture_observations(
     mdm_obs, mdm_bool = _observe_mdm(registry)
     def_obs, def_bool = _observe_defender(registry, run_cmd)
     sb_obs, sb_bool = _observe_secure_boot(registry)
-    bl_obs, bl_bool = _observe_bitlocker(registry, edition, run_cmd)
+    bl_obs, bl_bool = _observe_bitlocker(registry, edition)
     al_obs, al_bool = _observe_applocker(registry)
     edr_obs, edr_bool = _observe_edr(registry)
 
