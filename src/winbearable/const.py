@@ -71,6 +71,7 @@ VSCODE_WSL_EXTENSION_ID = "ms-vscode-remote.remote-wsl"
 WSL_MODES: tuple[str, ...] = ("convenient", "strict")
 DEFAULT_WSL_MODE = "convenient"
 DEFAULT_WSL_NETWORKING_MODE = "mirrored"
+DEFAULT_WSL_DISTRO = "Ubuntu"
 
 # Subprocess Timeout Defaults (seconds)
 ENV_CMD_TIMEOUT = "WB_CMD_TIMEOUT"

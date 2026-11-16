@@ -20,12 +20,18 @@ def test_no_args_prints_help(cli_runner: Callable[[list[str]], tuple[int, str, s
     assert "usage: wb" in stdout
 
 
-def test_doctor_json_and_human(cli_runner: Callable[[list[str]], tuple[int, str, str]]) -> None:
+def test_doctor_json_and_human(
+    cli_runner: Callable[[list[str]], tuple[int, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     code, stdout, _ = cli_runner(["doctor", "--json"])
     assert code == 0
     payload = json.loads(stdout)
     assert payload["environment"]["windows_build"] == 26300
     assert "audit" in payload
+    assert "default_wsl_distro" in payload["refugee_summary"]
 
     code_human, stdout_human, _ = cli_runner(["doctor"])
     assert code_human == 0
@@ -383,3 +389,20 @@ def test_cli_detailed_exit_codes(
     cli_runner(["apply", "--profile", str(custom), "--apply"])
     code_ok, _, _ = cli_runner(["status", "--profile", str(custom), "--detailed-exitcode"])
     assert code_ok == EXIT_SUCCESS
+
+
+def test_wsl_set_default_cli_defaults_to_ubuntu(
+    cli_runner: Callable[[list[str]], tuple[int, str, str]],
+    system: InMemorySystemBackend,
+) -> None:
+    """P1.3: `wb wsl set-default` defaults to Ubuntu and honors dry-run vs --apply."""
+    code_dry, out_dry, _ = cli_runner(["wsl", "set-default"])
+    assert code_dry == 0
+    assert "[DRY-RUN] wsl.exe --set-default Ubuntu" in out_dry
+
+    code_app, out_app, _ = cli_runner(["wsl", "set-default", "--apply", "--json"])
+    assert code_app == 0
+    data = json.loads(out_app)
+    assert data["distro"] == "Ubuntu"
+    assert not data["dry_run"]
+    assert (["--set-default", "Ubuntu"], None) in system.wsl_commands_executed

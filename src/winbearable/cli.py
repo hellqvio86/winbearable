@@ -16,6 +16,7 @@ from .backends import (
     create_default_system_backend,
 )
 from .const import (
+    DEFAULT_WSL_DISTRO,
     DEFAULT_WSL_MODE,
     EXIT_BLOCKED,
     EXIT_ERROR,
@@ -58,6 +59,7 @@ from .wsl import (
     import_wsl_distro,
     install_wsl_distro,
     plan_or_apply_wsl,
+    set_default_wsl_distro,
 )
 
 
@@ -291,11 +293,21 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_apply_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     wsl_inst_p = wsl_sub.add_parser("install", help="Install a WSL2 distro (with --web-download Store fallback)")
-    wsl_inst_p.add_argument("distro", help="Distro name (e.g. Ubuntu-24.04 or FedoraLinux-42)")
+    wsl_inst_p.add_argument(
+        "distro",
+        nargs="?",
+        default=DEFAULT_WSL_DISTRO,
+        help=f"Distro name (default: {DEFAULT_WSL_DISTRO}; avoids VS Code Remote-WSL issues on modern Fedora)",
+    )
     wsl_inst_p.add_argument(
         "--web-download",
         action="store_true",
         help="Download directly from GitHub, bypassing Store",
+    )
+    wsl_inst_p.add_argument(
+        "--no-set-default",
+        action="store_true",
+        help="Do not set the installed distro as Windows default via wsl.exe --set-default",
     )
     wsl_inst_p.add_argument("--apply", action="store_true", help="Execute installation")
     wsl_inst_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
@@ -314,7 +326,11 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_imp_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     wsl_base_p = wsl_sub.add_parser("baseline", help="Apply Linux-side sysctl, git cred isolation & dotfiles baseline")
-    wsl_base_p.add_argument("--distro", required=True, help="Target WSL distro name")
+    wsl_base_p.add_argument(
+        "--distro",
+        default=DEFAULT_WSL_DISTRO,
+        help=f"Target WSL distro name (default: {DEFAULT_WSL_DISTRO})",
+    )
     wsl_base_p.add_argument("--dotfiles-repo", default=None, help="Optional chezmoi dotfiles repository URL")
     wsl_base_p.add_argument(
         "--dev-packages",
@@ -328,6 +344,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wsl_base_p.add_argument("--apply", action="store_true", help="Execute Linux-side baseline commands")
     wsl_base_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    wsl_def_p = wsl_sub.add_parser("set-default", help="Set the default Windows WSL2 distribution")
+    wsl_def_p.add_argument(
+        "distro",
+        nargs="?",
+        default=DEFAULT_WSL_DISTRO,
+        help=f"Distro name to set as default (default: {DEFAULT_WSL_DISTRO})",
+    )
+    wsl_def_p.add_argument("--apply", action="store_true", help="Execute wsl.exe --set-default")
+    wsl_def_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     return parser
 
@@ -399,7 +425,7 @@ def _run_cli_body(
                     "cis_passed": 0,
                     "cis_total": 0,
                 }
-            wsl_info = audit_wsl(env)
+            wsl_info = audit_wsl(env, system=sys_backend)
             incomplete_runs = store.get_incomplete_runs()
             raw_history = getattr(sys_backend, "command_history", ())
             last_outcome = getattr(sys_backend, "last_outcome", None)
@@ -447,6 +473,10 @@ def _run_cli_body(
                 "domain_or_mdm_leftovers": bool(env.domain_joined or env.entra_joined or env.mdm_enrolled),
                 "wsl_installed": env.wsl_installed,
                 "wsl_distros": list(env.wsl_distros),
+                "default_wsl_distro": wsl_info.get("default_wsl_distro") if isinstance(wsl_info, dict) else None,
+                "default_distro_is_fedora": (
+                    bool(wsl_info.get("default_distro_is_fedora")) if isinstance(wsl_info, dict) else False
+                ),
                 "interop_enabled": linux_info.get("interop_enabled"),
                 "append_windows_path": linux_info.get("append_windows_path"),
                 "mirrored_networking": mirrored,
@@ -733,7 +763,7 @@ def _run_cli_body(
 
         wslconfig_path = Path(args.wslconfig) if getattr(args, "wslconfig", None) else None
         if args.wsl_command == "audit":
-            wsl_report = audit_wsl(env, wslconfig_path=wslconfig_path)
+            wsl_report = audit_wsl(env, wslconfig_path=wslconfig_path, system=sys_backend)
             if args.json:
                 _print_json(wsl_report)
             else:
@@ -743,12 +773,27 @@ def _run_cli_body(
                     f".wslconfig ({wsl_report['wslconfig_path']}): exists={wsl_report['wslconfig_exists']}, "
                     f"mirrored={wsl_report['mirrored_networking']}, firewall={wsl_report['firewall_enabled']}\n"
                 )
+                if wsl_report.get("fedora_vscode_warning"):
+                    sys.stdout.write(f"WARNING: {wsl_report['fedora_vscode_warning']}\n")
             return 0
 
-        if args.wsl_command in {"install", "export", "import", "baseline", "apply"} and bool(
+        if args.wsl_command in {"install", "export", "import", "baseline", "apply", "set-default"} and bool(
             getattr(args, "apply", False)
         ):
             _require_windows_for_mutation(env, f"wb wsl {args.wsl_command} --apply")
+
+        if args.wsl_command == "set-default":
+            def_res = set_default_wsl_distro(
+                system=sys_backend,
+                distro=args.distro,
+                dry_run=not args.apply,
+            )
+            if args.json:
+                _print_json(def_res)
+            else:
+                tag = "DRY-RUN" if def_res["dry_run"] else "EXECUTED"
+                sys.stdout.write(f"[{tag}] {' '.join(def_res['command'])}\n")
+            return 1 if def_res["returncode"] != 0 else 0
 
         if args.wsl_command == "install":
             inst_res = install_wsl_distro(
@@ -756,6 +801,7 @@ def _run_cli_body(
                 distro=args.distro,
                 web_download=bool(args.web_download),
                 dry_run=not args.apply,
+                set_default=not args.no_set_default,
             )
             if args.json:
                 _print_json(inst_res)
