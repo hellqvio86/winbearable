@@ -1,42 +1,113 @@
 # Per-Tweak Catalog Reference (`winbearable`)
 
-Every tweak in `winbearable` targets **Windows 11 24H2 / 25H2+ (Build `>= 26100`)**, operates in **100% native Python** (`winreg`, `sc.exe`, `schtasks.exe`, `dism.exe`, `winget.exe`, `taskkill.exe`), records pre-apply state in `%LOCALAPPDATA%\winbearable\state.json`, and is fully reversible via `wb rollback --apply`.
+Every tweak in `winbearable` targets the maintainer's current **Windows 11 desktop installation (`26H2+`, Build `>= 26300` — NO Windows IoT or LTSC)**, operates in **100% native Python** (`winreg`, `sc.exe`, `schtasks.exe`, `dism.exe`, `winget.exe`, `auditpol.exe`, `wevtutil.exe`, `netsh.exe`, `taskkill.exe`), records pre-apply state in `%LOCALAPPDATA%\winbearable\state.json`, and is reversible via `wb rollback --apply` (unless explicitly marked `irreversible`).
 
 | Tweak ID | Category | Admin? | Risk | CIS ID | Profiles | Summary |
 | :--- | :--- | :---: | :---: | :---: | :--- | :--- |
-| `apps.install_vscode` | `apps` | No | `low` | — | `user-only`, `owner`, `paranoid` | Installs `Microsoft.VisualStudioCode` (`--scope user`) + `ms-vscode-remote.remote-wsl`. |
-| `onedrive.disable_tray_autorun` | `onedrive` | No | `low` | — | `user-only`, `owner`, `paranoid` | Stops `OneDrive.exe` and deletes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run [OneDrive]`. |
-| `onedrive.unpin_explorer` | `onedrive` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `System.IsPinnedToNameSpaceTree=0` on OneDrive CLSID `{018D5C66-4533-4307-9B53-224DE2ED1FE6}`. |
-| `onedrive.disable_policy` | `onedrive` | Yes | `low` | `18.10.51.1` | `owner`, `paranoid` | Sets `HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive [DisableFileSyncNGSC]=1`. |
-| `onedrive.uninstall` | `onedrive` | Yes | `medium` | — | `paranoid` | Runs `OneDriveSetup.exe /uninstall` and enforces `DisableFileSyncNGSC=1`. |
-| `bloat.disable_consumer_features` | `bloat` | Yes | `low` | `18.10.12.1` | `owner`, `paranoid` | Sets `DisableWindowsConsumerFeatures=1` and `DisableSoftLanding=1` under `HKLM\...\CloudContent`. |
-| `search.disable_bing` | `search` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `DisableSearchBoxSuggestions=1` and `BingSearchEnabled=0` in `HKCU`. |
-| `search.disable_highlights` | `search` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `IsDynamicSearchBoxEnabled=0` in `HKCU\...\SearchSettings`. |
-| `search.hide_taskbar_box` | `search` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `SearchboxTaskbarMode=0` in `HKCU\...\Search`. |
-| `search.disable_cloud_and_history` | `search` | No | `low` | — | `user-only`, `owner`, `paranoid` | Disables MSA/Entra cloud content search and local device search history in `HKCU`. |
-| `search.disable_wsearch_service` | `search` | Yes | `medium` | — | `paranoid` | Sets `WSearch` service `Start=4` (Disabled) via `sc.exe` / `HKLM\...\Services\WSearch`. |
-| `start.disable_recommendations` | `start` | No | `low` | — | `user-only`, `owner`, `paranoid` | Disables Start menu suggestions, tips, and `Start_IrisRecommendations` in `HKCU`. |
-| `taskbar.disable_widgets_and_chat` | `taskbar` | No | `low` | — | `user-only`, `owner`, `paranoid` | Hides Widgets (`TaskbarDa=0`), Chat (`TaskbarMn=0`), and Task View (`ShowTaskViewButton=0`). |
-| `explorer.classic_context_menu` | `explorer` | No | `low` | — | `user-only`, `owner`, `paranoid` | Restores classic Windows 11 right-click menu via `{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32`. |
-| `explorer.show_file_extensions` | `explorer` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `HideFileExt=0` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced`. |
-| `explorer.show_hidden_files` | `explorer` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `Hidden=1` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced`. |
-| `ai.disable_copilot_user` | `ai` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `TurnOffWindowsCopilot=1` and `ShowCopilotButton=0` in `HKCU`. |
-| `ai.disable_copilot_machine` | `ai` | Yes | `low` | — | `owner`, `paranoid` | Sets `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot [TurnOffWindowsCopilot]=1`. |
-| `ai.disable_recall` | `ai` | Yes | `low` | `18.10.93.1` | `owner`, `paranoid` | Sets `DisableAIDataAnalysis=1` and `TurnOffSavingSnapshots=1` under `HKLM\...\WindowsAI`. |
-| `privacy.disable_advertising_id` | `privacy` | No | `low` | — | `user-only`, `owner`, `paranoid` | Disables per-user Advertising ID and diagnostic tailored experiences. |
-| `privacy.telemetry_minimal` | `privacy` | Yes | `low` | `18.10.15.1` | `owner`, `paranoid` | Sets `AllowTelemetry=0`, `PublishUserActivities=0`, and `UploadUserActivities=0`. |
-| `telemetry.disable_scheduled_tasks` | `telemetry` | Yes | `low` | — | `owner`, `paranoid` | Disables Compatibility Appraiser and CEIP Consolidator scheduled tasks via `schtasks.exe`. |
-| `hardening.disable_wsh_user` | `hardening` | No | `low` | — | `user-only`, `owner`, `paranoid` | Sets `HKCU\Software\Microsoft\Windows Script Host\Settings [Enabled]=0`. |
-| `hardening.disable_smbv1` | `hardening` | Yes | `low` | `18.4.8` | `owner`, `paranoid` | Sets `LanmanServer\Parameters [SMB1]=0` and disables `SMB1Protocol` via `dism.exe`. |
-| `hardening.disable_llmnr` | `hardening` | Yes | `low` | `18.6.4.2` | `owner`, `paranoid` | Sets `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient [EnableMulticast]=0`. |
-| `hardening.disable_mdns` | `hardening` | Yes | `low` | — | `owner`, `paranoid` | Sets `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters [EnableMDNS]=0`. |
-| `hardening.disable_wpad` | `hardening` | Yes | `low` | — | `owner`, `paranoid` | Sets `HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings\Wpad [WpadOverride]=1`. |
-| `hardening.disable_autorun` | `hardening` | Yes | `low` | `18.9.8.3` | `owner`, `paranoid` | Sets `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer [NoDriveTypeAutoRun]=255`. |
-| `hardening.enable_firewall_all_profiles` | `hardening` | Yes | `low` | `9.1.1` | `owner`, `paranoid` | Enforces `EnableFirewall=1` across Domain, Standard, and Public Windows Firewall profiles. |
-| `hardening.defender_cloud_and_pua` | `hardening` | Yes | `low` | `18.10.43` | `owner`, `paranoid` | Enables Microsoft Defender `PUAProtection=1` and `SpynetReporting=2`. |
-| `hardening.disable_guest_and_blank_passwords` | `hardening` | Yes | `low` | `2.3.1.1` | `owner`, `paranoid` | Enforces `LimitBlankPasswordUse=1` and disables Remote Assistance `fAllowToGetHelp=0`. |
-| `hardening.browser_privacy_baseline` | `hardening` | Yes | `low` | — | `owner`, `paranoid` | Disables Edge/Chrome built-in password manager and enforces strict tracking prevention (`3`). |
-| `hardening.powershell_scriptblock_logging` | `hardening` | Yes | `low` | `18.10.89.2` | `owner`, `paranoid` | Sets `EnableScriptBlockLogging=1` for PowerShell Event ID 4104 auditing. |
-| `hardening.cmdline_process_audit` | `hardening` | Yes | `low` | `18.9.27.1` | `owner`, `paranoid` | Sets `ProcessCreationIncludeCmdLine_Enabled=1` for Event ID 4688 auditing. |
-| `hardening.enable_lsa_protection` | `hardening` | Yes | `medium` | `18.5.5` | `paranoid` | Sets `HKLM\SYSTEM\CurrentControlSet\Control\Lsa [RunAsPPL]=1`. |
-| `hardening.enable_vbs_hvci` | `hardening` | Yes | `high` | `18.9.5.2` | `paranoid` | Enforces VBS + HVCI (`EnableVirtualizationBasedSecurity=1`, `Enabled=1`). Requires `--i-know-what-im-doing`. |
+| `ai.disable_copilot_machine` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Copilot (Machine Policy) |
+| `ai.disable_copilot_user` | `ai` | No | `low` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Windows Copilot (Per-User) |
+| `ai.disable_recall` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Recall & AI Snapshot Analysis |
+| `apps.install_vscode` | `apps` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Install Visual Studio Code (Windows User Scope) + Remote-WSL Extension |
+| `bloat.disable_consumer_features` | `bloat` | Yes | `low` | `18.10.12.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Consumer Features & Auto-Provisioned Junk Apps |
+| `dev.developer_mode` | `dev` | Yes | `medium` | — | *opt-in* | Enable Windows Developer Mode (Unprivileged Symlinks) |
+| `dev.fix_ssh_key_permissions` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Restrict %USERPROFILE%\.ssh ACLs to Current User Only |
+| `dev.git_sane_defaults` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Configure Sane Global Git Defaults (LF, Symlinks, LongPaths, main) |
+| `dev.long_paths` | `dev` | Yes | `low` | — | `dev-comfort` | Enable Win32 Long Paths (> 260 chars) |
+| `edge.quieting_baseline` | `edge` | No | `low` | — | `edge-quiet` | Quiet Microsoft Edge Nags, Boost, Shopping & Sidebar |
+| `explorer.alt_tab_windows_only` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Alt+Tab Shows Open Windows Only (No Edge Tabs) |
+| `explorer.classic_context_menu` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Restore Classic Full Right-Click Context Menu (Windows 11) |
+| `explorer.disable_recent_frequent` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Hide Recent Files & Frequent Folders in Explorer |
+| `explorer.disable_snap_flyout` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Disable Snap Assist Hover Flyout |
+| `explorer.disable_sync_provider_notifications` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Disable OneDrive/Sync Provider Banners in Explorer |
+| `explorer.launch_to_this_pc` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Open File Explorer to 'This PC' |
+| `explorer.show_file_extensions` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Always Show File Extensions in File Explorer |
+| `explorer.show_hidden_files` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Show All Hidden Files and Dotfiles in File Explorer |
+| `hardening.audit_core_subcategories` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Security Audit Policy Subcategories (GUID-based) |
+| `hardening.browser_privacy_baseline` | `hardening` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enforce Edge & Chrome Browser Privacy Baseline (No Password Sync, Strict Tracking) |
+| `hardening.cmdline_process_audit` | `hardening` | Yes | `low` | `18.8.3.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Include Command Line in Process Creation Events (4688) |
+| `hardening.credential_guard` | `hardening` | Yes | `high` | — | *opt-in* | Enable Credential Guard Without UEFI Lock (LsaCfgFlags=2) |
+| `hardening.defender_asr_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Defender ASR Rules (Audit Mode) |
+| `hardening.defender_cloud_and_pua` | `hardening` | Yes | `medium` | `18.10.43` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enable Microsoft Defender PUA Block & Cloud Protection |
+| `hardening.defender_network_protection_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Network Protection (Audit Mode) |
+| `hardening.disable_autorun` | `hardening` | Yes | `low` | `18.9.8.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable AutoRun and AutoPlay on All Drives |
+| `hardening.disable_guest_and_blank_passwords` | `hardening` | Yes | `medium` | `2.3.1.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Restrict Blank Passwords & Disable Remote Assistance Solicited Help |
+| `hardening.disable_llmnr` | `hardening` | Yes | `medium` | `18.5.4.2` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Link-Local Multicast Name Resolution (LLMNR) |
+| `hardening.disable_mdns` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Multicast DNS (mDNS) |
+| `hardening.disable_netbios_broadcast` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable NetBIOS Broadcast Name Resolution (NodeType=2 / P-node) |
+| `hardening.disable_netbios_tcp` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Disable NetBIOS Over TCP/IP Per Interface (NetbiosOptions=2) |
+| `hardening.disable_rdp` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Disable Incoming Remote Desktop (RDP) & Remote Assistance |
+| `hardening.disable_smbv1` | `hardening` | Yes | `medium` | `18.4.8` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Legacy SMBv1 Protocol & Optional Feature |
+| `hardening.disable_wpad` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Web Proxy Auto-Discovery (WPAD) |
+| `hardening.disable_wpad_service` | `hardening` | Yes | `medium` | — | *opt-in* | Disable WinHTTP Web Proxy Auto-Discovery Service (Opt-In) |
+| `hardening.disable_wsh_user` | `hardening` | No | `medium` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Windows Script Host (WSH) for Current User |
+| `hardening.enable_firewall_all_profiles` | `hardening` | Yes | `medium` | `9.1.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enforce Windows Firewall Across Domain, Private, and Public Profiles |
+| `hardening.enable_lsa_protection` | `hardening` | Yes | `medium` | `18.4.4` | `paranoid` | Enable LSA Protection (RunAsPPL) |
+| `hardening.enable_operational_logs` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable TaskScheduler, DNS-Client & WMI-Activity Operational Logs |
+| `hardening.enable_vbs_hvci` | `hardening` | Yes | `high` | `18.9.5.2` | `paranoid` | Enable Virtualization-Based Security (VBS) & Memory Integrity (HVCI) |
+| `hardening.enforce_smartscreen` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enforce Windows SmartScreen Policy |
+| `hardening.event_log_sizes` | `hardening` | Yes | `low` | — | `hardened-baseline` | Increase Security & PowerShell Event Log Sizes |
+| `hardening.firewall_disable_risky_groups` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Disable Risky Inbound Firewall Rule Groups (Resource-ID Safe) |
+| `hardening.firewall_log_dropped` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Windows Firewall Dropped-Packet Logging |
+| `hardening.harden_ip_stack` | `hardening` | Yes | `low` | — | `hardened-baseline` | Harden TCP/IPv4 & IPv6 Stack (No Source Routing / ICMP Redirects) |
+| `hardening.ntlm_hardening` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Enforce NTLMv2 Only & Block Anonymous Enumeration |
+| `hardening.office_macro_ole` | `hardening` | No | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Block Office Internet Macros & Disable OLE Packager Shortcuts |
+| `hardening.powershell_module_logging` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable PowerShell Module Logging (*) |
+| `hardening.powershell_scriptblock_logging` | `hardening` | Yes | `low` | `18.9.97.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enable PowerShell Script Block Logging |
+| `hardening.smb_block_insecure_guest` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Block Insecure Guest SMB Logons |
+| `hardening.smb_require_signing` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Require SMB Signing on Client & Server |
+| `hardening.uac_secure_desktop` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enforce UAC Admin Approval Mode on Secure Desktop |
+| `hardening.update_no_autoreboot_with_users` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Prevent Auto-Reboot While Users Are Signed In |
+| `hardening.wdigest_off` | `hardening` | Yes | `low` | — | `hardened-baseline` | Disable WDigest Plaintext Credential Caching |
+| `input.caps_to_ctrl` | `input` | Yes | `medium` | — | `dev-comfort` | Remap Caps Lock to Left Ctrl (Scancode Map) |
+| `input.disable_beep` | `input` | No | `low` | — | `corp-safe`, `dev-comfort` | Disable System Beep & WSL Terminal Bell |
+| `input.disable_mouse_acceleration` | `input` | No | `low` | — | *opt-in* | Disable Mouse Acceleration (Enhance Pointer Precision) |
+| `input.disable_sticky_keys_prompts` | `input` | No | `low` | — | `corp-safe`, `dev-comfort` | Disable StickyKeys, FilterKeys & ToggleKeys Shortcut Prompts |
+| `input.keyboard_repeat` | `input` | No | `low` | — | `corp-safe`, `dev-comfort` | Fast Keyboard Repeat Delay & Rate |
+| `input.natural_scroll_touchpad` | `input` | No | `low` | — | `corp-safe`, `dev-comfort` | Enable Natural Scrolling on Precision Touchpad |
+| `onedrive.disable_policy` | `onedrive` | Yes | `low` | `18.9.56.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable OneDrive File Sync via Machine Policy |
+| `onedrive.disable_tray_autorun` | `onedrive` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable OneDrive System Tray & Startup Autorun |
+| `onedrive.uninstall` | `onedrive` | Yes | `medium` | — | `paranoid` | Uninstall Microsoft OneDrive Client |
+| `onedrive.unpin_explorer` | `onedrive` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Unpin OneDrive from File Explorer Navigation Pane |
+| `power.disable_fast_startup` | `power` | Yes | `low` | — | `dev-comfort` | Disable Windows Fast Startup (HiberbootEnabled=0) |
+| `power.hibernate_off` | `power` | Yes | `medium` | — | *opt-in* | Disable Hibernation (powercfg.exe /hibernate off) |
+| `privacy.delivery_optimization_http_only` | `privacy` | Yes | `low` | — | `privacy` | Restrict Delivery Optimization to HTTP Only (No P2P) |
+| `privacy.disable_advertising_id` | `privacy` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Windows Advertising ID |
+| `privacy.disable_advertising_id_machine` | `privacy` | Yes | `low` | — | `privacy` | Disable Advertising ID (Machine Policy) |
+| `privacy.disable_app_launch_tracking` | `privacy` | No | `low` | — | `corp-safe`, `privacy` | Disable App Launch Tracking |
+| `privacy.disable_clipboard_cloud_machine` | `privacy` | Yes | `low` | — | `privacy` | Disable Clipboard History & Cloud Sync (Machine Policy) |
+| `privacy.disable_clipboard_history_user` | `privacy` | No | `low` | — | *opt-in* | Disable Clipboard History (Per-User, Opt-In) |
+| `privacy.disable_error_reporting` | `privacy` | Yes | `low` | — | `privacy` | Disable Windows Error Reporting |
+| `privacy.disable_feedback_prompts` | `privacy` | No | `low` | — | `corp-safe`, `privacy` | Disable Windows Feedback Prompts (SIUF) |
+| `privacy.disable_inking_typing_collection` | `privacy` | No | `low` | — | `corp-safe`, `privacy` | Disable Inking & Typing Personalization Collection |
+| `privacy.disable_location_machine` | `privacy` | Yes | `medium` | — | *opt-in* | Disable Windows Location Platform (Opt-In) |
+| `privacy.disable_spotlight_user` | `privacy` | No | `low` | — | `privacy` | Disable Windows Spotlight Features (User Policy) |
+| `privacy.disable_tailored_experiences` | `privacy` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Tailored Experiences with Diagnostic Data |
+| `privacy.language_list_optout` | `privacy` | No | `low` | — | `corp-safe`, `privacy` | Opt Out of Website Access to Language List |
+| `privacy.telemetry_minimal` | `privacy` | Yes | `low` | `18.9.16.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Minimize Windows Diagnostic Telemetry & Activity History |
+| `search.disable_bing` | `search` | No | `low` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Bing / Web Results in Start Menu Search |
+| `search.disable_cloud_and_history` | `search` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Cloud Content Search and Search History |
+| `search.disable_highlights` | `search` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Search Highlights |
+| `search.disable_wsearch_service` | `search` | Yes | `medium` | — | `paranoid` | Disable Windows Search Indexer Service (WSearch) |
+| `search.hide_taskbar_box` | `search` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Hide Taskbar Search Box |
+| `services.disable_diagtrack` | `services` | Yes | `medium` | — | `hardened-baseline` | Disable Connected User Experiences & Telemetry (DiagTrack) |
+| `services.disable_dmwappushservice` | `services` | Yes | `low` | — | `hardened-baseline` | Disable WAP Push Message Routing Service (dmwappushservice) |
+| `services.disable_maps_retail` | `services` | Yes | `low` | — | `hardened-baseline` | Disable Downloaded Maps & Retail Demo Services |
+| `services.disable_remote_registry` | `services` | Yes | `low` | — | `hardened-baseline` | Disable Remote Registry Service |
+| `services.disable_spooler` | `services` | Yes | `medium` | — | *opt-in* | Disable Print Spooler Service (Opt-In) |
+| `services.disable_ssdp_upnp` | `services` | Yes | `low` | — | `hardened-baseline` | Disable SSDP Discovery & UPnP Device Host Services |
+| `services.disable_wer` | `services` | Yes | `low` | — | `hardened-baseline` | Disable Windows Error Reporting Service (WerSvc) |
+| `services.disable_winrm` | `services` | Yes | `medium` | — | `hardened-baseline` | Disable Windows Remote Management (WinRM) |
+| `services.disable_xbox` | `services` | Yes | `low` | — | `hardened-baseline` | Disable Xbox Live Background Services |
+| `start.disable_lockscreen_tips` | `start` | No | `low` | — | `corp-safe`, `privacy` | Disable Lock Screen Spotlight Tips |
+| `start.disable_recommendations` | `start` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Start Menu Ads, Tips, and App Recommendations |
+| `start.disable_settings_suggestions` | `start` | No | `low` | — | `corp-safe`, `privacy` | Disable Suggested Content in Windows Settings |
+| `start.disable_welcome_and_tips` | `start` | No | `low` | — | `corp-safe`, `privacy` | Disable 'Finish Setting Up Your Device' & Welcome Nags |
+| `taskbar.align_left` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort` | Align Taskbar Icons Left |
+| `taskbar.disable_widgets_and_chat` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Taskbar Widgets, News Feed, Chat, and Task View |
+| `taskbar.disable_widgets_machine` | `taskbar` | Yes | `low` | — | `privacy` | Disable Widgets / News & Interests (Machine Policy) |
+| `taskbar.enable_end_task` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort` | Enable 'End Task' on Taskbar Right-Click |
+| `taskbar.never_combine` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort` | Never Combine Taskbar Buttons |
+| `taskbar.show_seconds` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort` | Show Seconds in Taskbar Clock |
+| `telemetry.disable_extended_tasks` | `telemetry` | Yes | `medium` | — | `hardened-baseline` | Disable Extended CEIP, SIUF & WER Scheduled Tasks |
+| `telemetry.disable_scheduled_tasks` | `telemetry` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Telemetry & Customer Experience Scheduled Tasks |
+| `terminal.default_host_windows_terminal` | `terminal` | No | `low` | — | `corp-safe`, `dev-comfort` | Set Windows Terminal as Default Console Host |

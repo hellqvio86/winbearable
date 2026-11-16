@@ -44,6 +44,20 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
    - This is free open-source software with **zero support**. Users are on their own if they break their PC and are expected to inspect the local audit/snapshot log (`%LOCALAPPDATA%\winbearable\state.json` and `%LOCALAPPDATA%\winbearable\backups\*.reg`) and be sensible.
 6. **Single-Source Constants (`src/winbearable/const.py`):**
    - Package version (`__version__`) and module-level constants belong in `src/winbearable/const.py`.
+7. **Locale Independence:**
+   - Windows may be Swedish, German, Japanese, etc. Prefer, in order: registry values, Win32 APIs via `ctypes` (`GetExtendedTcpTable`, `NetLocalGroupGetMembers`, `NetShareEnum`, `LookupAccountSid`), exit codes, GUID/SID/resource-ID arguments (`auditpol /subcategory:{GUID}`, firewall rule groups by `@FirewallAPI.dll,-NNNNN`), and machine formats (`/XML`, `/format:csv`, `dism /English`). Never parse localized human text. Any parser of command output gets a test with a non-English fixture.
+8. **No Runtime Network:**
+   - No runtime network except through `winget.exe` and `wsl.exe` for IDs/URLs declared in the catalog (pinned version or hash where possible). No `urllib`/`requests` in `src/winbearable`.
+9. **Elevation & Restart Behaviour:**
+   - Elevation only through the existing explicit `--elevate`/prompt flow in `cli.py`. No silent elevation, no restarts: reboot/sign-out/Explorer restart are reported (`requires_reboot`, `requires_explorer_restart`) and never performed automatically.
+10. **Never Weaken Core Protections:**
+    - No tweak may disable Defender real-time protection, Windows Update, the firewall, SmartScreen, or UAC. Those are audit-only. No tweak may disable the `Microsoft-Windows-Subsystem-Linux` or `VirtualMachinePlatform` features.
+11. **Never Fabricate Identifiers:**
+    - Never fabricate CIS numbers, GUIDs, CLSIDs, or winget IDs. `cis_mapping` (a `CisControlMapping`) only when you verified the control text.
+12. **Build & Edition Floor (`>= 26300`, No IoT/LTSC):**
+    - `MIN_SUPPORTED_BUILD = 26300`; `min_build` and `tested_builds` follow `const.py` (`DEFAULT_TESTED_BUILDS`). Only the maintainer's Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT (`IoTEnterprise`, `IoTEnterpriseS`), LTSC (`EnterpriseS`), Windows Server, and builds `< 26300` are strictly unsupported. Do not add compatibility code for older builds or IoT/LTSC.
+13. **Category Conventions:**
+    - Follow existing category names (`apps`, `onedrive`, `search`, `start`, `taskbar`, `explorer`, `ai`, `privacy`, `bloat`, `telemetry`, `hardening`). Create a new category only for a genuinely new area (e.g. `input`, `dev`, `power`, `services`, `edge`).
 
 ## Diagnostic & CLI Commands
 

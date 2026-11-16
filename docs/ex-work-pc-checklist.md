@@ -15,7 +15,8 @@ Before investing time setting up an ex-work PC you purchased:
    - `AzureAdJoined : NO`
    - `EnterpriseJoined : NO`
    - `DomainJoined : NO`
-3. If the machine is still enrolled in a former employer's **Windows Autopilot / Intune MDM tenant**, contact the seller or liquidator immediately to have the serial number / hardware hash de-registered from their Microsoft Intune tenant (or return the unit).
+3. **Windows Autopilot Re-Enrollment Warning:** Even if you run **"Reset this PC -> Remove everything"** or wipe the SSD, **the device hardware hash (motherboard serial/UUID) may still be registered in the previous organization's Windows Autopilot / Intune tenant** and will automatically re-enroll during OOBE as soon as it connects to the internet unless the previous organization deregisters the device hardware ID.
+4. If the machine is still enrolled in a former employer's **Windows Autopilot / Intune MDM tenant**, or if the **BIOS/UEFI supervisor password** is still set, contact the seller, IT department, or authorized refurbisher with your **proof of purchase / invoice** to request formal Autopilot deregistration and BIOS supervisor password removal (or return the unit). Never attempt firmware or MDM bypasses.
 
 ---
 

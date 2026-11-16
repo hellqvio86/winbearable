@@ -2,6 +2,7 @@
 
 from ..const import (
     ACTION_DELETE,
+    ACTION_DELETE_KEY,
     ACTION_SET,
     HIVE_HKCU,
     HIVE_HKLM,
@@ -10,13 +11,15 @@ from ..const import (
     REG_DWORD,
     REG_EXPAND_SZ,
     REG_MULTI_SZ,
+    REG_QWORD,
     REG_SZ,
+    UNSUPPORTED_IOT_LTSC_EDITION_IDS,
 )
 from ..models import RegistryValueData, TweakDefinition
 
 _VALID_HIVES = frozenset({HIVE_HKCU, HIVE_HKLM})
-_VALID_ACTIONS = frozenset({ACTION_SET, ACTION_DELETE})
-_VALID_REG_TYPES = frozenset({REG_DWORD, REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ, REG_BINARY})
+_VALID_ACTIONS = frozenset({ACTION_SET, ACTION_DELETE, ACTION_DELETE_KEY})
+_VALID_REG_TYPES = frozenset({REG_DWORD, REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ, REG_BINARY, REG_QWORD})
 _VALID_SERVICE_START_TYPES = frozenset({2, 3, 4})
 
 
@@ -43,6 +46,10 @@ def _validate_provenance(tweak: TweakDefinition, errors: list[str]) -> None:
             errors.append(f"{tweak.tweak_id}: provenance.{field_name} must be non-empty")
     if not prov.supported_editions:
         errors.append(f"{tweak.tweak_id}: provenance.supported_editions must be non-empty")
+    for ed in prov.supported_editions:
+        low_ed = ed.strip().lower()
+        if "iot" in low_ed or "ltsc" in low_ed or low_ed in UNSUPPORTED_IOT_LTSC_EDITION_IDS:
+            errors.append(f"{tweak.tweak_id}: unsupported IoT/LTSC edition {ed!r} in provenance.supported_editions")
     expected_rev = "irreversible" if tweak.irreversible else "reversible"
     if prov.reversibility != expected_rev:
         errors.append(
@@ -73,6 +80,14 @@ def _validate_operations(
         or tweak.task_specs
         or tweak.feature_specs
         or tweak.winget_specs
+        or tweak.auditpol_specs
+        or tweak.wevtutil_specs
+        or tweak.firewall_group_specs
+        or tweak.fsutil_specs
+        or tweak.powercfg_specs
+        or tweak.git_config_specs
+        or tweak.icacls_specs
+        or tweak.file_specs
         or tweak.stop_processes
         or tweak.uninstall_onedrive
     )
@@ -88,9 +103,26 @@ def _validate_operations(
             errors.append(f"{tweak.tweak_id}: invalid registry action {spec.action!r}")
         if spec.value_type not in _VALID_REG_TYPES:
             errors.append(f"{tweak.tweak_id}: invalid registry value_type {spec.value_type!r}")
-        if not spec.key_path.strip():
+        if spec.key_path_glob is not None:
+            glob_str = spec.key_path_glob
+            segments = glob_str.strip("\\").split("\\")
+            star_segs = [s for s in segments if "*" in s]
+            if (
+                ".." in segments
+                or glob_str.startswith("\\")
+                or glob_str.endswith("\\")
+                or len(star_segs) != 1
+                or len(segments) < 2
+                or "*" in segments[0]
+            ):
+                errors.append(
+                    f"{tweak.tweak_id}: invalid key_path_glob {glob_str!r} "
+                    "(must have a fixed parent path and exactly one '*' segment)"
+                )
+        elif not spec.key_path.strip():
             errors.append(f"{tweak.tweak_id}: empty registry key_path")
-        reg_key = (spec.hive, spec.key_path.lower(), spec.value_name.lower())
+        target_key = (spec.key_path_glob or spec.key_path).lower()
+        reg_key = (spec.hive, target_key, spec.value_name.lower())
         sig = (tweak.tweak_id, spec.action, spec.value_data, spec.value_type)
         prev = seen_reg.get(reg_key)
         if prev is not None and prev[1:] != sig[1:]:

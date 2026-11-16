@@ -295,7 +295,7 @@ def test_native_system_backend_linux_and_simulated_win32(tmp_path: Path) -> None
                 "stdout": (
                     "WSL version: 2.4.0.0\nUbuntu-24.04\nOneDrive.exe 1234\n"
                     "Microsoft.VisualStudioCode\n"
-                    "Scheduled Task State: Enabled\n"
+                    "<Task><Settings><Enabled>true</Enabled></Settings></Task>\n"
                     "State : Enabled\n"
                 ),
                 "stderr": "",

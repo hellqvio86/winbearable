@@ -1,4 +1,4 @@
-.PHONY: venv lint test test-windows clean format build publish run install version release-check hooks secrets trivy pre-commit
+.PHONY: venv lint test test-windows docs clean format build publish run install version release-check hooks secrets trivy pre-commit
 
 # renovate: datasource=docker depName=trufflesecurity/trufflehog
 TRUFFLEHOG_VERSION ?= 3.99.9
@@ -25,6 +25,9 @@ test: .venv
 
 test-windows: ## Run safe real-Windows integration tests locally (or in local Windows Docker container)
 	WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py -v
+
+docs: .venv ## Regenerate docs/tweaks-reference.md from TWEAK_CATALOG
+	.venv/bin/python3 bin/gen_docs.py
 
 pre-commit: hooks
 	./.githooks/pre-commit

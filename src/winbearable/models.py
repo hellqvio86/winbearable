@@ -43,6 +43,8 @@ class TweakStatus(StrEnum):
     DRIFTED = "drifted"
     BLOCKED_BY_POLICY = "blocked_by_policy"
     UNSUPPORTED_BUILD = "unsupported_build"
+    UNSUPPORTED_EDITION = "unsupported_edition"
+    SKIPPED_MANAGED = "skipped_managed"
     REQUIRES_ADMIN = "requires_admin"
     ERROR = "error"
 
@@ -201,21 +203,23 @@ class RegistryView(StrEnum):
 
 @dataclass(frozen=True)
 class RegistrySpec:
-    """Declarative specification of a single registry value state."""
+    """Declarative specification of a single registry value or key operation."""
 
     hive: str
     key_path: str
-    value_name: str
-    value_data: int | str | None = None
+    value_name: str = ""
+    value_data: RegistryValueData = None
     value_type: str = "REG_DWORD"
     action: str = "set"
     policy_checks: tuple[PolicyConflictPath, ...] = ()
     view: RegistryView = RegistryView.DEFAULT
+    key_path_glob: str | None = None
 
     @property
     def full_path(self) -> str:
         """Return full HKCU\\... or HKLM\\... key path."""
-        return f"{self.hive}\\{self.key_path}"
+        target = self.key_path_glob if self.key_path_glob is not None else self.key_path
+        return f"{self.hive}\\{target}"
 
     @property
     def display_value_name(self) -> str:
@@ -302,11 +306,77 @@ class OptionalFeatureSpec:
 
 @dataclass(frozen=True)
 class WingetSpec:
-    """Declarative specification for a per-user or machine winget package install."""
+    """Declarative specification for a per-user or machine winget package install or uninstall."""
 
     package_id: str
     scope: str = "user"
     vscode_extensions: tuple[str, ...] = ()
+    action: str = "install"
+
+
+@dataclass(frozen=True)
+class AuditpolSpec:
+    """Declarative specification for a GUID-based auditpol subcategory setting."""
+
+    subcategory_guid: str
+    success: bool = True
+    failure: bool = True
+
+
+@dataclass(frozen=True)
+class WevtutilSpec:
+    """Declarative specification for a Windows Event Log channel configuration via wevtutil.exe."""
+
+    channel: str
+    enabled: bool | None = None
+    max_size_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class FirewallGroupSpec:
+    """Declarative specification for enabling/disabling a Windows Firewall rule group by resource ID."""
+
+    group_resource_id: str
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class FsutilCaseSensitiveSpec:
+    """Declarative specification for enabling/disabling per-directory NTFS case sensitivity via fsutil.exe."""
+
+    directory: str
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class PowercfgHibernateSpec:
+    """Declarative specification for enabling/disabling Windows hibernation via powercfg.exe."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class GitConfigSpec:
+    """Declarative specification for a global git configuration entry via git.exe config --global."""
+
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class IcaclsUserOnlySpec:
+    """Declarative specification for restricting a user-owned directory's ACL to the current user via icacls.exe."""
+
+    path_template: str
+
+
+@dataclass(frozen=True)
+class FileSpec:
+    """Declarative specification for a structured configuration file merge (json, jsonc, ini, toml)."""
+
+    path_template: str
+    file_format: str
+    desired_keys: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -342,6 +412,14 @@ class TweakDefinition:
     task_specs: tuple[ScheduledTaskSpec, ...] = ()
     feature_specs: tuple[OptionalFeatureSpec, ...] = ()
     winget_specs: tuple[WingetSpec, ...] = ()
+    auditpol_specs: tuple[AuditpolSpec, ...] = ()
+    wevtutil_specs: tuple[WevtutilSpec, ...] = ()
+    firewall_group_specs: tuple[FirewallGroupSpec, ...] = ()
+    fsutil_specs: tuple[FsutilCaseSensitiveSpec, ...] = ()
+    powercfg_specs: tuple[PowercfgHibernateSpec, ...] = ()
+    git_config_specs: tuple[GitConfigSpec, ...] = ()
+    icacls_specs: tuple[IcaclsUserOnlySpec, ...] = ()
+    file_specs: tuple[FileSpec, ...] = ()
     stop_processes: tuple[str, ...] = ()
     uninstall_onedrive: bool = False
     cis_id: str | None = None
@@ -350,6 +428,7 @@ class TweakDefinition:
     requires_reboot: bool = False
     requires_explorer_restart: bool = False
     irreversible: bool = False
+    requires_tamper_protection_off: bool = False
 
 
 @dataclass(frozen=True)
@@ -600,6 +679,215 @@ class OptionalFeatureSnapshot:
 
 
 @dataclass(frozen=True)
+class RegistryKeySnapshot:
+    """Recorded pre-apply subtree state of a deleted registry key for exact rollback."""
+
+    hive: str
+    key_path: str
+    existed: bool
+    values: tuple[RegistryValueSnapshot, ...] = ()
+    subkeys: tuple[str, ...] = ()
+    view: RegistryView = RegistryView.DEFAULT
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize key snapshot to a JSON-compatible dictionary."""
+        return {
+            "hive": self.hive,
+            "key_path": self.key_path,
+            "existed": self.existed,
+            "values": [v.to_dict() for v in self.values],
+            "subkeys": list(self.subkeys),
+            "view": str(self.view),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RegistryKeySnapshot":
+        """Deserialize key snapshot from dictionary."""
+        raw_view = payload.get("view", RegistryView.DEFAULT)
+        try:
+            view = RegistryView(str(raw_view))
+        except ValueError:
+            view = RegistryView.DEFAULT
+        return cls(
+            hive=str(payload["hive"]),
+            key_path=str(payload["key_path"]),
+            existed=bool(payload["existed"]),
+            values=tuple(RegistryValueSnapshot.from_dict(v) for v in payload.get("values", [])),
+            subkeys=tuple(str(s) for s in payload.get("subkeys", [])),
+            view=view,
+        )
+
+
+@dataclass(frozen=True)
+class AuditpolSnapshot:
+    """Recorded pre-apply state of an auditpol subcategory."""
+
+    subcategory_guid: str
+    previous_setting: str | None
+    backup_csv_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subcategory_guid": self.subcategory_guid,
+            "previous_setting": self.previous_setting,
+            "backup_csv_path": self.backup_csv_path,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AuditpolSnapshot":
+        prev = payload.get("previous_setting")
+        bak = payload.get("backup_csv_path")
+        return cls(
+            subcategory_guid=str(payload["subcategory_guid"]),
+            previous_setting=str(prev) if prev is not None else None,
+            backup_csv_path=str(bak) if bak is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class WevtutilSnapshot:
+    """Recorded pre-apply state of a Windows Event Log channel."""
+
+    channel: str
+    previous_enabled: bool | None
+    previous_max_size_bytes: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "channel": self.channel,
+            "previous_enabled": self.previous_enabled,
+            "previous_max_size_bytes": self.previous_max_size_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "WevtutilSnapshot":
+        prev_en = payload.get("previous_enabled")
+        prev_sz = payload.get("previous_max_size_bytes")
+        return cls(
+            channel=str(payload["channel"]),
+            previous_enabled=bool(prev_en) if prev_en is not None else None,
+            previous_max_size_bytes=int(prev_sz) if prev_sz is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class FirewallGroupSnapshot:
+    """Recorded pre-apply state of a Windows Firewall rule group."""
+
+    group_resource_id: str
+    previous_enabled: bool | None
+    export_wfw_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_resource_id": self.group_resource_id,
+            "previous_enabled": self.previous_enabled,
+            "export_wfw_path": self.export_wfw_path,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "FirewallGroupSnapshot":
+        prev = payload.get("previous_enabled")
+        wfw = payload.get("export_wfw_path")
+        return cls(
+            group_resource_id=str(payload["group_resource_id"]),
+            previous_enabled=bool(prev) if prev is not None else None,
+            export_wfw_path=str(wfw) if wfw is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class FsutilSnapshot:
+    """Recorded pre-apply state of per-directory NTFS case sensitivity."""
+
+    directory: str
+    previous_enabled: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "directory": self.directory,
+            "previous_enabled": self.previous_enabled,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "FsutilSnapshot":
+        prev = payload.get("previous_enabled")
+        return cls(
+            directory=str(payload["directory"]),
+            previous_enabled=bool(prev) if prev is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class PowercfgSnapshot:
+    """Recorded pre-apply state of Windows hibernation."""
+
+    previous_enabled: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"previous_enabled": self.previous_enabled}
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "PowercfgSnapshot":
+        prev = payload.get("previous_enabled")
+        return cls(previous_enabled=bool(prev) if prev is not None else None)
+
+
+@dataclass(frozen=True)
+class GitConfigSnapshot:
+    """Recorded pre-apply state of a global git config key."""
+
+    key: str
+    existed: bool
+    previous_value: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "existed": self.existed,
+            "previous_value": self.previous_value,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "GitConfigSnapshot":
+        prev = payload.get("previous_value")
+        return cls(
+            key=str(payload["key"]),
+            existed=bool(payload["existed"]),
+            previous_value=str(prev) if prev is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    """Recorded pre-apply snapshot of a structured configuration file."""
+
+    path: str
+    existed: bool
+    sha256: str | None
+    previous_content: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "existed": self.existed,
+            "sha256": self.sha256,
+            "previous_content": self.previous_content,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "FileSnapshot":
+        sha = payload.get("sha256")
+        content = payload.get("previous_content")
+        return cls(
+            path=str(payload["path"]),
+            existed=bool(payload["existed"]),
+            sha256=str(sha) if sha is not None else None,
+            previous_content=str(content) if content is not None else None,
+        )
+
+
+@dataclass(frozen=True)
 class RunRecord:
     """A single apply transaction stored in state.json for rollback."""
 
@@ -608,9 +896,17 @@ class RunRecord:
     profile_name: str
     applied_tweaks: tuple[str, ...]
     registry_snapshots: tuple[RegistryValueSnapshot, ...] = ()
+    registry_key_snapshots: tuple[RegistryKeySnapshot, ...] = ()
     service_snapshots: tuple[ServiceSnapshot, ...] = ()
     task_snapshots: tuple[ScheduledTaskSnapshot, ...] = ()
     feature_snapshots: tuple[OptionalFeatureSnapshot, ...] = ()
+    auditpol_snapshots: tuple[AuditpolSnapshot, ...] = ()
+    wevtutil_snapshots: tuple[WevtutilSnapshot, ...] = ()
+    firewall_group_snapshots: tuple[FirewallGroupSnapshot, ...] = ()
+    fsutil_snapshots: tuple[FsutilSnapshot, ...] = ()
+    powercfg_snapshots: tuple[PowercfgSnapshot, ...] = ()
+    git_config_snapshots: tuple[GitConfigSnapshot, ...] = ()
+    file_snapshots: tuple[FileSnapshot, ...] = ()
     installed_winget_packages: tuple[str, ...] = ()
     installed_vscode_extensions: tuple[str, ...] = ()
     completed_operations: tuple[str, ...] = ()
@@ -628,9 +924,17 @@ class RunRecord:
             "profile_name": self.profile_name,
             "applied_tweaks": list(self.applied_tweaks),
             "registry_snapshots": [snap.to_dict() for snap in self.registry_snapshots],
+            "registry_key_snapshots": [snap.to_dict() for snap in self.registry_key_snapshots],
             "service_snapshots": [snap.to_dict() for snap in self.service_snapshots],
             "task_snapshots": [snap.to_dict() for snap in self.task_snapshots],
             "feature_snapshots": [snap.to_dict() for snap in self.feature_snapshots],
+            "auditpol_snapshots": [snap.to_dict() for snap in self.auditpol_snapshots],
+            "wevtutil_snapshots": [snap.to_dict() for snap in self.wevtutil_snapshots],
+            "firewall_group_snapshots": [snap.to_dict() for snap in self.firewall_group_snapshots],
+            "fsutil_snapshots": [snap.to_dict() for snap in self.fsutil_snapshots],
+            "powercfg_snapshots": [snap.to_dict() for snap in self.powercfg_snapshots],
+            "git_config_snapshots": [snap.to_dict() for snap in self.git_config_snapshots],
+            "file_snapshots": [snap.to_dict() for snap in self.file_snapshots],
             "installed_winget_packages": list(self.installed_winget_packages),
             "installed_vscode_extensions": list(self.installed_vscode_extensions),
             "completed_operations": list(self.completed_operations),
@@ -645,9 +949,17 @@ class RunRecord:
     def from_dict(cls, payload: dict[str, Any]) -> "RunRecord":
         """Deserialize run record from dictionary."""
         reg_snaps = tuple(RegistryValueSnapshot.from_dict(item) for item in payload.get("registry_snapshots", []))
+        reg_key_snaps = tuple(RegistryKeySnapshot.from_dict(item) for item in payload.get("registry_key_snapshots", []))
         svc_snaps = tuple(ServiceSnapshot.from_dict(item) for item in payload.get("service_snapshots", []))
         task_snaps = tuple(ScheduledTaskSnapshot.from_dict(item) for item in payload.get("task_snapshots", []))
         feat_snaps = tuple(OptionalFeatureSnapshot.from_dict(item) for item in payload.get("feature_snapshots", []))
+        auditpol_snaps = tuple(AuditpolSnapshot.from_dict(item) for item in payload.get("auditpol_snapshots", []))
+        wevtutil_snaps = tuple(WevtutilSnapshot.from_dict(item) for item in payload.get("wevtutil_snapshots", []))
+        fw_snaps = tuple(FirewallGroupSnapshot.from_dict(item) for item in payload.get("firewall_group_snapshots", []))
+        fsutil_snaps = tuple(FsutilSnapshot.from_dict(item) for item in payload.get("fsutil_snapshots", []))
+        powercfg_snaps = tuple(PowercfgSnapshot.from_dict(item) for item in payload.get("powercfg_snapshots", []))
+        git_snaps = tuple(GitConfigSnapshot.from_dict(item) for item in payload.get("git_config_snapshots", []))
+        file_snaps = tuple(FileSnapshot.from_dict(item) for item in payload.get("file_snapshots", []))
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
         vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
         completed_ops = tuple(str(item) for item in payload.get("completed_operations", []))
@@ -662,9 +974,17 @@ class RunRecord:
             profile_name=str(payload["profile_name"]),
             applied_tweaks=tuple(str(item) for item in payload.get("applied_tweaks", [])),
             registry_snapshots=reg_snaps,
+            registry_key_snapshots=reg_key_snaps,
             service_snapshots=svc_snaps,
             task_snapshots=task_snaps,
             feature_snapshots=feat_snaps,
+            auditpol_snapshots=auditpol_snaps,
+            wevtutil_snapshots=wevtutil_snaps,
+            firewall_group_snapshots=fw_snaps,
+            fsutil_snapshots=fsutil_snaps,
+            powercfg_snapshots=powercfg_snaps,
+            git_config_snapshots=git_snaps,
+            file_snapshots=file_snaps,
             installed_winget_packages=winget_pkgs,
             installed_vscode_extensions=vscode_exts,
             completed_operations=completed_ops,
@@ -689,6 +1009,22 @@ class WslConfigSpec:
     systemd: bool = True
     memory_gb: int | None = None
     processors: int | None = None
+    vm_idle_timeout: int | None = None
+    gui_applications: bool | None = None
+    nested_virtualization: bool | None = None
+    debug_console: bool | None = None
+    kernel_command_line: str | None = None
+    default_vhd_size: str | None = None
+    host_address_loopback: bool | None = None
+    ignored_ports: tuple[int, ...] | None = None
+    best_effort_dns_parsing: bool | None = None
+    default_user: str | None = None
+    hostname: str | None = None
+    generate_hosts: bool | None = None
+    generate_resolv_conf: bool | None = None
+    automount_root: str | None = None
+    cross_distro: bool | None = None
+    credentials: str = "bridged"
 
 
 @dataclass(frozen=True)
@@ -700,3 +1036,8 @@ class ProfileSpec:
     extends: str | None = None
     wsl: WslConfigSpec = field(default_factory=WslConfigSpec)
     tweaks: dict[str, bool] = field(default_factory=dict)
+    packages: tuple[str, ...] = ()
+    packages_remove: tuple[str, ...] = ()
+    params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    wsl_distros: dict[str, dict[str, Any]] = field(default_factory=dict)
+    includes: tuple[str, ...] = ()

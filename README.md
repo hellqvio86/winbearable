@@ -12,7 +12,7 @@
   <a href="https://pypi.org/project/winbearable/"><img src="https://img.shields.io/pypi/pyversions/winbearable.svg" alt="Python Versions"></a>
   <a href="https://github.com/astral-sh/uv"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v1.json" alt="uv"></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
-  <img src="https://img.shields.io/badge/Windows_11-24H2%20%7C%2025H2+-0078D6.svg?logo=windows11&logoColor=white" alt="Windows 11">
+  <img src="https://img.shields.io/badge/Windows_11-26H2%2B%20(Build%20%3E%3D%2026300%2C%20No%20IoT)-0078D6.svg?logo=windows11&logoColor=white" alt="Windows 11 26H2+ Build >= 26300 (No IoT)">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
@@ -25,7 +25,7 @@
 > Whatever cruel twist of fate landed you here, **this tool is for you.**
 >
 > We don't like Windows either. That's why `winbearable` (`wb`) is shamelessly opinionated:
-> - **Latest Windows 11 Only (24H2 / 25H2+, Build >= 26100):** We don't support Windows 10 or ancient Windows 11 builds. Maintaining one version of Windows is painful enough.
+> - **Only the Windows 11 We Are On (`26H2+`, Build `>= 26300` — NO IoT, NO LTSC):** We only support the current Windows 11 desktop installation we run on (`Build >= 26300`). We do **not** support Windows IoT (`IoTEnterprise` / `IoTEnterpriseS`), Windows LTSC (`EnterpriseS`), Windows Server, Windows 10, or older Windows 11 builds (`< 26300`). Maintaining one version of Windows is painful enough.
 > - **100% Native Python, Zero PowerShell Wrappers:** We use Python's standard library (`winreg`, `ctypes`, `tomllib`) and direct Win32 binaries (`wsl.exe`, `winget.exe`, `sc.exe`, `taskkill.exe`) with `shell=False`. It works even when corporate AppLocker/WDAC locks PowerShell into Constrained Language Mode.
 > - **Kills the Annoying OneDrive Tray Icon:** Terminates `OneDrive.exe`, deletes the `HKCU\...\Run\OneDrive` autorun key so it stops haunting your system tray, unpins OneDrive from File Explorer, blocks it via machine policy when admin, and can uninstall it outright.
 > - **Installs VS Code + Remote-WSL on the Windows Side:** Automatically installs `Microsoft.VisualStudioCode` (in user scope, no admin needed) plus the `ms-vscode-remote.remote-wsl` extension so typing `code .` in your WSL `bash` shell just works.
@@ -333,13 +333,14 @@ When running inside **WSL2**, you can audit your live Windows host and see which
 
 ---
 
-## Windows Build Support Policy
+## Windows Build & Edition Support Policy
 
-We don't like Windows enough to maintain legacy workarounds for older builds. **Only the maintainer's current Windows 11 build (`>= 26300`) is supported.**
+We don't like Windows enough to maintain legacy workarounds or embedded/IoT quirks. **Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT and LTSC are strictly unsupported.**
 
-| Build Number | OS Release | Support Status |
+| Build / Edition | OS Release | Support Status |
 | :--- | :--- | :--- |
-| `26300+` | Windows 11 (maintainer build) | **Supported** |
+| `26300+` (`Professional` / standard desktop) | Windows 11 `26H2+` (maintainer build) | **Supported** |
+| `IoTEnterprise`, `IoTEnterpriseS`, `EnterpriseS` (IoT / LTSC) | Windows IoT / LTSC (any build) | **Unsupported (`unsupported_edition` — NO IoT/LTSC)** |
 | `< 26300` | Older Windows 11 / Windows 10 | **Unsupported (`unsupported_build`)** |
 
 ---
