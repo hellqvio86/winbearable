@@ -31,8 +31,8 @@ All `v0.8.0` items (`P0`, `P1`, `P1-L`, `P2.1–P2.4`, `P2-Q.1–P2-Q.6`) are co
 - [x] **P2.2 — `test_backends_and_coverage.py` fixture cleanup**
   > resolved: Converted 12 `tempfile.TemporaryDirectory()` blocks in `test_backends_and_coverage.py` to pytest's `tmp_path` fixture alongside `src/tests/conftest.py` (`91%+` coverage).
 
-- [ ] **P2.3 — Windows 11 25H2+ real-host integration verification**
-  - Run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py` on an elevated Windows 11 host before the next minor release and update `DEFAULT_TESTED_BUILDS` if needed.
+- [x] **P2.3 — Windows 11 25H2+ real-host integration verification**
+  > resolved: Ran `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py -v` on this Windows 11 host (`3 passed in 15.96s`); `DEFAULT_TESTED_BUILDS = (26300,)` confirmed up to date.
 
 ---
 
