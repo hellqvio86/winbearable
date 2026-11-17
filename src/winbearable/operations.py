@@ -692,8 +692,8 @@ class IcaclsOperationAdapter:
                     target=spec.path_template,
                     action="restrict_to_current_user",
                     before_state="user_only" if restricted else "inherited/broad",
-                    after_state="user_only (inheritance:r, grant:r %USERNAME%:F)",
-                    reversible=False,
+                    after_state="user_only (inheritance:r, grant:r *SID:F)",
+                    reversible=True,
                 )
             )
             if not restricted:

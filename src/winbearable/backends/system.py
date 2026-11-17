@@ -1,12 +1,15 @@
 """Native system backend for environment detection, services, tasks, features, winget, and WSL."""
 
 import contextlib
+import csv
 import ctypes
 import os
 import platform
 import re
 import subprocess
 import sys
+import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -675,6 +678,12 @@ class SystemBackend(Protocol):
     def is_ssh_acl_restricted(self, path_str: str) -> bool:
         """Return True if path ACL is restricted to the current user."""
 
+    def backup_acl(self, path_str: str, backup_file: Path) -> bool:
+        """Save path ACL SDDL to backup_file via icacls.exe /save."""
+
+    def restore_acl(self, path_str: str, backup_file: Path) -> bool:
+        """Restore path ACL SDDL from backup_file via icacls.exe /restore."""
+
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
         """Restrict directory/file ACL to current user via icacls.exe."""
 
@@ -1009,6 +1018,21 @@ class InMemorySystemBackend:
     def is_ssh_acl_restricted(self, path_str: str) -> bool:
         return path_str in self.restricted_acls
 
+    def backup_acl(self, path_str: str, backup_file: Path) -> bool:
+        backup_file.parent.mkdir(parents=True, exist_ok=True)
+        backup_file.write_text("restricted" if path_str in self.restricted_acls else "broad", encoding="utf-8")
+        return True
+
+    def restore_acl(self, path_str: str, backup_file: Path) -> bool:
+        if not backup_file.is_file():
+            return False
+        state = backup_file.read_text(encoding="utf-8").strip()
+        if state == "restricted":
+            self.restricted_acls.add(path_str)
+        else:
+            self.restricted_acls.discard(path_str)
+        return True
+
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
         self.restricted_acls.add(path_str)
         return True
@@ -1103,6 +1127,24 @@ class NativeSystemBackend:
             return text
         return f"{text[:limit]}\n...[{label} truncated at {limit} chars]\n"
 
+    @staticmethod
+    def _decode_cmd_bytes(raw: bytes | str | None, args: list[str], oem_encoding: str = "oem") -> str:
+        """Decode native command output bytes using UTF-16LE for wsl.exe or UTF-8/OEM fallback."""
+        if raw is None:
+            return ""
+        if isinstance(raw, str):
+            return raw
+        exe_name = os.path.basename(args[0]).lower() if args else ""
+        if exe_name == "wsl.exe" and "-d" not in args[:2] and (b"\x00" in raw or raw.startswith(b"\xff\xfe")):
+            return raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                return raw.decode(oem_encoding, errors="replace")
+            except LookupError:
+                return raw.decode("cp850", errors="replace")
+
     def _run_native_cmd(
         self,
         args: list[str],
@@ -1126,12 +1168,8 @@ class NativeSystemBackend:
             )
             input_bytes = input_text.encode("utf-8") if input_text is not None else None
             stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=effective_timeout)
-            stdout_dec = (
-                stdout_raw.decode("utf-8", errors="replace") if isinstance(stdout_raw, bytes) else (stdout_raw or "")
-            )
-            stderr_dec = (
-                stderr_raw.decode("utf-8", errors="replace") if isinstance(stderr_raw, bytes) else (stderr_raw or "")
-            )
+            stdout_dec = self._decode_cmd_bytes(stdout_raw, args)
+            stderr_dec = self._decode_cmd_bytes(stderr_raw, args)
             cleaned_stdout = self._truncate_text(stdout_dec.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
             cleaned_stderr = self._truncate_text(stderr_dec.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
             if proc.returncode == 0:
@@ -1167,12 +1205,8 @@ class NativeSystemBackend:
                     proc.communicate(timeout=2.0)
                 except OSError, subprocess.SubprocessError:
                     pass
-            raw_out = (
-                exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            )
-            raw_err = (
-                exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            )
+            raw_out = self._decode_cmd_bytes(exc.stdout, args)
+            raw_err = self._decode_cmd_bytes(exc.stderr, args)
             bounded_out = self._truncate_text(raw_out.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
             bounded_err = self._truncate_text(raw_err.replace("\x00", ""), MAX_DIAGNOSTIC_CHARS, "diagnostic")
             msg = f"Command timed out after {effective_timeout}s: {bounded_err}".strip()
@@ -1301,10 +1335,26 @@ class NativeSystemBackend:
         res = self._run_native_cmd([self._sys32_exe("schtasks.exe"), "/Query", "/TN", task_path, "/XML"], timeout=30.0)
         if res.returncode != 0:
             return None
-        lower_out = res.stdout.lower()
-        xml_match = re.search(r"<enabled>\s*(true|false)\s*</enabled>", lower_out)
-        if xml_match is not None:
-            return xml_match.group(1) == "true"
+        xml_text = res.stdout.lstrip("\ufeff").strip()
+        if not xml_text:
+            return None
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return None
+        settings = next((child for child in root if child.tag == "Settings" or child.tag.endswith("}Settings")), None)
+        if settings is None:
+            return None
+        enabled_el = next(
+            (child for child in settings if child.tag == "Enabled" or child.tag.endswith("}Enabled")), None
+        )
+        if enabled_el is None:
+            return True
+        val = (enabled_el.text or "").strip().lower()
+        if val == "true":
+            return True
+        if val == "false":
+            return False
         return None
 
     def set_scheduled_task_enabled(self, task_path: str, enabled: bool) -> bool:
@@ -1799,19 +1849,98 @@ class NativeSystemBackend:
         res = self._run_native_cmd([git_exe, "config", "--global", key, value])
         return res.returncode == 0
 
+    def _get_current_user_sid(self) -> str | None:
+        """Resolve the current process user's SID via locale-independent whoami CSV output."""
+        if self._platform != "win32":
+            return None
+        res = self._run_native_cmd([self._sys32_exe("whoami.exe"), "/user", "/fo", "csv", "/nh"])
+        if res.returncode != 0:
+            return None
+        for row in csv.reader(res.stdout.splitlines()):
+            if len(row) >= 2 and row[1].strip().startswith("S-1-"):
+                return row[1].strip()
+        return None
+
+    @staticmethod
+    def _is_sddl_restricted_to_sid(sddl: str, owner_sid: str) -> bool:
+        """Return True iff the SDDL DACL is protected (D:P) and allows only owner_sid (or OW)."""
+        dacl_idx = sddl.find("D:")
+        if dacl_idx == -1:
+            return False
+        dacl_tail = sddl[dacl_idx + 2 :]
+        sacl_idx = dacl_tail.find("S:")
+        dacl_body = dacl_tail[:sacl_idx] if sacl_idx != -1 else dacl_tail
+        flags = dacl_body.split("(", 1)[0]
+        if "P" not in flags:
+            return False
+        aces = re.findall(r"\(([^)]+)\)", dacl_body)
+        if not aces:
+            return False
+        has_owner_allow = False
+        for ace in aces:
+            parts = ace.split(";")
+            if len(parts) < 6:
+                return False
+            ace_type = parts[0].strip().upper()
+            trustee = parts[5].strip()
+            if ace_type in {"A", "OA"}:
+                if trustee not in {owner_sid, "OW"}:
+                    return False
+                has_owner_allow = True
+        return has_owner_allow
+
     def is_ssh_acl_restricted(self, path_str: str) -> bool:
         expanded = os.path.expandvars(os.path.expanduser(path_str))
-        if not Path(expanded).exists():
+        target = Path(expanded)
+        if not target.exists():
             return True
         if self._platform != "win32":
             return False
+        owner_sid = self._get_current_user_sid()
+        if owner_sid is not None:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                acl_file = Path(tmp_dir) / "acl.sddl"
+                save_res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/save", str(acl_file)])
+                if save_res.returncode == 0 and acl_file.is_file():
+                    raw_bytes = acl_file.read_bytes()
+                    sddl_text = (
+                        raw_bytes.decode("utf-16-le", errors="replace")
+                        if b"\x00" in raw_bytes or raw_bytes.startswith(b"\xff\xfe")
+                        else raw_bytes.decode("utf-8", errors="replace")
+                    ).lstrip("\ufeff")
+                    sddl_lines = [ln.strip() for ln in sddl_text.splitlines() if "D:" in ln]
+                    if sddl_lines:
+                        return all(self._is_sddl_restricted_to_sid(ln, owner_sid) for ln in sddl_lines)
         res = self._run_native_cmd([self._sys32_exe("icacls.exe"), expanded])
         if res.returncode != 0:
             return False
-        lines = [
-            ln.strip() for ln in res.stdout.splitlines() if ln.strip() and not ln.lower().startswith("successfully")
-        ]
-        return len(lines) == 1
+        ace_lines = [ln.strip() for ln in res.stdout.splitlines() if ":" in ln and "(" in ln]
+        return len(ace_lines) == 1
+
+    def backup_acl(self, path_str: str, backup_file: Path) -> bool:
+        if self._platform != "win32":
+            return False
+        expanded = os.path.expandvars(os.path.expanduser(path_str))
+        target = Path(expanded)
+        if not target.exists():
+            return True
+        backup_file.parent.mkdir(parents=True, exist_ok=True)
+        res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/save", str(backup_file)])
+        return res.returncode == 0
+
+    def restore_acl(self, path_str: str, backup_file: Path) -> bool:
+        if self._platform != "win32" or not backup_file.is_file():
+            return False
+        expanded = os.path.expandvars(os.path.expanduser(path_str))
+        target = Path(expanded)
+        if not target.exists():
+            return False
+        res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target.parent), "/restore", str(backup_file)])
+        if res.returncode == 0:
+            return True
+        # Unprivileged callers lack SeRestorePrivilege for icacls /restore (rc=1300); reset to inherited DACL.
+        reset_res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/reset"])
+        return reset_res.returncode == 0
 
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
         if self._platform != "win32":
@@ -1820,14 +1949,17 @@ class NativeSystemBackend:
         target = Path(expanded)
         if not target.exists():
             return True
-        username = os.environ.get("USERNAME") or os.getlogin()
+        owner_sid = self._get_current_user_sid()
+        principal = f"*{owner_sid}" if owner_sid else (os.environ.get("USERNAME") or os.getlogin())
+        # Reset explicit ACEs to inherited first so /inheritance:r leaves only the current user SID.
+        self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/reset"])
         res = self._run_native_cmd(
             [
                 self._sys32_exe("icacls.exe"),
                 str(target),
                 "/inheritance:r",
                 "/grant:r",
-                f"{username}:(OI)(CI)F" if target.is_dir() else f"{username}:F",
+                f"{principal}:(OI)(CI)F" if target.is_dir() else f"{principal}:F",
             ]
         )
         return res.returncode == 0

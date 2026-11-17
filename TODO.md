@@ -131,19 +131,19 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 
 AGENTS invariant 7 says "never parse localized human text". Several paths still do, and the maintainer's own OS is Swedish.
 
-### B-01 · P1 · `NEEDS-WINDOWS` — Every native command is decoded as UTF-8
+### [x] B-01 · P1 · `NEEDS-WINDOWS` — Every native command is decoded as UTF-8
 - **Where:** `backends/system.py:1103` (`encoding="utf-8", errors="replace"`), NUL-stripping at `1108-1109`.
 - **Problem:** console tools (`netsh`, `auditpol`, `dism`, `schtasks`, `icacls`, `wevtutil`, `reg`) emit the OEM code page; `wsl.exe` management commands emit UTF-16LE (the `.replace("\x00","")` is a hack that works only for ASCII and leaves BOM garbage). Non-ASCII distro names or localized text become U+FFFD silently.
 - **Fix:** decode per command: bytes in, then `utf-16-le` (with BOM handling) for `wsl.exe -l/--status`, `oem`/`GetConsoleOutputCP` for console tools; or set `WSL_UTF8=1` where supported. Prefer machine formats everywhere (`/XML`, `/format:csv`, `/r`).
 - **Done when:** tests with real captured bytes (Swedish `cp850`, UTF-16LE `wsl -l -q` with non-ASCII distro name) parse correctly.
 
-### B-02 · P1 · `NEEDS-WINDOWS` — `is_scheduled_task_enabled` takes the first `<Enabled>` in the XML
+### [x] B-02 · P1 · `NEEDS-WINDOWS` — `is_scheduled_task_enabled` takes the first `<Enabled>` in the XML
 - **Where:** `system.py:1275`.
 - **Problem:** in task XML, `<Triggers>` precede `<Settings>`; trigger elements can carry their own `<Enabled>`. A regex `search` therefore may read a trigger's flag instead of the task's `Settings/Enabled` (and a missing element means "enabled"). Result: disabled tasks reported enabled → perpetual drift or false verification.
 - **Fix:** parse with `xml.etree.ElementTree`, read `Task/Settings/Enabled` (default true) with namespace handling.
 - **Done when:** fixtures with trigger-level `Enabled=true` + settings-level `Enabled=false`, and the reverse, resolve correctly; verified against one real disabled task.
 
-### B-03 · P1 · `CODE` + `NEEDS-WINDOWS` — ICACLS: locale-dependent "restricted" check, username not SID, no snapshot
+### [x] B-03 · P1 · `CODE` + `NEEDS-WINDOWS` — ICACLS: locale-dependent "restricted" check, username not SID, no snapshot
 - **Where:** `system.py:1732-1768`.
 - **Problems:** `is_ssh_acl_restricted` counts output lines and drops the summary line only if it starts with English `"successfully"` — on Swedish Windows the summary line survives, so the check always says "not restricted" (permanent drift). It also never checks *which* principal the single ACE belongs to. `restrict_acl_to_current_user` grants `%USERNAME%` (ambiguous for domain/Entra accounts), runs `/inheritance:r` (removes SYSTEM/Administrators), and keeps no ACL backup, so rollback is impossible (threat-model calls it "best-effort"; adapter sets `reversible=False`, yet the tweak is not gated behind `--allow-irreversible`).
 - **Fix:** use `icacls /save`/`/restore` into the run's backup dir; grant by SID (`*S-1-5-21-…` from the process token); read ACLs via Win32 (`GetNamedSecurityInfo`) or `icacls /save` output instead of counting lines.

@@ -910,8 +910,11 @@ def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest
             CommandResult((), 1, "", ""),
             CommandResult((), 0, "", ""),
             CommandResult((), 0, "", ""),
+            CommandResult((), 1, "", ""),  # whoami.exe fallback in is_ssh_acl_restricted
             CommandResult((), 0, "C:\\dir BUILTIN\\Users:(F)\nSuccessfully processed 1 files\n", ""),
-            CommandResult((), 0, "", ""),
+            CommandResult((), 1, "", ""),  # whoami.exe fallback in restrict_acl_to_current_user
+            CommandResult((), 0, "", ""),  # icacls /reset
+            CommandResult((), 0, "", ""),  # icacls /inheritance:r
         ],
     ):
         assert sys_win.is_vscode_extension_installed("ms-python.python") is True
@@ -1429,3 +1432,100 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
     wc_argv, wc_env = wc_calls[0]
     assert "-t" not in wc_argv and "secret-tok" not in wc_argv
     assert wc_env is not None and wc_env.get("WINGET_CREATE_GITHUB_TOKEN") == "secret-tok"
+
+
+def test_locale_decoding_task_xml_and_icacls_sddl(tmp_path: Path) -> None:
+    """B-01..B-03: UTF-16LE/OEM command decoding, Task/Settings/Enabled XML parsing, and locale-safe ICACLS."""
+    from unittest.mock import patch
+
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+
+    # B-01: _decode_cmd_bytes handles UTF-16LE wsl.exe --list and cp850 OEM Swedish text
+    utf16_bytes = "\ufeffUbuntu-ÅÄÖ\r\n".encode("utf-16-le")
+    assert NativeSystemBackend._decode_cmd_bytes(utf16_bytes, ["wsl.exe", "--list", "--quiet"]) == "Ubuntu-ÅÄÖ\r\n"
+
+    swedish_cp850 = "Bearbetade 1 filer; Åtgärd slutförd".encode("cp850")
+    assert "Åtgärd" in NativeSystemBackend._decode_cmd_bytes(swedish_cp850, ["icacls.exe"], oem_encoding="cp850")
+
+    # B-02: is_scheduled_task_enabled reads Task/Settings/Enabled, ignoring Trigger/Enabled
+    native = NativeSystemBackend(platform_override="win32")
+    xml_trigger_true_settings_false = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        "<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>"
+        "<Settings><Enabled>false</Enabled></Settings>"
+        "</Task>"
+    )
+    with patch.object(
+        native,
+        "_run_native_cmd",
+        return_value=CommandResult(("schtasks.exe",), 0, xml_trigger_true_settings_false, ""),
+    ):
+        assert native.is_scheduled_task_enabled(r"\Microsoft\Windows\Test") is False
+
+    xml_missing_settings_enabled = (
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        "<Triggers><LogonTrigger><Enabled>false</Enabled></LogonTrigger></Triggers>"
+        "<Settings><AllowStartOnDemand>true</AllowStartOnDemand></Settings>"
+        "</Task>"
+    )
+    with patch.object(
+        native,
+        "_run_native_cmd",
+        return_value=CommandResult(("schtasks.exe",), 0, xml_missing_settings_enabled, ""),
+    ):
+        assert native.is_scheduled_task_enabled(r"\Microsoft\Windows\Test") is True
+
+    # B-03: Swedish icacls output with non-English summary line + SID-based restrict_acl_to_current_user
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir()
+    swedish_icacls = (
+        f"{ssh_dir} BUILTIN\\Administratörer:(OI)(CI)(F)\n"
+        f"                  NT INSTANS\\SYSTEM:(OI)(CI)(F)\n"
+        "1 filer har bearbetats, 0 filer misslyckades.\n"
+    )
+    with patch.object(native, "_run_native_cmd", return_value=CommandResult(("icacls.exe",), 0, swedish_icacls, "")):
+        assert native.is_ssh_acl_restricted(str(ssh_dir)) is False
+
+    # SDDL check: protected DACL with only owner SID is restricted; extra SID is not
+    assert NativeSystemBackend._is_sddl_restricted_to_sid("D:PAI(A;OICI;FA;;;S-1-5-21-1000)", "S-1-5-21-1000") is True
+    assert (
+        NativeSystemBackend._is_sddl_restricted_to_sid(
+            "D:PAI(A;OICI;FA;;;S-1-5-21-1000)(A;OICI;FA;;;BA)", "S-1-5-21-1000"
+        )
+        is False
+    )
+
+    with (
+        patch.object(native, "_get_current_user_sid", return_value="S-1-5-21-1000"),
+        patch.object(native, "_run_native_cmd", return_value=CommandResult(("icacls.exe",), 0, "", "")) as mock_icacls,
+    ):
+        assert native.restrict_acl_to_current_user(str(ssh_dir)) is True
+    assert "*S-1-5-21-1000:(OI)(CI)F" in mock_icacls.call_args[0][0]
+
+    # Error paths + snapshot/backup/restore round-trip
+    with patch.object(native, "_run_native_cmd", return_value=CommandResult(("schtasks.exe",), 0, "<Task>", "")):
+        assert native.is_scheduled_task_enabled(r"\Microsoft\Windows\Broken") is None
+    assert NativeSystemBackend._is_sddl_restricted_to_sid("D:AI(A;;FA;;;S-1-5-21-1000)", "S-1-5-21-1000") is False
+    assert native.restore_acl(str(ssh_dir), tmp_path / "missing.acl") is False
+
+    from winbearable.models import IcaclsSnapshot
+    from winbearable.operations import IcaclsOperationAdapter
+    from winbearable.tweaks.catalog import get_tweak
+
+    snap = IcaclsSnapshot.from_dict(IcaclsSnapshot(path_template=str(ssh_dir), backup_acl_path="bak.acl").to_dict())
+    assert snap.backup_acl_path == "bak.acl"
+    fake_sys = InMemorySystemBackend()
+    acl_bak = tmp_path / "ssh.acl"
+    assert fake_sys.backup_acl(str(ssh_dir), acl_bak) is True
+    assert fake_sys.restrict_acl_to_current_user(str(ssh_dir)) is True
+    assert fake_sys.is_ssh_acl_restricted(str(ssh_dir)) is True
+    assert fake_sys.restore_acl(str(ssh_dir), acl_bak) is True
+    assert fake_sys.is_ssh_acl_restricted(str(ssh_dir)) is False
+    ops, _, _ = IcaclsOperationAdapter().inspect(
+        get_tweak("dev.fix_ssh_key_permissions"),
+        InMemoryRegistryBackend(),
+        fake_sys,
+    )
+    assert ops and ops[0].reversible is True

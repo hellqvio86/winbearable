@@ -295,10 +295,13 @@ def test_native_system_backend_linux_and_simulated_win32(tmp_path: Path) -> None
                 "args": tuple(args),
                 "returncode": 0,
                 "stdout": (
-                    "WSL version: 2.4.0.0\nUbuntu-24.04\nOneDrive.exe 1234\n"
-                    "Microsoft.VisualStudioCode\n"
-                    "<Task><Settings><Enabled>true</Enabled></Settings></Task>\n"
-                    "State : Enabled\n"
+                    "<Task><Settings><Enabled>true</Enabled></Settings></Task>"
+                    if any("schtasks" in str(a).lower() for a in args)
+                    else (
+                        "WSL version: 2.4.0.0\nUbuntu-24.04\nOneDrive.exe 1234\n"
+                        "Microsoft.VisualStudioCode\n"
+                        "State : Enabled\n"
+                    )
                 ),
                 "stderr": "",
             },
