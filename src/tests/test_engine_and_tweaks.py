@@ -248,7 +248,11 @@ def test_vscode_winget_install_and_rollback(state_store: StateStore) -> None:
 def test_high_risk_requires_explicit_confirmation(state_store: StateStore) -> None:
     """High-risk tweaks (e.g. VBS/HVCI) refuse to apply without allow_high_risk=True."""
     registry = InMemoryRegistryBackend()
-    system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
+    system = InMemorySystemBackend(
+        windows_build=MIN_SUPPORTED_BUILD,
+        is_admin=True,
+        installed_winget_packages={"9WZDNCRFHVFW", "9WZDNCRFJ3Q2", "9P1J8S7CCWWT", "9NBLGGH4R32N"},
+    )
     env = system.detect_environment(registry)
     paranoid_profile = load_profile("paranoid")
 
@@ -298,7 +302,11 @@ def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> 
             ),
         }
     )
-    system = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
+    system = InMemorySystemBackend(
+        windows_build=MIN_SUPPORTED_BUILD,
+        is_admin=True,
+        installed_winget_packages={"9WZDNCRFHVFW", "9WZDNCRFJ3Q2", "9P1J8S7CCWWT", "9NBLGGH4R32N"},
+    )
     env = system.detect_environment(registry)
 
     all_tweaks = get_all_tweaks()
@@ -337,7 +345,13 @@ def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> 
 
     reverted_score = calculate_hardening_score(env, registry, system)
     still_applied = [r["tweak_id"] for r in reverted_score["results"] if r["status"] == "applied"]
-    assert still_applied == ["dev.fix_ssh_key_permissions"]
+    assert set(still_applied) == {
+        "bloat.remove_bing_news",
+        "bloat.remove_bing_weather",
+        "bloat.remove_clipchamp",
+        "bloat.remove_feedback_hub",
+        "dev.fix_ssh_key_permissions",
+    }
 
 
 def test_write_ahead_journal_and_compensation_on_failure(state_store: StateStore) -> None:
