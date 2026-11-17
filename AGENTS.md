@@ -98,6 +98,11 @@ make release-check # lint + test + TruffleHog + Trivy
 - Every tweak must remain small, composable, and declare full metadata (risk, admin, irreversible, reboot/explorer-restart, policy conflict paths, tested builds, verification method, and provenance).
 - **Why `winbearable` vs Group Policy / Intune:** `winbearable` targets personal/unmanaged Windows machines where users lack Intune/ADMX infrastructure and want reversible, audited local baselines; enterprise fleets should use Group Policy or Intune directly (and `winbearable` yields via `BLOCKED_BY_POLICY` when policy keys conflict).
 
+## Pythonic Style (Write Python as a Pythonista)
+
+- **Idiomatic, readable, "pretty" Python:** Prefer clean dataclasses, comprehensions, context managers, `pathlib.Path`, early returns, shallow nesting, and small single-purpose helpers over verbose boilerplate or deep `if/else` chains.
+- **Reuse fixtures & helpers:** Whenever setup or cleanup repeats (in tests or production code), extract shared helpers or `pytest` fixtures in `src/tests/conftest.py` instead of duplicating setup inline.
+
 ## Testing Standards (Pythonic Pytest)
 
 - **Pure `pytest` only:** Write top-level `def test_*` functions (no `unittest.TestCase` classes, no `setUp`/`tearDown`, no `self.assert*`, no `unittest.main()`).

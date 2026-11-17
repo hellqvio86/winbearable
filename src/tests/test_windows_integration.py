@@ -151,3 +151,16 @@ def test_readonly_plan_all_profiles_and_audit() -> None:
     audit_payload: dict[str, Any] = json.loads(audit_buf.getvalue())
     assert "findings" in audit_payload
     assert len(audit_payload["findings"]) >= 10
+
+
+def test_readonly_identifier_snapshot_capture() -> None:
+    """P0.4: Capture read-only sc/schtasks/auditpol snapshots on real Windows for offline verification."""
+    import subprocess
+
+    sc_res = subprocess.run(["sc.exe", "query", "type=", "service", "state=", "all"], capture_output=True, text=True)
+    assert sc_res.returncode == 0
+    assert sc_res.stdout.strip()
+
+    auditpol_res = subprocess.run(["auditpol.exe", "/list", "/subcategory:*", "/v"], capture_output=True, text=True)
+    assert auditpol_res.returncode == 0
+    assert auditpol_res.stdout.strip()

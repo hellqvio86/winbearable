@@ -21,16 +21,29 @@ CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 
 def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    proc = subprocess.Popen(
         args,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=15.0,
         shell=False,
-        check=False,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=15.0)
+        return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
+    except subprocess.TimeoutExpired as exc:
+        if sys.platform == "win32" and proc.pid:
+            subprocess.run(
+                ["taskkill.exe", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                shell=False,
+                check=False,
+            )
+        proc.kill()
+        proc.communicate()
+        raise subprocess.TimeoutExpired(cmd=args, timeout=15.0, output=exc.output, stderr=exc.stderr) from exc
 
 
 def _decode_bool(raw: Any) -> bool:
@@ -157,6 +170,12 @@ def set_wsl_hyperv_firewall_setting(
                     verified = _parse_ps_setting_json(res.stdout)
                     if verified is None:
                         verified = get_wsl_hyperv_firewall_setting(runner=runner, platform_override=platform_override)
+                    if verified is None:
+                        returncode = 1
+                        error = "PARSE_ERROR: PowerShell returned invalid or empty Hyper-V firewall JSON."
+            except subprocess.TimeoutExpired:
+                returncode = 124
+                error = "TIMEOUT: powershell.exe timed out after 15.0s configuring Hyper-V firewall."
             except (OSError, subprocess.SubprocessError) as exc:
                 returncode = 1
                 error = str(exc)

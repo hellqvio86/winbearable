@@ -51,6 +51,7 @@ from .models import (
     TweakStatus,
     UnsupportedPlatformError,
     WevtutilSnapshot,
+    WslDistroSnapshot,
 )
 from .operations import (
     apply_file_spec,
@@ -890,6 +891,18 @@ def _compensate_run_record(
                 shutil.copy2(bak, run_record.wslconfig_path)
         except OSError as exc:
             errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
+    for d_snap in reversed(run_record.wsl_distro_snapshots):
+        if d_snap.existed:
+            res = system.run_wsl_command(
+                ["-d", d_snap.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
+                input_text=d_snap.previous_content,
+            )
+            if res.returncode != 0:
+                errors.append(f"wsl distro '{d_snap.distro}' restore: {res.stderr or res.returncode}")
+        else:
+            res = system.run_wsl_command(["-d", d_snap.distro, "-u", "root", "--", "rm", "-f", "/etc/wsl.conf"])
+            if res.returncode != 0:
+                errors.append(f"wsl distro '{d_snap.distro}' cleanup: {res.stderr or res.returncode}")
     return errors
 
 
@@ -1221,7 +1234,7 @@ def apply_profile(
 
     run_id: str | None = None
     wsl_result: dict[str, Any] | None = None
-    if not dry_run and drifted_indices:
+    if not dry_run and (drifted_indices or (profile.wsl.enabled and env.wsl_installed)):
         with state_store.transaction_lock():
             run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
             backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
@@ -1235,6 +1248,7 @@ def apply_profile(
             failure_outcomes: list[dict[str, Any]] = []
             wsl_backup_path: str | None = None
             wsl_target_path: str | None = None
+            wsl_distro_snapshots: list[WslDistroSnapshot] = []
             exported_subtrees: set[tuple[str, str]] = set()
             now_iso = datetime.now(tz=UTC).isoformat()
 
@@ -1262,6 +1276,7 @@ def apply_profile(
                     failure_outcomes=tuple(failure_outcomes),
                     wsl_backup_path=wsl_backup_path,
                     wslconfig_path=wsl_target_path,
+                    wsl_distro_snapshots=tuple(wsl_distro_snapshots),
                     state=state,
                     error=error,
                 )
@@ -1272,8 +1287,9 @@ def apply_profile(
                 completed_ops.append(op_desc)
 
             # Write-ahead journal: persist full pre-change snapshots before any mutation.
-            state_store.upsert_run(_make_record(TransactionState.PLANNED))
-            state_store.upsert_run(_make_record(TransactionState.APPLYING))
+            if drifted_indices:
+                state_store.upsert_run(_make_record(TransactionState.PLANNED))
+                state_store.upsert_run(_make_record(TransactionState.APPLYING))
 
             for idx in drifted_indices:
                 res = evaluations[idx]
@@ -1340,6 +1356,16 @@ def apply_profile(
                                 wslconfig_path=wslconfig_path,
                                 dry_run=False,
                             )
+                            wsl_backup_path = first_res.get("wslconfig_backup_path")
+                            wsl_target_path = first_res.get("wslconfig_path")
+                            if first_res.get("distro_changed"):
+                                wsl_distro_snapshots.append(
+                                    WslDistroSnapshot(
+                                        distro=distros[0],
+                                        existed=bool(first_res.get("distro_existed", False)),
+                                        previous_content=str(first_res.get("distro_previous_content", "")),
+                                    )
+                                )
                             distro_results.append({"distro": distros[0], "distro_changed": first_res["distro_changed"]})
                             for extra_distro in distros[1:]:
                                 extra_res = plan_or_apply_wsl(
@@ -1349,6 +1375,14 @@ def apply_profile(
                                     wslconfig_path=wslconfig_path,
                                     dry_run=False,
                                 )
+                                if extra_res.get("distro_changed"):
+                                    wsl_distro_snapshots.append(
+                                        WslDistroSnapshot(
+                                            distro=extra_distro,
+                                            existed=bool(extra_res.get("distro_existed", False)),
+                                            previous_content=str(extra_res.get("distro_previous_content", "")),
+                                        )
+                                    )
                                 distro_results.append(
                                     {"distro": extra_distro, "distro_changed": extra_res["distro_changed"]}
                                 )
@@ -1362,12 +1396,17 @@ def apply_profile(
                             )
                         wsl_backup_path = wsl_result.get("wslconfig_backup_path")
                         wsl_target_path = wsl_result.get("wslconfig_path")
-                        state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                        wsl_changed = bool(wsl_result.get("wslconfig_changed")) or bool(wsl_distro_snapshots)
+                        if drifted_indices or wsl_changed:
+                            state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                            run_id = run_id_candidate
                     except PermissionError as exc:
                         if wslconfig_path is not None:
                             raise
                         wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
-                        state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                        if drifted_indices:
+                            state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                            run_id = run_id_candidate
                     except (WslOperationError, OSError) as exc:
                         err_msg = str(exc)
                         failed_ids.append("wsl")
@@ -1381,9 +1420,11 @@ def apply_profile(
                             err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
                         )
                         state_store.upsert_run(_make_record(TransactionState.FAILED, error=full_error))
+                        run_id = run_id_candidate
                 else:
-                    state_store.upsert_run(_make_record(TransactionState.COMMITTED))
-                run_id = run_id_candidate
+                    if drifted_indices:
+                        state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                        run_id = run_id_candidate
 
     if wsl_result is None and profile.wsl.enabled and not failed_ids:
         if not env.wsl_installed:
