@@ -568,6 +568,16 @@ def resolve_tweak_params(tweak: TweakDefinition, params: dict[str, Any] | None) 
                 ),
             ),
         )
+    elif tweak.tweak_id == "hardening.defender_asr_audit" and "mode" in params:
+        raw_mode = params["mode"]
+        if not isinstance(raw_mode, str) or raw_mode.lower() not in {"audit", "block"}:
+            return replace(tweak, registry_specs=(), parameterized=True)
+        target_val = 1 if raw_mode.lower() == "block" else 2
+        updated_specs = tuple(
+            replace(spec, value_data=target_val) if spec.key_path.endswith(r"\ASR\Rules") else spec
+            for spec in tweak.registry_specs
+        )
+        return replace(tweak, registry_specs=updated_specs)
     return tweak
 
 

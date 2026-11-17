@@ -848,9 +848,12 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         supported_editions=("Pro", "Enterprise", "Education"),
     ),
     "hardening.defender_asr_audit": _p(
-        "Enables core Microsoft Defender Attack Surface Reduction (ASR) rules in Audit mode (2).",
+        "Enables core Microsoft Defender Attack Surface Reduction (ASR) rules in Audit (2) or Block (1) mode.",
         "Microsoft Learn: Attack surface reduction rules deployment reference",
-        "Low risk: audit-only mode for 6 core ASR GUIDs; yields BLOCKED_BY_POLICY if Tamper Protection is on.",
+        (
+            "Low risk in default audit mode (2); optional block mode (1) via [params]; "
+            "yields BLOCKED_BY_POLICY if Tamper Protection is on."
+        ),
         (
             "Audits LSASS credential theft, email executables, Office child procs, "
             "obfuscated scripts, WMI persistence, and vulnerable drivers."
@@ -965,6 +968,39 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "Provides Nerd Font glyphs for terminal prompts and editors.",
         "winget_package",
         "Verified package ID DEVCOM.JetBrainsMonoNerdFont via winget search.",
+    ),
+    "ai.disable_recall_feature": _p(
+        "Disables the Windows Recall optional feature via dism.exe.",
+        "Microsoft Learn: Manage Windows Recall",
+        "Medium risk: optional feature removal; requires admin and reboot; reversible via dism.",
+        "Removes Recall feature binaries/state from the OS.",
+        "optional_feature",
+        "Verified Featurename:Recall against Microsoft Learn Recall management docs.",
+    ),
+    "ai.disable_click_to_do": _p(
+        "Disables Windows Click to Do screenshot analysis via HKCU WindowsAI policy.",
+        "Microsoft Learn: Policy CSP - WindowsAI (DisableClickToDo)",
+        "Low risk: single HKCU policy DWORD; trivially reverted.",
+        "Prevents Click to Do from capturing and analyzing screen content.",
+        "registry_value",
+        "Verified WindowsAI\\DisableClickToDo=1 against Microsoft Learn Policy CSP.",
+    ),
+    "ai.disable_notepad_paint_ai": _p(
+        "Disables AI features in Windows Notepad and Microsoft Paint via HKLM policies.",
+        "Microsoft Learn: Windows Notepad & Paint ADMX policy references",
+        "Low risk: machine-scope policy DWORDs; trivially reverted.",
+        "Disables Notepad AI rewrite and Paint Generative Fill / Image Creator / Cocreator.",
+        "registry_value",
+        "Verified WindowsNotepad\\DisableAIFeatures and Paint policy values against Microsoft Learn.",
+    ),
+    "ai.remove_copilot_app": _p(
+        "Uninstalls the Microsoft Copilot Store app per-user via winget.",
+        "Microsoft Store / Winget: XP9CXNGPPJ97XX",
+        "Medium risk, irreversible: requires manual reinstall from Microsoft Store.",
+        "Removes the Microsoft Copilot app for the current user.",
+        "winget_package",
+        "Verified Store ID XP9CXNGPPJ97XX via winget search on Windows 11.",
+        reversibility="irreversible",
     ),
     "bloat.remove_bing_news": _p(
         "Uninstalls the preinstalled Microsoft News (Bing News) consumer app.",

@@ -77,7 +77,7 @@ def test_plan_apply_status_rollback_flow(
     # 3. Status shows all applied (both human and JSON)
     code, stdout, _ = cli_runner(["status", "--profile", "user-only"])
     assert code == 0
-    assert "16/16 tweaks applied" in stdout
+    assert "17/17 tweaks applied" in stdout
 
     code_sjson, stdout_sjson, _ = cli_runner(["status", "--profile", "user-only", "--json"])
     assert code_sjson == 0

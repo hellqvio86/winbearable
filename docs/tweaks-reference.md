@@ -4,9 +4,13 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 
 | Tweak ID | Category | Admin? | Risk | CIS ID | Profiles | Summary |
 | :--- | :--- | :---: | :---: | :---: | :--- | :--- |
+| `ai.disable_click_to_do` | `ai` | No | `low` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Click to Do (User Policy) |
 | `ai.disable_copilot_machine` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Copilot (Machine Policy) |
 | `ai.disable_copilot_user` | `ai` | No | `low` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Windows Copilot (Per-User) |
+| `ai.disable_notepad_paint_ai` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable AI Features in Notepad & Paint |
 | `ai.disable_recall` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Recall & AI Snapshot Analysis |
+| `ai.disable_recall_feature` | `ai` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Recall Optional Feature |
+| `ai.remove_copilot_app` | `ai` | No | `medium` | — | *opt-in* | Uninstall Microsoft Copilot App (Irreversible) |
 | `apps.install_vscode` | `apps` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Install Visual Studio Code (Windows User Scope) + Remote-WSL Extension |
 | `bloat.disable_consumer_features` | `bloat` | Yes | `low` | `18.10.12.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Consumer Features & Auto-Provisioned Junk Apps |
 | `bloat.remove_bing_news` | `bloat` | No | `low` | — | *opt-in* | Remove Microsoft News (Bing News) |
@@ -35,7 +39,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.browser_privacy_baseline` | `hardening` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enforce Edge & Chrome Browser Privacy Baseline (No Password Sync, Strict Tracking) |
 | `hardening.cmdline_process_audit` | `hardening` | Yes | `low` | `18.8.3.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Include Command Line in Process Creation Events (4688) |
 | `hardening.credential_guard` | `hardening` | Yes | `high` | — | *opt-in* | Enable Credential Guard Without UEFI Lock (LsaCfgFlags=2) |
-| `hardening.defender_asr_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Defender ASR Rules (Audit Mode) |
+| `hardening.defender_asr_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Defender ASR Rules (Audit or Block Mode) |
 | `hardening.defender_cloud_and_pua` | `hardening` | Yes | `medium` | `18.10.43` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enable Microsoft Defender PUA Block & Cloud Protection |
 | `hardening.defender_controlled_folder_access_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Controlled Folder Access (Audit Mode) |
 | `hardening.defender_network_protection_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Network Protection (Audit Mode) |

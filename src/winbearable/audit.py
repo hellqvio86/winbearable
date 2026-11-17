@@ -816,6 +816,45 @@ def _check_hyperv_firewall() -> AuditFinding:
     )
 
 
+def _check_legacy_tls(registry: RegistryBackend) -> AuditFinding:
+    """Audit SCHANNEL Protocols for explicitly re-enabled legacy TLS 1.0, TLS 1.1, or SSL 3.0."""
+    base = r"SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols"
+    re_enabled: list[str] = []
+    for proto in ("SSL 3.0", "TLS 1.0", "TLS 1.1"):
+        for role in ("Client", "Server"):
+            key_path = f"{base}\\{proto}\\{role}"
+            ok_en, en_val = _safe_val(registry, HIVE_HKLM, key_path, "Enabled")
+            ok_dbd, dbd_val = _safe_val(registry, HIVE_HKLM, key_path, "DisabledByDefault")
+            if (ok_en and en_val is not None and en_val[0] == 1) or (
+                ok_dbd and dbd_val is not None and dbd_val[0] == 0
+            ):
+                re_enabled.append(f"{proto}\\{role}")
+    if re_enabled:
+        obs = PostureObservation(
+            ObservationState.ENABLED,
+            "registry",
+            ObservationConfidence.HIGH,
+            f"Legacy Schannel protocols explicitly enabled: {', '.join(re_enabled)}",
+            "Registry explicitly enables legacy SSL/TLS.",
+        )
+        return AuditFinding(
+            "chk.legacy_tls",
+            "hardening",
+            "Legacy Schannel TLS 1.0 / 1.1 / SSL 3.0",
+            "medium",
+            obs,
+            "Remove explicit Enabled=1 / DisabledByDefault=0 overrides under SCHANNEL\\Protocols.",
+        )
+    obs = PostureObservation(
+        ObservationState.DISABLED,
+        "registry",
+        ObservationConfidence.MEDIUM,
+        "No legacy SSL 3.0 / TLS 1.0 / TLS 1.1 overrides enabled (disabled by default on Windows 11 >= 26300)",
+        "SCHANNEL\\Protocols has no legacy protocol enable overrides.",
+    )
+    return AuditFinding("chk.legacy_tls", "hardening", "Legacy Schannel TLS 1.0 / 1.1 / SSL 3.0", "info", obs)
+
+
 def run_security_audit(
     env: EnvironmentInfo,
     registry: RegistryBackend,
@@ -845,6 +884,7 @@ def run_security_audit(
         wg_find,
         st_find,
         _check_hyperv_firewall(),
+        _check_legacy_tls(registry),
     ]
     if wsl_audit_data is not None:
         deep = wsl_audit_data.get("deep", {}) if isinstance(wsl_audit_data, dict) else {}

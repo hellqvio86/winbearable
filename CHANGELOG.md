@@ -2,6 +2,15 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.7] - 2026-11-17
+
+### Added
+
+- Completed `TWK-C` AI surface-area tweaks: `ai.disable_recall_feature` (`Recall` optional feature), `ai.disable_click_to_do` (`HKCU\...\WindowsAI\DisableClickToDo=1`), `ai.disable_notepad_paint_ai` (`WindowsNotepad\DisableAIFeatures=1` and `Paint` AI policy flags), and `ai.remove_copilot_app` (`XP9CXNGPPJ97XX`, opt-in irreversible).
+- Added read-only `chk.legacy_tls` audit check in `wb audit` for explicitly re-enabled SSL 3.0 / TLS 1.0 / TLS 1.1 Schannel protocols.
+- Added `mode = "audit" | "block"` parameter support to `hardening.defender_asr_audit` via `[params."hardening.defender_asr_audit"]` so users can choose Audit (2, default) or Block (1) mode.
+- Updated `TODO.md` statuses for `TWK-C`, `TWK-E`, `TWK-H`, `TWK-J`, and `WSL-01`..`WSL-07`.
+
 ## [0.9.6] - 2026-11-17
 
 ### Added

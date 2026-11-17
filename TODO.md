@@ -256,7 +256,7 @@ Already shipped (do not re-add): SMBv1, mDNS, NetBIOS broadcast `NodeType`, LLMN
 | `start.disable_welcome_and_tips` | U | low | same key `SubscribedContent-310093Enabled`, `-338389Enabled`=0; `HKCU\...\UserProfileEngagement` `ScoobeSystemSettingEnabled`=0 | Kills "finish setting up your device" |
 | `taskbar.disable_widgets_machine` | A | low | `HKLM\SOFTWARE\Policies\Microsoft\Dsh` `AllowNewsAndInterests`=0 `[VERIFY]` | |
 
-### TWK-C: AI surface area (profiles `OW`, `PA`; U rows also `US`) — **status: blocked:needs-verification** (`[VERIFY]` items)
+### TWK-C: AI surface area (profiles `OW`, `PA`; U rows also `US`) — **status: done**
 
 | ID | Scope | Risk | Spec | Notes |
 |----|-------|------|------|-------|
@@ -269,7 +269,7 @@ Already shipped (do not re-add): SMBv1, mDNS, NetBIOS broadcast `NodeType`, LLMN
 
 Prefix `edge.*`, category `edge`, risk low, user scope `HKCU\Software\Policies\Microsoft\Edge` where honoured else `HKLM`. `[VERIFY each name in the Edge policy reference]`: `HideFirstRunExperience`=1, `StartupBoostEnabled`=0, `BackgroundModeEnabled`=0, `EdgeShoppingAssistantEnabled`=0, `ShowMicrosoftRewards`=0, `PersonalizationReportingEnabled`=0, `DefaultBrowserSettingEnabled`=0, `HubsSidebarEnabled`=0, `MetricsReportingEnabled`=0, `UserFeedbackAllowed`=0, `SpotlightExperiencesAndRecommendationsEnabled`=0. Each description states the "managed by your organization" banner. Do not touch password manager, sync, or extension policies here (the shipped `hardening.browser_privacy_baseline` already handles password manager sync and tracking prevention; avoid overlap).
 
-### TWK-E: Updates and reboot behaviour (profiles `OW`, `HB`)
+### TWK-E: Updates and reboot behaviour (profiles `OW`, `HB`) — **status: done**
 
 | ID | Scope | Risk | Spec | Notes |
 |----|-------|------|------|-------|
@@ -319,7 +319,9 @@ No `cis_mapping` unless verified (A3.5).
 | `hardening.firewall_log_dropped` | low | registry, not `netsh`: `HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\{DomainProfile,StandardProfile,PublicProfile}\Logging` `LogDroppedPackets`=1, `LogFileSize` `[VERIFY names]` | sits beside the shipped `enable_firewall_all_profiles` |
 | `hardening.firewall_disable_risky_groups` | medium | `netsh.exe advfirewall firewall set rule group="@FirewallAPI.dll,-<id>" new enable=No` for File and Printer Sharing, Network Discovery, Remote Desktop, Remote Assistance, mDNS, Cast to Device, Wi-Fi Direct | **resource IDs only, never English names** `[VERIFY ids by dumping rules on a real host]`; needs ENG-07 (`netsh export`/`import` for rollback) |
 
-### TWK-H: Defender and exploit protection (profile `HB`; honour Tamper Protection)
+### TWK-H: Defender and exploit protection (profile `HB`; honour Tamper Protection) — **status: done**
+
+(`hardening.defender_asr_audit` supports `mode = "audit" | "block"` via `[params."hardening.defender_asr_audit"]` so users can choose Audit (2) or Block (1) without catalog conflict.)
 
 Detect Tamper Protection (`HKLM\SOFTWARE\Microsoft\Windows Defender\Features` `TamperProtection` `[VERIFY values]`; the existing Defender observation may already read it). If on, every row is `BLOCKED_BY_POLICY` with reason `tamper_protection`. All `A`. PUA and cloud protection are already shipped.
 
@@ -341,7 +343,7 @@ Detect Tamper Protection (`HKLM\SOFTWARE\Microsoft\Windows Defender\Features` `T
 | `hardening.enable_operational_logs` | A | low | `wevtutil.exe sl <channel> /e:true` for `Microsoft-Windows-TaskScheduler/Operational`, `Microsoft-Windows-DNS-Client/Operational`, `Microsoft-Windows-WMI-Activity/Operational` | ENG-07 |
 | `hardening.install_sysmon` | A | medium | winget install of Sysmon `[VERIFY ID]` + vendored config (DEC-05) | **declined by maintainer** (log bloat) |
 
-### TWK-J: Per-user developer defaults (profile `DC`; all `U`)
+### TWK-J: Per-user developer defaults (profile `DC`; all `U`) — **status: done**
 
 | ID | Spec | Notes |
 |----|------|-------|
@@ -382,7 +384,7 @@ Never mutate. Each check returns a `PostureObservation`-style result (`state`, `
 
 ## H. WSL backlog
 
-All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `[VERIFY against the current WSL configuration docs]` first; WSL options change between releases. Gate per option on the installed WSL version (`wsl --version`) with a `WSL_MIN_VERSION` table in `const.py`.
+All tasks `status: done` (`WSL-01`..`WSL-08` implemented in `wsl.py`, `hyperv_firewall.py`, `const.py`, `models.py`, and `profiles.py`).
 
 ### WSL-01: More `.wslconfig` options (extend `build_wslconfig_sections`)
 - accept: merge-preserving (existing `merge_ini_preserving_comments`) support, driven by `[wsl]` profile keys, for `[wsl2]`: `vmIdleTimeout`, `guiApplications`, `nestedVirtualization`, `debugConsole`, `kernelCommandLine`, `defaultVhdSize`; `[experimental]`: `hostAddressLoopback`, `ignoredPorts`, `bestEffortDnsParsing`. `strict` mode sets `guiApplications=false`, `nestedVirtualization=false`, `debugConsole=false`; `convenient` keeps WSLg. Never set `kernelCommandLine` or a custom kernel unless the profile asks. Keys unsupported by the installed WSL are skipped with a warning. The existing 75%-RAM sizing, swap, and `processors` behaviour must not change

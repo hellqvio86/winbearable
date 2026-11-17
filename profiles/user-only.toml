@@ -42,6 +42,7 @@ systemd = true
 # --- AI, Privacy & Hardening (No Admin) ---
 # Source: https://learn.microsoft.com/en-us/windows/client-management/manage-windows-copilot
 "ai.disable_copilot_user" = true
+"ai.disable_click_to_do" = true
 "privacy.disable_advertising_id" = true
 "privacy.disable_tailored_experiences" = true
 "hardening.disable_wsh_user" = true

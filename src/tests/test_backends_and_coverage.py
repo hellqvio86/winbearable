@@ -439,7 +439,7 @@ def test_models_and_tui_helpers(tmp_path: Path) -> None:
         runner=_capture_runner,
     )
     assert rc == 0
-    assert len(captured_rows) == 16
+    assert len(captured_rows) == len(profile.tweaks)
 
     with patch("importlib.util.find_spec", return_value=None):
         assert not (is_textual_available())
