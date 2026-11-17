@@ -1003,3 +1003,67 @@ def test_file_config_sha256_drift_refusal_and_managed_device_guard(
             tw = get_tweak(tid)
             assert not tw.requires_admin
             assert all("\\Policies\\" not in r.key_path for r in tw.registry_specs)
+
+
+def test_state_store_pruning_preserves_incomplete_and_credential_hygiene(tmp_path: Path) -> None:
+    """Cover StateStore rotation bounds (P1.6) and _audit_credential_hygiene happy/error paths (P1-L.3)."""
+    from winbearable.models import RunRecord, TransactionState
+    from winbearable.state import DEFAULT_MAX_BACKUP_DIRS, DEFAULT_MAX_RUN_HISTORY
+    from winbearable.wsl import _audit_credential_hygiene
+
+    store = StateStore(tmp_path / "state.json")
+    backups_root = tmp_path / "backups"
+    backups_root.mkdir()
+    runs: list[RunRecord] = [
+        RunRecord(
+            run_id="incomplete-keep",
+            timestamp="2026-11-17T00:00:00Z",
+            profile_name="owner",
+            applied_tweaks=(),
+            state=TransactionState.APPLYING,
+        )
+    ]
+    (backups_root / "incomplete-keep").mkdir()
+    for idx in range(DEFAULT_MAX_RUN_HISTORY + 5):
+        rid = f"done-{idx:03d}"
+        (backups_root / rid).mkdir()
+        runs.append(
+            RunRecord(
+                run_id=rid,
+                timestamp=f"2026-11-17T00:{idx:02d}:00Z",
+                profile_name="user-only",
+                applied_tweaks=(),
+                state=TransactionState.COMMITTED,
+            )
+        )
+    store.save_runs(runs)
+    loaded = store.load_runs()
+    assert len(loaded) == DEFAULT_MAX_RUN_HISTORY
+    assert any(r.run_id == "incomplete-keep" for r in loaded)
+    assert (backups_root / "incomplete-keep").is_dir()
+    non_protected_dirs = [p for p in backups_root.iterdir() if p.name != "incomplete-keep"]
+    assert len(non_protected_dirs) <= DEFAULT_MAX_BACKUP_DIRS
+
+    # Credential hygiene: clean vs dirty
+    clean_ssh = tmp_path / "ssh_clean"
+    clean_ssh.mkdir(mode=0o700)
+    clean_key = clean_ssh / "id_ed25519"
+    clean_key.write_text("PRIVATE", encoding="utf-8")
+    clean_key.chmod(0o600)
+    clean_res = _audit_credential_hygiene(["store"], ssh_dir=clean_ssh, env_vars={})
+    assert clean_res["clean"] is True
+
+    dirty_ssh = tmp_path / "ssh_dirty"
+    dirty_ssh.mkdir(mode=0o755)
+    dirty_key = dirty_ssh / "id_rsa"
+    dirty_key.write_text("PRIVATE", encoding="utf-8")
+    dirty_key.chmod(0o644)
+    dirty_res = _audit_credential_hygiene(
+        ["/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe"],
+        ssh_dir=dirty_ssh,
+        env_vars={"SSH_AUTH_SOCK": "/mnt/c/Users/alice/agent.sock"},
+    )
+    assert dirty_res["clean"] is False
+    assert dirty_res["ssh_agent_windows_leak"] is True
+    assert len(dirty_res["windows_git_helpers"]) == 1
+    assert len(dirty_res["ssh_insecure_keys"]) == 1

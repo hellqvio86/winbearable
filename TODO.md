@@ -171,7 +171,7 @@ Re-read review vs code: temp file ACL, argv fixed to resolved `wb` binary, cance
 **Required**  
 Beyond disposable HKCU: plan-all-profiles read-only; apply/rollback a small **allowlisted** HKCU set with state path override; assert restore. Never admin tweaks in automation. Maintainer runs `make test-windows` before release.
 
-## [ ] P1.6 — Checkpoint / state growth under large profiles
+## [x] P1.6 — Checkpoint / state growth under large profiles
 
 **Where:** `state.py`, engine checkpoint frequency
 
@@ -196,14 +196,14 @@ Use same timeout/outcome discipline as `_run_native_cmd` where possible; ensure 
 **Required**  
 One section: Secure Boot / 3rd-party CA if known, domain/Entra/MDM, build gate, WSL version/distros, interop/`appendWindowsPath`, sysctl baseline compliance, credential hygiene, Hyper-V firewall availability, incomplete journal, policy blocks. JSON keys stable under `JSON_SCHEMA_VERSION` rules.
 
-## [ ] P1-L.2 — Baseline vs profile apply messaging
+## [x] P1-L.2 — Baseline vs profile apply messaging
 
 **Where:** profiles, engine, checklist docs
 
 **Required**  
 If `wb wsl baseline` remains separate, plan/apply must state whether baseline ran. Prefer optional journaled baseline step for `paranoid` / `hardened-baseline`.
 
-## [ ] P1-L.3 — Credential hygiene depth
+## [x] P1-L.3 — Credential hygiene depth
 
 **Where:** `wsl.py` `_audit_credential_hygiene`
 
