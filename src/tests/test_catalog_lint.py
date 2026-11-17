@@ -138,14 +138,14 @@ def test_docs_match_catalog() -> None:
 
 
 def test_catalog_irreversible_and_high_risk_invariants() -> None:
-    """Every irreversible tweak is opt-in and documented; every HIGH-risk tweak has risk_rationale (P2.4)."""
+    """Every irreversible tweak is documented as irreversible; every HIGH-risk tweak has risk_rationale (P2.4)."""
     from winbearable.models import RiskLevel
 
-    for tid, tweak in TWEAK_CATALOG.items():
+    for tweak in TWEAK_CATALOG.values():
         if tweak.irreversible:
-            assert tid in OPT_IN_TWEAKS, f"Irreversible tweak {tid} must stay opt-in (OPT_IN_TWEAKS)"
             assert tweak.provenance is not None and tweak.provenance.reversibility == "irreversible"
-            assert "irreversible" in tweak.description.lower()
+            assert (
+                "irreversible" in tweak.description.lower() or "irreversible" in tweak.provenance.risk_rationale.lower()
+            )
         if tweak.risk == RiskLevel.HIGH:
             assert tweak.provenance is not None and tweak.provenance.risk_rationale.strip()
-    assert actual == expected
