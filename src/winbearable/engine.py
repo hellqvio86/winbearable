@@ -270,6 +270,7 @@ class ApplySummary:
     skipped_edition_ids: tuple[str, ...] = ()
     skipped_managed_ids: tuple[str, ...] = ()
     failed_ids: tuple[str, ...] = ()
+    rolled_back_ids: tuple[str, ...] = ()
     wsl_result: dict[str, Any] | None = None
     plan_digest: str = ""
 
@@ -281,6 +282,7 @@ class ApplySummary:
             "run_id": self.run_id,
             "plan_digest": self.plan_digest,
             "applied_ids": list(self.applied_ids),
+            "rolled_back_ids": list(self.rolled_back_ids),
             "already_applied_ids": list(self.already_applied_ids),
             "skipped_policy_ids": list(self.skipped_policy_ids),
             "skipped_admin_ids": list(self.skipped_admin_ids),
@@ -1212,6 +1214,7 @@ def apply_profile(
         )
 
     applied_ids: list[str] = []
+    rolled_back_ids: list[str] = []
     already_applied_ids: list[str] = []
     skipped_policy_ids: list[str] = []
     skipped_admin_ids: list[str] = []
@@ -1344,10 +1347,21 @@ def apply_profile(
                         outcome=outcome,
                     )
                     comp_errors = _compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
+                    rolled_back_ids.extend(applied_ids)
+                    applied_ids.clear()
+                    irrev_notes = [
+                        tid
+                        for tid in rolled_back_ids
+                        if (tw := get_tweak(tid)) and (tw.uninstall_onedrive or tw.icacls_specs or tw.stop_processes)
+                    ]
+                    note = f" (irreversible ops cannot be undone: {', '.join(irrev_notes)})" if irrev_notes else ""
                     full_error = (
-                        err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
+                        f"{err_msg}{note}"
+                        if not comp_errors
+                        else f"{err_msg}{note} (rollback errors: {'; '.join(comp_errors)})"
                     )
-                    state_store.upsert_run(_make_record(TransactionState.FAILED, error=full_error))
+                    final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+                    state_store.upsert_run(_make_record(final_state, error=full_error))
                     run_id = run_id_candidate
                     break
 
@@ -1434,10 +1448,13 @@ def apply_profile(
                         comp_errors = _compensate_run_record(
                             _make_record(TransactionState.ROLLING_BACK), registry, system
                         )
+                        rolled_back_ids.extend(applied_ids)
+                        applied_ids.clear()
                         full_error = (
                             err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
                         )
-                        state_store.upsert_run(_make_record(TransactionState.FAILED, error=full_error))
+                        final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+                        state_store.upsert_run(_make_record(final_state, error=full_error))
                         run_id = run_id_candidate
                 else:
                     if drifted_indices:
@@ -1513,6 +1530,7 @@ def apply_profile(
         skipped_managed_ids=tuple(skipped_managed_ids),
         already_applied_ids=tuple(already_applied_ids),
         failed_ids=tuple(failed_ids),
+        rolled_back_ids=tuple(rolled_back_ids),
         wsl_result=wsl_result,
         plan_digest=plan_digest,
     )

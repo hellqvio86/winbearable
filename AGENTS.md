@@ -118,3 +118,10 @@ make release-check # lint + test + TruffleHog + Trivy
   - Short `## Summary` (2–5 concise bullets explaining *what* changed and *why*).
   - `## Verification` listing exact commands run and observed results (distinguishing Linux unit tests vs Windows integration tests).
   - Keep PR titles short, conventional (`fix(scope): ...`, `feat(scope): ...`, `docs: ...`), and focused on one logical change.
+
+## Review & Regression Discipline
+
+- **One item = one PR:** Keep each review/TODO item in its own focused PR.
+- **Regression test first:** Treat each item's acceptance criteria as a regression test — add the failing test first, verify it fails, then implement the fix.
+- **`NEEDS-WINDOWS` items require real-host evidence:** Never mark or merge a `NEEDS-WINDOWS` item on unit tests alone; verify on real Windows 11 and record the command + observed output in `docs/verify-matrix.md`.
+- **Release-time version bumps only:** Do not bump `__version__` in `src/winbearable/const.py` per fix/commit; bump only in dedicated release PRs.

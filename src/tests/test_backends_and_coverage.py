@@ -1674,7 +1674,7 @@ def test_structured_outcomes_process_tree_locale_and_wsl_tx() -> None:
                 allow_simulated=True,
             )
         assert "wsl" in summary_wsl.failed_ids
-        assert store.load_runs()[-1].state == TransactionState.FAILED
+        assert store.load_runs()[-1].state == TransactionState.ROLLED_BACK
         # Earlier registry tweak was compensated
         val = reg_wsl.get_value(
             HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt"

@@ -410,7 +410,7 @@ def test_write_ahead_journal_and_compensation_on_failure(state_store: StateStore
     # Earlier registry mutation was compensated back to original value
     assert registry.get_value(HIVE_HKCU, run_key, "OneDrive") == ("OneDrive.exe", REG_SZ)
 
-    # Journal retains the FAILED record and reports it as incomplete
+    # Journal retains the FAILED record when compensation itself also fails
     runs = state_store.load_runs()
     assert len(runs) == 1
     assert runs[0].state == TransactionState.FAILED
@@ -664,3 +664,59 @@ def test_netbios_broadcast_apply_and_rollback(state_store: StateStore) -> None:
     )
     rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
     assert reg.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters", "NodeType") is None
+
+
+def test_failed_apply_with_clean_rollback_is_rolled_back(tmp_path: Path) -> None:
+    """R-01: Clean compensation marks run ROLLED_BACK with applied_ids=(), while rollback errors stay FAILED."""
+    from winbearable.engine import IncompleteJournalError
+
+    store = StateStore(tmp_path / "state.json")
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    env = sysb.detect_environment(reg)
+    profile = load_profile("user-only")
+
+    orig = reg.set_value
+
+    def boom(*a: object, **k: object) -> None:
+        if any("Explorer" in str(x) and "Advanced" in str(x) for x in (*a, *k.values())):
+            raise OSError("simulated registry failure")
+        orig(*a, **k)  # type: ignore[arg-type]
+
+    reg.set_value = boom  # type: ignore[method-assign]
+    s = apply_profile(profile, env, reg, sysb, store, dry_run=False, allow_simulated=True)
+    assert s.failed_ids
+    assert s.applied_ids == ()
+    assert s.rolled_back_ids
+    assert [r.state for r in store.load_runs()] == [TransactionState.ROLLED_BACK]
+
+    # Subsequent apply succeeds without needing wb recover
+    reg.set_value = orig  # type: ignore[method-assign]
+    s2 = apply_profile(profile, env, reg, sysb, store, dry_run=False, allow_simulated=True)
+    assert s2.failed_ids == ()
+    assert [r.state for r in store.load_runs()] == [TransactionState.ROLLED_BACK, TransactionState.COMMITTED]
+
+    # When compensation itself errors, state MUST remain FAILED and block subsequent apply
+    store_err = StateStore(tmp_path / "state_err.json")
+    reg_err = InMemoryRegistryBackend()
+    env_err = sysb.detect_environment(reg_err)
+    orig_err = reg_err.set_value
+    orig_restore = reg_err.restore_snapshot
+
+    def boom_err(*a: object, **k: object) -> None:
+        if any("Explorer" in str(x) and "Advanced" in str(x) for x in (*a, *k.values())):
+            raise OSError("simulated registry failure")
+        orig_err(*a, **k)  # type: ignore[arg-type]
+
+    def boom_restore(*_a: object, **_k: object) -> None:
+        raise OSError("simulated restore failure")
+
+    reg_err.set_value = boom_err  # type: ignore[method-assign]
+    reg_err.restore_snapshot = boom_restore  # type: ignore[method-assign]
+    s_err = apply_profile(profile, env_err, reg_err, sysb, store_err, dry_run=False, allow_simulated=True)
+    assert s_err.failed_ids
+    assert [r.state for r in store_err.load_runs()] == [TransactionState.FAILED]
+    reg_err.set_value = orig_err  # type: ignore[method-assign]
+    reg_err.restore_snapshot = orig_restore  # type: ignore[method-assign]
+    with pytest.raises(IncompleteJournalError):
+        apply_profile(profile, env_err, reg_err, sysb, store_err, dry_run=False, allow_simulated=True)
