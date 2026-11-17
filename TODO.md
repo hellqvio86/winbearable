@@ -37,7 +37,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
   - Document irreversible ops (process stop, OneDrive uninstall, icacls) that compensation cannot undo; report them in the failure message.
 - **Done when:** tests assert (a) clean rollback ⇒ `state == ROLLED_BACK`, next `apply` succeeds, `applied_ids == ()`; (b) rollback error ⇒ `FAILED` and apply blocked; (c) JSON schema documents the new field.
 
-### R-02 · P0 · `REPRODUCED` (history) / `CODE` (ordering) — Rollback deletes run history; multi-run rollback continues past a failure
+### [x] R-02 · P0 · `REPRODUCED` (history) / `CODE` (ordering) — Rollback deletes run history; multi-run rollback continues past a failure
 - **Where:** `engine.py:1625` (`save_runs(remaining_runs)`), loop `engine.py:1610`.
 - **Evidence (repro):** after `rollback_runs(... dry_run=False)` the store is `[]`. Docs and `AGENTS.md` tell users to "inspect the local audit/snapshot log" — the audit trail of what was rolled back is erased.
 - **Ordering bug:** with `--to <run_id>`, the loop does not stop at the first failing run. Older runs are still rolled back, then the failed newer run stays `FAILED` with its snapshots. A later `wb recover` compensates it again and re-writes its *pre-state* (= post-state of the older run) over keys the older rollback just restored.
@@ -57,7 +57,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** restore per-item (`previous_enabled` / per-GUID) by default; keep the full export only as an explicit `--restore-full-policy` fallback. Record the post-apply value per item and warn (or require `--force`) when current state ≠ recorded post-state.
 - **Done when:** test mutates an unrelated firewall rule / audit subcategory between apply and rollback; rollback leaves it alone and reports the divergence for items it did touch.
 
-### R-05 · P1 · `CODE` — Journal check and evaluation happen before the transaction lock
+### [x] R-05 · P1 · `CODE` — Journal check and evaluation happen before the transaction lock
 - **Where:** `engine.py:1177` (`get_incomplete_runs`), `engine.py:1184` (`evaluate_profile`), lock taken only at `engine.py:1246`.
 - **Problem:** two concurrent `wb apply` processes both pass the "no incomplete runs" check and both evaluate; the second then snapshots *after* the first applied, so its "previous" values are the first run's values, and its drift decisions are stale.
 - **Fix:** acquire `transaction_lock()` before the incomplete-journal check and re-run `evaluate_profile` inside it.
@@ -76,7 +76,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** pass bytes (`text=False`) or `newline="\n"`-equivalent handling for stdin; verify with `wsl -d X -u root -- sha256sum /etc/wsl.conf` against the hash of the intended bytes, not by text compare.
 - **Done when:** Windows transcript of `wsl -d <distro> -- od -c /etc/wsl.conf | head` shows no `\r` after apply and after rollback; unit test feeds a fake runner that records raw bytes.
 
-### R-08 · P1 · `CODE` — Backup retention is shorter than run retention; pruning happens before commit
+### [x] R-08 · P1 · `CODE` — Backup retention is shorter than run retention; pruning happens before commit
 - **Where:** `state.py:18-19` (100 runs vs 50 backup dirs), `state.py:209`.
 - **Problem:** committed runs #51–#100 keep their records but lose their `.reg` / `auditpol_backup.csv` / `firewall_backup.wfw`; rolling back to them silently degrades (the engine falls back to per-item restore for auditpol/firewall, and nothing for subtree exports). Backups are also deleted *before* the new `state.json` is written, so a failed write loses backups that the surviving state still references. `p.stat()` in the sort can raise if a directory vanishes.
 - **Fix:** derive backup retention from the retained runs (delete a backup dir only when its run record is pruned); prune after the atomic state write succeeds; guard `stat()`.

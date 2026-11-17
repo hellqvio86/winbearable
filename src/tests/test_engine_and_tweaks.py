@@ -781,3 +781,112 @@ def test_absent_service_skipped_and_unreadable_rollback_safe(tmp_path: Path) -> 
     assert any("DiagTrack" in err for err in comp_errors)
     assert reg.get_value(HIVE_HKLM, diag_key, "Start") == ("corrupt", REG_SZ)
     mock_task.assert_called_once()
+
+
+def test_rollback_keeps_history_and_fails_fast(tmp_path: Path) -> None:
+    """R-02: Rollback marks runs ROLLED_BACK (retaining history) and stops on the first failing run."""
+    from unittest.mock import patch
+
+    store = StateStore(tmp_path / "state.json")
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    env = sysb.detect_environment(reg)
+
+    p1 = ProfileSpec(name="r1", description="r1", tweaks={"explorer.show_file_extensions": True})
+    p2 = ProfileSpec(name="r2", description="r2", tweaks={"explorer.show_hidden_files": True})
+    s1 = apply_profile(p1, env, reg, sysb, store, dry_run=False, allow_simulated=True)
+    s2 = apply_profile(p2, env, reg, sysb, store, dry_run=False, allow_simulated=True)
+    assert s1.run_id and s2.run_id
+
+    # Clean rollback of s2 keeps both records, with s2=ROLLED_BACK and s1=COMMITTED
+    rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+    assert [r.state for r in store.load_runs()] == [TransactionState.COMMITTED, TransactionState.ROLLED_BACK]
+
+    # Rolling back again without to_run_id reverts s1 (the latest COMMITTED run)
+    rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+    assert [r.state for r in store.load_runs()] == [TransactionState.ROLLED_BACK, TransactionState.ROLLED_BACK]
+
+    # Multi-run rollback fails fast on newer run failure and leaves older COMMITTED run untouched
+    store2 = StateStore(tmp_path / "state2.json")
+    reg2 = InMemoryRegistryBackend()
+    env2 = sysb.detect_environment(reg2)
+    r_old = apply_profile(p1, env2, reg2, sysb, store2, dry_run=False, allow_simulated=True)
+    apply_profile(p2, env2, reg2, sysb, store2, dry_run=False, allow_simulated=True)
+    with (
+        patch.object(reg2, "restore_snapshot", side_effect=OSError("restore failed on newer run")),
+        pytest.raises(RuntimeError, match="restore failed"),
+    ):
+        rollback_runs(store2, reg2, sysb, to_run_id=r_old.run_id, dry_run=False, allow_simulated=True)
+    assert [r.state for r in store2.load_runs()] == [TransactionState.COMMITTED, TransactionState.FAILED]
+
+
+def test_concurrent_apply_serialized_under_transaction_lock(tmp_path: Path) -> None:
+    """R-05: Concurrent apply_profile calls evaluate inside transaction_lock so only one commits real pre-state."""
+    import threading
+
+    from winbearable.engine import ApplySummary
+
+    store = StateStore(tmp_path / "state.json")
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    env = sysb.detect_environment(reg)
+    prof = ProfileSpec(name="conc", description="conc", tweaks={"explorer.show_file_extensions": True})
+
+    barrier = threading.Barrier(2)
+    summaries: list[ApplySummary] = []
+    errors: list[Exception] = []
+
+    def _worker() -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            summaries.append(apply_profile(prof, env, reg, sysb, store, dry_run=False, allow_simulated=True))
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10.0)
+    t2.join(timeout=10.0)
+    assert errors == []
+    assert len(summaries) == 2
+    committed = store.load_runs()
+    assert len(committed) == 1
+    assert committed[0].state == TransactionState.COMMITTED
+
+
+def test_backup_retention_matches_retained_runs_and_prunes_after_commit(tmp_path: Path) -> None:
+    """R-08: Every retained run keeps its backup dir, and failed state writes never prune backups."""
+    from unittest.mock import patch
+
+    from winbearable.models import RunRecord
+
+    store = StateStore(tmp_path / "state.json")
+    backups_root = tmp_path / "backups"
+    runs: list[RunRecord] = []
+    for i in range(65):
+        rid = f"run-{i:03d}"
+        (backups_root / rid).mkdir(parents=True, exist_ok=True)
+        runs.append(
+            RunRecord(
+                run_id=rid,
+                timestamp=f"2026-11-17T00:{i // 60:02d}:{i % 60:02d}Z",
+                profile_name="owner",
+                applied_tweaks=(),
+                state=TransactionState.COMMITTED,
+            )
+        )
+    store.save_runs(runs)
+    for r in store.load_runs():
+        assert (backups_root / r.run_id).is_dir()
+
+    # Failed state write must not prune backups
+    orphan = backups_root / "orphan-run"
+    orphan.mkdir(parents=True, exist_ok=True)
+    with (
+        patch.object(store, "_write_runs_atomic_unlocked", side_effect=OSError("disk full")),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        store.save_runs(runs)
+    assert orphan.is_dir()
