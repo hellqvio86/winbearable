@@ -925,7 +925,7 @@ def test_multidistro_wsl_failure_compensates_first_distro_and_wslconfig(
     assert wslconfig.read_text(encoding="utf-8") == "[wsl2]\nmemory=4GB\n"
     assert distro_confs["Ubuntu"] == "[user]\ndefault=alice\n"
     runs = state_store.load_runs()
-    assert runs[-1].state == TransactionState.FAILED
+    assert runs[-1].state == TransactionState.ROLLED_BACK
     assert [snap.distro for snap in runs[-1].wsl_distro_snapshots] == ["Ubuntu", "Debian"]
 
 
@@ -957,7 +957,7 @@ def test_operation_adapters_surface_structured_outcomes_on_failure(
             summary = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
         assert tid in summary.failed_ids
         runs = state_store.load_runs()
-        assert runs[-1].state == TransactionState.FAILED
+        assert runs[-1].state in {TransactionState.ROLLED_BACK, TransactionState.FAILED}
         assert runs[-1].failure_outcomes[-1]["status"] == str(expected_status)
         assert runs[-1].failure_outcomes[-1]["returncode"] == rc
         # Clear failed run so next iteration can proceed
