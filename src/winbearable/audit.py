@@ -764,21 +764,55 @@ def _check_winget_and_store_blocked(registry: RegistryBackend) -> tuple[AuditFin
 
 
 def _check_hyperv_firewall() -> AuditFinding:
-    # Per DEC-01 & WSL-08: Hyper-V firewall cmdlets are PowerShell-only, which AGENTS.md forbids.
+    # Per DEC-01 & WSL-08: Hyper-V firewall uses the narrowly scoped hyperv_firewall module.
+    from .hyperv_firewall import get_wsl_hyperv_firewall_setting
+
+    setting = get_wsl_hyperv_firewall_setting()
+    if setting is None:
+        obs = PostureObservation(
+            ObservationState.UNKNOWN,
+            "powershell:Get-NetFirewallHyperVVMSetting",
+            ObservationConfidence.NONE,
+            "Hyper-V firewall setting unavailable on this platform or session.",
+            "WSL2 Hyper-V VM firewall state could not be queried.",
+        )
+        return AuditFinding(
+            "chk.hyperv_firewall",
+            "wsl",
+            "Hyper-V Firewall Default Action",
+            "info",
+            obs,
+            "Ensure `[wsl]` `firewall = true` is set in .wslconfig or run `wb wsl firewall --apply` on Windows.",
+        )
+
+    enabled = bool(setting.get("enabled"))
+    inbound = str(setting.get("default_inbound_action", "Unknown"))
+    outbound = str(setting.get("default_outbound_action", "Unknown"))
+    evidence = f"Enabled={enabled}, DefaultInboundAction={inbound}, DefaultOutboundAction={outbound}"
+    if enabled and inbound == "Block":
+        obs = PostureObservation(
+            ObservationState.ENABLED,
+            "powershell:Get-NetFirewallHyperVVMSetting",
+            ObservationConfidence.HIGH,
+            evidence,
+            "WSL2 Hyper-V firewall is enabled with default-deny inbound.",
+        )
+        return AuditFinding("chk.hyperv_firewall", "wsl", "Hyper-V Firewall Default Action", "info", obs)
+
     obs = PostureObservation(
-        ObservationState.UNKNOWN,
-        "dec-01:unsupported",
-        ObservationConfidence.NONE,
-        "Hyper-V firewall default action: not managed by winbearable (rely on .wslconfig firewall=true)",
-        "No native non-PowerShell Hyper-V firewall CLI exists.",
+        ObservationState.DISABLED,
+        "powershell:Get-NetFirewallHyperVVMSetting",
+        ObservationConfidence.HIGH,
+        evidence,
+        "WSL2 Hyper-V firewall is disabled or allows inbound traffic by default.",
     )
     return AuditFinding(
         "chk.hyperv_firewall",
         "wsl",
         "Hyper-V Firewall Default Action",
-        "info",
+        "medium",
         obs,
-        "Ensure `[wsl]` `firewall = true` is set in .wslconfig.",
+        "Run: wb wsl firewall --apply (as Administrator).",
     )
 
 

@@ -45,6 +45,7 @@ from .engine import (
     recover_incomplete_runs,
     rollback_runs,
 )
+from .hyperv_firewall import set_wsl_hyperv_firewall_setting
 from .models import EnvironmentInfo, ObservationState, TweakStatus, UnsupportedPlatformError, WslConfigSpec
 from .profiles import (
     ProfileValidationError,
@@ -474,6 +475,13 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_sp_p.add_argument("distro", nargs="?", default=DEFAULT_WSL_DISTRO, help="Target WSL distro")
     wsl_sp_p.add_argument("--apply", action="store_true", help="Execute wsl.exe --manage --set-sparse")
     wsl_sp_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    wsl_fw_p = wsl_sub.add_parser("firewall", help="Inspect or configure WSL2 Hyper-V firewall defaults (DEC-01)")
+    wsl_fw_p.add_argument("--inbound", choices=("Block", "Allow"), default="Block", help="Default inbound action")
+    wsl_fw_p.add_argument("--outbound", choices=("Block", "Allow"), default="Allow", help="Default outbound action")
+    wsl_fw_p.add_argument("--disable", action="store_true", help="Disable Hyper-V firewall for WSL2 VM")
+    wsl_fw_p.add_argument("--apply", action="store_true", help="Apply Hyper-V firewall setting (requires admin)")
+    wsl_fw_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     return parser
 
@@ -1097,8 +1105,41 @@ def _run_cli_body(
             "set-default",
             "update",
             "sparse",
+            "firewall",
         } and bool(getattr(args, "apply", False)):
             _require_windows_for_mutation(env, f"wb wsl {args.wsl_command} --apply")
+
+        if args.wsl_command == "firewall":
+            if args.apply and not env.is_admin:
+                err_payload = {
+                    "dry_run": False,
+                    "error": "Administrator privileges required for `wb wsl firewall --apply`.",
+                    "returncode": EXIT_BLOCKED,
+                }
+                if args.json:
+                    _print_json(err_payload)
+                else:
+                    sys.stderr.write(f"Error: {err_payload['error']}\n")
+                return EXIT_BLOCKED
+            fw_res = set_wsl_hyperv_firewall_setting(
+                enabled=not bool(args.disable),
+                default_inbound=str(args.inbound),
+                default_outbound=str(args.outbound),
+                dry_run=not bool(args.apply),
+            )
+            if args.json:
+                _print_json(fw_res)
+            else:
+                tag = "DRY-RUN" if fw_res["dry_run"] else "EXECUTED"
+                desired = fw_res["desired"]
+                sys.stdout.write(
+                    f"[{tag}] Hyper-V firewall WSL2 ({fw_res['vm_creator_id']}): "
+                    f"enabled={desired['enabled']} inbound={desired['default_inbound_action']} "
+                    f"outbound={desired['default_outbound_action']}\n"
+                )
+                if fw_res.get("error"):
+                    sys.stderr.write(f"Error: {fw_res['error']}\n")
+            return EXIT_ERROR if fw_res["returncode"] != 0 else EXIT_SUCCESS
 
         if args.wsl_command == "update":
             upd_res = update_wsl(system=sys_backend, dry_run=not args.apply)
