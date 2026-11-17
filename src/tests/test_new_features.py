@@ -562,3 +562,25 @@ def test_bloat_remove_appx_opt_in_irreversible_guard(state_store: StateStore) ->
     )
     assert "bloat.remove_bing_news" in summary.applied_ids
     assert detect_tweak(get_tweak("bloat.remove_bing_news"), env, reg, sys_b).status == TweakStatus.APPLIED
+
+
+def test_controlled_folder_access_audit_and_inactivity_lock_roundtrip(state_store: StateStore) -> None:
+    """hardening.defender_controlled_folder_access_audit & inactivity_lock roundtrip and honour Tamper Protection."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+    ids = ["hardening.defender_controlled_folder_access_audit", "hardening.inactivity_lock"]
+    prof = ProfileSpec(name="h", description="h", tweaks=dict.fromkeys(ids, True))
+
+    summary = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert set(summary.applied_ids) == set(ids)
+    for tid in ids:
+        assert detect_tweak(get_tweak(tid), env, reg, sys_b).status == TweakStatus.APPLIED
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    for tid in ids:
+        assert detect_tweak(get_tweak(tid), env, reg, sys_b).status == TweakStatus.DRIFTED
+
+    reg.set_value(HIVE_HKLM, DEFENDER_FEATURES_KEY, "TamperProtection", 5, REG_DWORD)
+    cfa_res = detect_tweak(get_tweak("hardening.defender_controlled_folder_access_audit"), env, reg, sys_b)
+    assert cfa_res.status == TweakStatus.BLOCKED_BY_POLICY

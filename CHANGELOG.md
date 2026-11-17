@@ -2,6 +2,13 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.4] - 2026-11-17
+
+### Added
+
+- Added `hardening.defender_controlled_folder_access_audit` (`EnableControlledFolderAccess=2`, enabled in `hardened-baseline`) and `hardening.inactivity_lock` (`InactivityTimeoutSecs=900`, opt-in).
+- Added release-only `publish-winget-asset` (`windows-latest`) CI job in `.github/workflows/ci.yml` to build and attach the Winget portable zip on `release: published`.
+
 ## [0.9.3] - 2026-11-17
 
 ### Added

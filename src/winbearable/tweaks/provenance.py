@@ -959,4 +959,22 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "Verified Store ID 9NBLGGH4R32N via winget list --id --exact on Windows 11 26300.",
         reversibility="irreversible",
     ),
+    "hardening.defender_controlled_folder_access_audit": _p(
+        "Enables Microsoft Defender Controlled Folder Access in Audit mode (2) without blocking apps.",
+        "Microsoft Learn: Enable Controlled folder access",
+        "Low risk: audit-only mode; honours Tamper Protection via BLOCKED_BY_POLICY.",
+        "Logs unauthorized folder-modification attempts for review.",
+        "registry_value",
+        "Verified EnableControlledFolderAccess=2 policy key against Microsoft Learn.",
+        supported_editions=("Pro", "Enterprise", "Education"),
+    ),
+    "hardening.inactivity_lock": _p(
+        "Locks the Windows session after 900 seconds (15 minutes) of user inactivity.",
+        "Microsoft Learn: Interactive logon: Machine inactivity limit",
+        "Low risk: standard 15-minute idle lock policy; trivially reverted.",
+        "Locks unattended workstation sessions after 15 minutes.",
+        "registry_value",
+        "Verified HKLM Policies\\System InactivityTimeoutSecs=900 against Microsoft Learn.",
+        supported_editions=("Pro", "Enterprise", "Education"),
+    ),
 }

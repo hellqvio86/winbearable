@@ -22,6 +22,7 @@ OPT_IN_TWEAKS: frozenset[str] = frozenset(
         "bloat.remove_bing_weather",
         "bloat.remove_clipchamp",
         "bloat.remove_feedback_hub",
+        "hardening.inactivity_lock",
     }
 )
 
