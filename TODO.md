@@ -26,14 +26,14 @@ Current baseline: **`v0.9.10`** (Windows 11 `26H2+`, build `>= 26300`).
 
 ## P1 — Reliability & Security
 
-- [ ] **P1.1 — Case-insensitive INI merge where target format requires it** (`wsl.py`, `operations.py`)
-- [ ] **P1.2 — Bound Hyper-V firewall timeout cleanup (`taskkill.exe` + post-kill `communicate()`)** (`hyperv_firewall.py`)
-- [ ] **P1.3 — Preserve valid `state.json.bak` during `restore_from_backup()`** (`state.py`)
-- [ ] **P1.4 — Bound command output and diagnostic history** (`backends/system.py`, `models.py`, `cli.py`)
-- [ ] **P1.5 — Byte-preserving file-config snapshot and restore** (`operations.py`, `wsl.py`, `models.py`)
-- [ ] **P1.6 — Close missing-file race in `apply_file_spec()`** (`operations.py`, `engine.py`)
-- [ ] **P1.7 — Table-aware TOML merge validation** (`operations.py`)
-- [ ] **P1.8 — Safe reparse-point handling & observable warnings in backup pruning** (`state.py`)
+- [ ] **P1.1 — Case-insensitive INI merge where target format requires it** (`wsl.py`, `operations.py`) — *implemented / unit-tested / needs Windows verification*
+- [ ] **P1.2 — Bound Hyper-V firewall timeout cleanup (`taskkill.exe` + post-kill `communicate()`)** (`hyperv_firewall.py`) — *implemented / unit-tested / needs Windows verification*
+- [ ] **P1.3 — Preserve valid `state.json.bak` during `restore_from_backup()`** (`state.py`) — *implemented / unit-tested / needs Windows verification*
+- [ ] **P1.4 — Bound command output and diagnostic history** (`backends/system.py`, `const.py`) — *implemented / unit-tested / needs Windows verification*
+- [ ] **P1.5 — Byte-preserving file-config snapshot and restore** (`operations.py`, `models.py`) — *implemented / unit-tested / needs Windows verification*
+- [ ] **P1.6 — Close missing-file race in `apply_file_spec()`** (`operations.py`, `engine.py`) — *implemented / unit-tested / needs Windows verification*
+- [ ] **P1.7 — Table-aware TOML merge validation** (`operations.py`) — *implemented / unit-tested / needs Windows verification*
+- [ ] **P1.8 — Safe reparse-point handling & observable warnings in backup pruning** (`state.py`) — *implemented / unit-tested / needs Windows verification*
 - [ ] **P1.9 — Traceable evidence metadata for non-registry catalog identifiers** (`tweaks/catalog.py`, `tweaks/provenance.py`, `docs/verify-matrix.md`)
 - [ ] **P1.10 — Expand real Windows integration coverage around recovery** (`src/tests/test_windows_integration.py`, `docs/verify-matrix.md`)
 

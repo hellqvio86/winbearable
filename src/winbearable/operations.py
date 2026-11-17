@@ -1,9 +1,12 @@
 """Operation adapter abstraction decoupling the domain engine from concrete OS side effects."""
 
+import base64
 import hashlib
 import json
 import os
 import re
+import stat
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Protocol
@@ -278,13 +281,58 @@ def has_jsonc_comments(text: str) -> bool:
     return False
 
 
+_TOML_TABLE_RE = re.compile(r"^\s*\[.+\]\s*(?:#.*)?$")
+
+
+def _merge_toml_top_level(existing_text: str, desired_keys: dict[str, Any]) -> str:
+    """Merge top-level TOML keys without mutating same-named keys inside [tables]."""
+    cleaned_text = existing_text.lstrip("\ufeff")
+    try:
+        parsed = tomllib.loads(cleaned_text) if cleaned_text.strip() else {}
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid TOML input: {exc}") from exc
+
+    lines = cleaned_text.splitlines() if cleaned_text.strip() else []
+    first_table_idx = len(lines)
+    for idx, ln in enumerate(lines):
+        if _TOML_TABLE_RE.match(ln):
+            first_table_idx = idx
+            break
+
+    top_lines = lines[:first_table_idx]
+    table_lines = lines[first_table_idx:]
+
+    for k, v in desired_keys.items():
+        if isinstance(v, dict):
+            raise ValueError(f"Nested dict TOML merge for key {k!r} is unsupported; use top-level scalar/list values.")
+        val_repr = json.dumps(v) if isinstance(v, (str, bool, int, float, list)) else repr(v)
+        pat = re.compile(rf"^\s*{re.escape(k)}\s*=")
+        matches = [idx for idx, ln in enumerate(top_lines) if pat.match(ln)]
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous duplicate top-level TOML key {k!r}.")
+        if matches:
+            top_lines[matches[0]] = f"{k} = {val_repr}"
+        elif parsed.get(k) != v:
+            top_lines.append(f"{k} = {val_repr}")
+
+    merged_lines = [*top_lines, *table_lines]
+    result = ("\n".join(merged_lines).rstrip("\n") + "\n") if merged_lines else ""
+    if result:
+        try:
+            tomllib.loads(result)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"Merged TOML failed validation: {exc}") from exc
+    return result
+
+
 def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[str, Any]) -> str:
     """Merge desired_keys into existing_text for json, jsonc, ini, or toml while preserving unrelated keys."""
     fmt = file_format.lower()
     if fmt in {"json", "jsonc"}:
-        if fmt == "jsonc" and has_jsonc_comments(existing_text):
+        cleaned_json = existing_text.lstrip("\ufeff")
+        if fmt == "jsonc" and has_jsonc_comments(cleaned_json):
             raise ValueError("Refusing to overwrite JSONC file containing comments.")
-        data: dict[str, Any] = json.loads(existing_text) if existing_text.strip() else {}
+        data: dict[str, Any] = json.loads(cleaned_json) if cleaned_json.strip() else {}
         for k, v in desired_keys.items():
             data[k] = v
         return json.dumps(data, indent=2, sort_keys=True) + "\n"
@@ -293,67 +341,100 @@ def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[
         for sec, kv in desired_keys.items():
             if isinstance(kv, dict):
                 ini_sections[sec] = {str(k): str(v) for k, v in kv.items()}
-        return merge_ini_preserving_comments(existing_text, ini_sections)
+        return merge_ini_preserving_comments(existing_text, ini_sections, case_insensitive=True)
     if fmt == "toml":
-        parsed = tomllib.loads(existing_text) if existing_text.strip() else {}
-        lines = existing_text.splitlines() if existing_text.strip() else []
-        for k, v in desired_keys.items():
-            val_repr = json.dumps(v) if isinstance(v, (str, bool, int, float, list)) else repr(v)
-            pat = re.compile(rf"^\s*{re.escape(k)}\s*=")
-            replaced = False
-            for idx, ln in enumerate(lines):
-                if pat.match(ln):
-                    lines[idx] = f"{k} = {val_repr}"
-                    replaced = True
-                    break
-            if not replaced and parsed.get(k) != v:
-                lines.append(f"{k} = {val_repr}")
-        return ("\n".join(lines).rstrip("\n") + "\n") if lines else ""
+        return _merge_toml_top_level(existing_text, desired_keys)
     raise ValueError(f"Unsupported FileSpec format: {file_format}")
 
 
 MAX_FILE_SNAPSHOT_BYTES = 512 * 1024
 
 
+def _atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
+    """Atomically write exact bytes to *target_path*, preserving file mode when present."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode: int | None = None
+    if target_path.is_file():
+        existing_mode = stat.S_IMODE(target_path.stat().st_mode)
+    fd, temp_path_str = tempfile.mkstemp(
+        prefix=f"{target_path.name}.",
+        dir=str(target_path.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if existing_mode is not None:
+            os.chmod(temp_path_str, existing_mode)
+        elif os.name == "posix":
+            os.chmod(temp_path_str, 0o600)
+        os.replace(temp_path_str, target_path)
+    except Exception:
+        if os.path.exists(temp_path_str):
+            os.unlink(temp_path_str)
+        raise
+
+
 def snapshot_file_spec(spec: FileSpec) -> FileSnapshot:
-    """Capture sha256 and content snapshot of a FileSpec target."""
+    """Capture sha256 and byte-exact snapshot of a FileSpec target."""
     target = expand_file_spec_path(spec.path_template)
     if not target.is_file():
-        return FileSnapshot(path=str(target), existed=False, sha256=None, previous_content=None)
+        return FileSnapshot(
+            path=str(target), existed=False, sha256=None, previous_content=None, previous_bytes_b64=None
+        )
     raw_bytes = target.read_bytes()
     if len(raw_bytes) > MAX_FILE_SNAPSHOT_BYTES:
         raise ValueError(f"File {target} exceeds snapshot size cap ({MAX_FILE_SNAPSHOT_BYTES} bytes).")
     sha = hashlib.sha256(raw_bytes).hexdigest()
+    b64 = base64.b64encode(raw_bytes).decode("ascii")
+    try:
+        decoded: str | None = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Unsupported non-UTF-8 encoding in {target}: {exc}") from exc
     return FileSnapshot(
         path=str(target),
         existed=True,
         sha256=sha,
-        previous_content=raw_bytes.decode("utf-8"),
+        previous_content=decoded,
+        previous_bytes_b64=b64,
     )
 
 
-def apply_file_spec(spec: FileSpec, expected_sha256: str | None = None) -> None:
-    """Atomically apply a FileSpec, refusing if the file hash changed since snapshot."""
+def apply_file_spec(
+    spec: FileSpec,
+    expected_sha256: str | None = None,
+    expected_existed: bool | None = None,
+) -> None:
+    """Atomically apply a FileSpec, refusing if file existence or hash changed since snapshot."""
     target = expand_file_spec_path(spec.path_template)
     existing_text = ""
     if target.is_file():
+        if expected_existed is False:
+            raise RuntimeError(f"Refusing to write {target}: file was absent at snapshot time but now exists.")
         raw_bytes = target.read_bytes()
         actual_sha = hashlib.sha256(raw_bytes).hexdigest()
         if expected_sha256 is not None and actual_sha != expected_sha256:
             raise RuntimeError(f"Refusing to write {target}: file hash changed since plan/snapshot.")
-        existing_text = raw_bytes.decode("utf-8")
-    elif expected_sha256 is not None:
+        try:
+            existing_text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Unsupported non-UTF-8 encoding in {target}: {exc}") from exc
+    elif expected_existed is True or expected_sha256 is not None:
         raise RuntimeError(f"Refusing to write {target}: file existed at plan time but is now missing.")
     merged = merge_file_content(existing_text, spec.file_format, spec.desired_keys)
     _atomic_write_text(target, merged)
 
 
 def restore_file_snapshot(snapshot: FileSnapshot) -> None:
-    """Restore a FileSnapshot atomically."""
+    """Restore a FileSnapshot atomically with byte-level fidelity."""
     target = Path(snapshot.path)
     if not snapshot.existed:
         if target.is_file():
             target.unlink()
+        return
+    if snapshot.previous_bytes_b64 is not None:
+        _atomic_write_bytes(target, base64.b64decode(snapshot.previous_bytes_b64.encode("ascii")))
         return
     if snapshot.previous_content is not None:
         _atomic_write_text(target, snapshot.previous_content)

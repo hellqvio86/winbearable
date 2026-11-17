@@ -867,6 +867,7 @@ class FileSnapshot:
     existed: bool
     sha256: str | None
     previous_content: str | None
+    previous_bytes_b64: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -874,17 +875,20 @@ class FileSnapshot:
             "existed": self.existed,
             "sha256": self.sha256,
             "previous_content": self.previous_content,
+            "previous_bytes_b64": self.previous_bytes_b64,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "FileSnapshot":
         sha = payload.get("sha256")
         content = payload.get("previous_content")
+        b64 = payload.get("previous_bytes_b64")
         return cls(
             path=str(payload["path"]),
             existed=bool(payload["existed"]),
             sha256=str(sha) if sha is not None else None,
             previous_content=str(content) if content is not None else None,
+            previous_bytes_b64=str(b64) if b64 is not None else None,
         )
 
 

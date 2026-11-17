@@ -52,54 +52,75 @@ def format_host_memory_gib(host_memory_bytes: int) -> str:
     return f"{tenths_gib // 10}.{tenths_gib % 10}"
 
 
-def merge_ini_preserving_comments(existing_text: str, desired_sections: dict[str, dict[str, str]]) -> str:
+def merge_ini_preserving_comments(
+    existing_text: str,
+    desired_sections: dict[str, dict[str, str]],
+    *,
+    case_insensitive: bool = True,
+) -> str:
     """Merge desired INI sections/keys into existing_text while preserving comments and custom keys."""
-    lines = existing_text.splitlines() if existing_text else []
-    remaining_sections: dict[str, dict[str, str]] = {sec: dict(kv_map) for sec, kv_map in desired_sections.items()}
+
+    def _norm(name: str) -> str:
+        return name.lower() if case_insensitive else name
+
+    cleaned_text = existing_text.lstrip("\ufeff")
+    lines = cleaned_text.splitlines() if cleaned_text else []
+
+    remaining_sections: dict[str, tuple[str, dict[str, tuple[str, str]]]] = {
+        _norm(sec): (sec, {_norm(k): (k, v) for k, v in kv_map.items()}) for sec, kv_map in desired_sections.items()
+    }
+    consumed_by_section: dict[str, set[str]] = {sec_key: set() for sec_key in remaining_sections}
 
     output_lines: list[str] = []
-    current_section: str | None = None
+    current_section_key: str | None = None
 
-    def flush_remaining_keys_for_section(sec_name: str | None) -> None:
-        if sec_name is None or sec_name not in remaining_sections:
+    def flush_remaining_keys_for_section(sec_key: str | None) -> None:
+        if sec_key is None or sec_key not in remaining_sections:
             return
-        pending = remaining_sections[sec_name]
-        for key, val in list(pending.items()):
-            output_lines.append(f"{key}={val}")
-            del pending[key]
+        _, pending = remaining_sections[sec_key]
+        for norm_k, (orig_k, val) in list(pending.items()):
+            output_lines.append(f"{orig_k}={val}")
+            consumed_by_section[sec_key].add(norm_k)
+            del pending[norm_k]
 
     for raw_line in lines:
         line = raw_line.rstrip("\r")
         sec_match = SECTION_HEADER_RE.match(line)
         if sec_match is not None:
-            flush_remaining_keys_for_section(current_section)
-            current_section = sec_match.group("section").strip()
+            flush_remaining_keys_for_section(current_section_key)
+            current_section_key = _norm(sec_match.group("section").strip())
             output_lines.append(line)
             continue
 
         kv_match = KEY_VALUE_RE.match(line)
-        if kv_match is not None and current_section in remaining_sections:
+        if kv_match is not None and current_section_key in remaining_sections:
             key_name = kv_match.group("key")
-            sec_pending = remaining_sections[current_section]
-            if key_name in sec_pending:
+            norm_key = _norm(key_name)
+            _, sec_pending = remaining_sections[current_section_key]
+            if norm_key in sec_pending:
                 indent = kv_match.group("indent")
                 comment = kv_match.group("comment") or ""
-                new_val = sec_pending.pop(key_name)
+                _, new_val = sec_pending.pop(norm_key)
+                consumed_by_section[current_section_key].add(norm_key)
                 output_lines.append(f"{indent}{key_name}={new_val}{comment}")
+                continue
+            if norm_key in consumed_by_section[current_section_key]:
+                # Drop duplicate conflicting key in the same section
                 continue
 
         output_lines.append(line)
 
-    flush_remaining_keys_for_section(current_section)
+    flush_remaining_keys_for_section(current_section_key)
 
-    for sec_name, kv_map in remaining_sections.items():
+    for sec_key, (orig_sec, kv_map) in remaining_sections.items():
         if not kv_map:
             continue
         if output_lines and output_lines[-1].strip() != "":
             output_lines.append("")
-        output_lines.append(f"[{sec_name}]")
-        for key, val in kv_map.items():
-            output_lines.append(f"{key}={val}")
+        output_lines.append(f"[{orig_sec}]")
+        for _, (orig_k, val) in kv_map.items():
+            output_lines.append(f"{orig_k}={val}")
+        consumed_by_section[sec_key].update(kv_map.keys())
 
     return "\n".join(output_lines).rstrip("\n") + "\n"
 

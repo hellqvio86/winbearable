@@ -1212,3 +1212,112 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
     bounded = _read_bounded_uac_output(big_out, max_bytes=16)
     assert bounded.startswith("A" * 16)
     assert "truncated at 16 bytes" in bounded
+
+
+def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cover backup preservation, symlink-safe pruning, INI case matching, TOML scope, and byte-exact FileSnapshot."""
+    import hashlib
+    import subprocess
+    from unittest.mock import patch
+
+    from winbearable.backends.system import NativeSystemBackend
+    from winbearable.const import MAX_CMD_OUTPUT_CHARS, WSL_VM_CREATOR_ID
+    from winbearable.hyperv_firewall import _default_ps_runner
+    from winbearable.models import FileSpec, RunRecord, TransactionState
+    from winbearable.operations import apply_file_spec, merge_file_content, restore_file_snapshot, snapshot_file_spec
+    from winbearable.state import StateStore
+    from winbearable.wsl import merge_ini_preserving_comments
+
+    # P1.3 + P1.8: restore_from_backup preserves valid state.json.bak; pruning skips symlinks & warns
+    store = StateStore(tmp_path / "state.json")
+    good_run = RunRecord(
+        run_id="run-good",
+        timestamp="2026-11-17T00:00:00Z",
+        profile_name="owner",
+        applied_tweaks=(),
+        state=TransactionState.COMMITTED,
+    )
+    store.save_runs([good_run])
+    store.save_runs([good_run])  # creates state.json.bak with good_run
+    bak_before = store.state_path.with_suffix(".json.bak").read_text(encoding="utf-8")
+    store.state_path.write_text("{corrupt", encoding="utf-8")
+    assert store.restore_from_backup() is True
+    assert store.load_runs()[0].run_id == "run-good"
+    assert store.state_path.with_suffix(".json.bak").read_text(encoding="utf-8") == bak_before
+    assert store.state_path.with_suffix(".json.corrupt").read_text(encoding="utf-8") == "{corrupt"
+
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (backups_dir / "link-dir").symlink_to(outside, target_is_directory=True)
+    warnings = store._prune_old_backups_unlocked([good_run], max_backup_dirs=0)
+    assert any("symlink" in w.lower() for w in warnings)
+    assert outside.is_dir()
+
+    # P1.1: Case-insensitive INI merge avoids duplicate sections/keys and is idempotent
+    ini_in = "\ufeff# header\n[WSL2]\nMemory=4GB ; keep\nmemory=2GB\n"
+    merged_once = merge_ini_preserving_comments(ini_in, {"wsl2": {"memory": "8GB", "dnsTunneling": "true"}})
+    assert merged_once.lower().count("[wsl2]") == 1
+    assert merged_once.lower().count("memory=") == 1
+    assert "Memory=8GB ; keep" in merged_once
+    assert (
+        merge_ini_preserving_comments(merged_once, {"wsl2": {"memory": "8GB", "dnsTunneling": "true"}}) == merged_once
+    )
+
+    # P1.2: Hyper-V timeout cleanup bounds taskkill.exe and post-kill communicate
+    fake_proc = MagicMock()
+    fake_proc.pid = 999
+    fake_proc.communicate.side_effect = [
+        subprocess.TimeoutExpired(cmd=["powershell.exe"], timeout=15.0),
+        subprocess.TimeoutExpired(cmd=["powershell.exe"], timeout=5.0),
+    ]
+    with (
+        patch("winbearable.hyperv_firewall.subprocess.Popen", return_value=fake_proc),
+        patch(
+            "winbearable.hyperv_firewall.subprocess.run", side_effect=subprocess.TimeoutExpired(["taskkill.exe"], 5.0)
+        ),
+        patch("winbearable.hyperv_firewall.sys.platform", "win32"),
+        pytest.raises(subprocess.TimeoutExpired),
+    ):
+        _default_ps_runner(["powershell.exe", "-Command", WSL_VM_CREATOR_ID])
+    fake_proc.stdout.close.assert_called_once()
+    fake_proc.stderr.close.assert_called_once()
+
+    # P1.4: _run_native_cmd bounds oversized output
+    win_sys = NativeSystemBackend()
+    big_proc = MagicMock()
+    big_proc.returncode = 0
+    big_proc.communicate.return_value = ("X" * (MAX_CMD_OUTPUT_CHARS + 50), "")
+    with patch("winbearable.backends.system.subprocess.Popen", return_value=big_proc):
+        cmd_res = win_sys._run_native_cmd(["cmd.exe", "/c", "echo"])
+    assert "truncated at" in cmd_res.stdout
+
+    # P1.5 + P1.6: Byte-preserving FileSnapshot (BOM + CRLF) and absent-file race refusal
+    bom_crlf_file = tmp_path / "cfg.json"
+    orig_bytes = b'\xef\xbb\xbf{\r\n  "keep": 1\r\n}\r\n'
+    bom_crlf_file.write_bytes(orig_bytes)
+    spec_existing = FileSpec(path_template=str(bom_crlf_file), file_format="json", desired_keys={"added": True})
+    snap = snapshot_file_spec(spec_existing)
+    apply_file_spec(spec_existing, expected_sha256=snap.sha256, expected_existed=True)
+    restore_file_snapshot(snap)
+    assert hashlib.sha256(bom_crlf_file.read_bytes()).hexdigest() == snap.sha256
+
+    raced_file = tmp_path / "raced.json"
+    spec_absent = FileSpec(path_template=str(raced_file), file_format="json", desired_keys={"a": 1})
+    snap_absent = snapshot_file_spec(spec_absent)
+    assert snap_absent.existed is False
+    raced_file.write_text('{"external": true}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="absent at snapshot time"):
+        apply_file_spec(spec_absent, expected_sha256=None, expected_existed=False)
+
+    # Non-UTF-8 file fails cleanly before mutation
+    bad_utf8 = tmp_path / "bad.json"
+    bad_utf8.write_bytes(b"\xff\xfe\x00\x01")
+    with pytest.raises(ValueError, match="Unsupported non-UTF-8"):
+        snapshot_file_spec(FileSpec(path_template=str(bad_utf8), file_format="json", desired_keys={"a": 1}))
+
+    # P1.7: TOML merge updates top-level without touching same-named key inside [table]
+    toml_src = '[other]\nmode = "keep"\n'
+    merged_toml = merge_file_content(toml_src, "toml", {"mode": "strict"})
+    assert merged_toml.startswith('mode = "strict"\n[other]\nmode = "keep"')
