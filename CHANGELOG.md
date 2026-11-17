@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.3] - 2026-11-17
+
+### Added
+
+- Added `bin/publish_winget.py` and `Makefile` targets (`winget-build`, `winget-validate`, `winget-publish`, `test-windows-docker`), documented in `docs/winget-releasing.md`.
+
 ## [0.9.2] - 2026-11-17
 
 ### Added

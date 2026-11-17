@@ -32,6 +32,14 @@ Smoke-test the built executable before uploading:
 
 ## Publish & Submit to `microsoft/winget-pkgs`
 
+For subsequent releases (after the `v<version>` GitHub Release is published), run:
+
+```powershell
+make winget-publish
+```
+
+(Or manually: `uv run python bin/publish_winget.py`, which builds the zip, uploads it to `v<version>`, and runs `wingetcreate update`.)
+
 1. **Upload the zip** (`dist/winbearable-<version>-win-x64.zip`) as a release asset on the GitHub Release for `v<version>`.
 2. **Update the manifests** in `packaging/winget/` (or generate them with `wingetcreate`):
    - `hellqvio86.winbearable.yaml`
