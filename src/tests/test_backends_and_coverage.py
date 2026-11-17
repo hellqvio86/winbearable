@@ -1496,7 +1496,7 @@ def test_registry_observations_wsl_timeouts_and_state_rotation(tmp_path: Path) -
     root = tmp
     store = StateStore(root / "state.json")
     wsl_prof = ProfileSpec(name="w", description="w", wsl=WslConfigSpec(enabled=True), tweaks={})
-    with patch("winbearable.engine.plan_or_apply_wsl", side_effect=WslOperationError("wsl boom")):
+    with patch("winbearable.engine.prepare_wsl_plan", side_effect=WslOperationError("wsl boom")):
         wsl_fail = apply_profile(wsl_prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True)
     assert "wsl" in wsl_fail.failed_ids
     assert "wsl boom" in str(wsl_fail.wsl_result)
@@ -1662,7 +1662,7 @@ def test_structured_outcomes_process_tree_locale_and_wsl_tx() -> None:
             wsl=WslConfigSpec(enabled=True),
             tweaks={"explorer.show_file_extensions": True},
         )
-        with patch("winbearable.engine.plan_or_apply_wsl", side_effect=WslOperationError("distro failed")):
+        with patch("winbearable.engine.prepare_wsl_plan", side_effect=WslOperationError("distro failed")):
             summary_wsl = apply_profile(
                 prof_wsl,
                 env_wsl,

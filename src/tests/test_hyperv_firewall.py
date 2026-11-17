@@ -281,3 +281,94 @@ def test_cli_wsl_firewall_dry_run_admin_guard_and_apply(cli_runner: Any) -> None
     ):
         rc_err, _, _ = cli_runner(["wsl", "firewall", "--apply", "--json"])
     assert rc_err == EXIT_ERROR
+
+
+def test_hyperv_firewall_rejects_missing_fields_invalid_values_and_mismatches() -> None:
+    """P0.4: Reject missing Name, invalid booleans/actions, and mismatched effective state."""
+    from winbearable.hyperv_firewall import _parse_ps_setting_json
+
+    # 1. Missing Name or invalid Enabled / DefaultInboundAction / LoopbackEnabled -> None
+    assert (
+        _parse_ps_setting_json(json.dumps({"Enabled": True, "DefaultInboundAction": 4, "DefaultOutboundAction": 2}))
+        is None
+    )
+    assert (
+        _parse_ps_setting_json(
+            json.dumps(
+                {"Name": WSL_VM_CREATOR_ID, "Enabled": "maybe", "DefaultInboundAction": 4, "DefaultOutboundAction": 2}
+            )
+        )
+        is None
+    )
+    assert (
+        _parse_ps_setting_json(
+            json.dumps(
+                {"Name": WSL_VM_CREATOR_ID, "Enabled": True, "DefaultInboundAction": 99, "DefaultOutboundAction": 2}
+            )
+        )
+        is None
+    )
+    assert (
+        _parse_ps_setting_json(
+            json.dumps(
+                {
+                    "Name": WSL_VM_CREATOR_ID,
+                    "Enabled": True,
+                    "DefaultInboundAction": 4,
+                    "DefaultOutboundAction": 2,
+                    "LoopbackEnabled": "invalid",
+                }
+            )
+        )
+        is None
+    )
+
+    # 2. Exit code 0 with mismatched effective values must fail verification
+    previous_payload = {
+        "Name": WSL_VM_CREATOR_ID,
+        "Enabled": False,
+        "DefaultInboundAction": 2,
+        "DefaultOutboundAction": 2,
+        "LoopbackEnabled": False,
+    }
+    mismatched_payload = {
+        "Name": WSL_VM_CREATOR_ID,
+        "Enabled": True,
+        "DefaultInboundAction": 2,  # requested Block (4), got Allow (2)
+        "DefaultOutboundAction": 2,
+        "LoopbackEnabled": True,
+    }
+
+    def _mismatch_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+        cmd_str = args[-1]
+        if "Set-NetFirewallHyperVVMSetting" in cmd_str:
+            return _cp(0, json.dumps(mismatched_payload))
+        return _cp(0, json.dumps(previous_payload))
+
+    res = set_wsl_hyperv_firewall_setting(
+        enabled=True,
+        default_inbound="Block",
+        default_outbound="Allow",
+        dry_run=False,
+        runner=_mismatch_runner,
+        platform_override="win32",
+    )
+    assert res["returncode"] == 1
+    assert res["verified_ok"] is False
+    assert "VERIFICATION_FAILED" in str(res["error"])
+    assert res["previous"]["enabled"] is False
+
+    # 3. Missing Name in setter output -> PARSE_ERROR
+    res_no_name = set_wsl_hyperv_firewall_setting(
+        enabled=True,
+        default_inbound="Block",
+        default_outbound="Allow",
+        dry_run=False,
+        runner=lambda _args: _cp(
+            0, json.dumps({"Enabled": True, "DefaultInboundAction": 4, "DefaultOutboundAction": 2})
+        ),
+        platform_override="win32",
+    )
+    assert res_no_name["returncode"] == 1
+    assert res_no_name["verified_ok"] is False
+    assert "PARSE_ERROR" in str(res_no_name["error"])
