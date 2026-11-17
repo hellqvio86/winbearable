@@ -823,6 +823,28 @@ class FsutilSnapshot:
 
 
 @dataclass(frozen=True)
+class IcaclsSnapshot:
+    """Recorded pre-apply ACL backup for a user-owned path."""
+
+    path_template: str
+    backup_acl_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path_template": self.path_template,
+            "backup_acl_path": self.backup_acl_path,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> IcaclsSnapshot:
+        bak = payload.get("backup_acl_path")
+        return cls(
+            path_template=str(payload["path_template"]),
+            backup_acl_path=str(bak) if bak is not None else None,
+        )
+
+
+@dataclass(frozen=True)
 class PowercfgSnapshot:
     """Recorded pre-apply state of Windows hibernation."""
 
@@ -938,6 +960,7 @@ class RunRecord:
     fsutil_snapshots: tuple[FsutilSnapshot, ...] = ()
     powercfg_snapshots: tuple[PowercfgSnapshot, ...] = ()
     git_config_snapshots: tuple[GitConfigSnapshot, ...] = ()
+    icacls_snapshots: tuple[IcaclsSnapshot, ...] = ()
     file_snapshots: tuple[FileSnapshot, ...] = ()
     installed_winget_packages: tuple[str, ...] = ()
     installed_vscode_extensions: tuple[str, ...] = ()
@@ -967,6 +990,7 @@ class RunRecord:
             "fsutil_snapshots": [snap.to_dict() for snap in self.fsutil_snapshots],
             "powercfg_snapshots": [snap.to_dict() for snap in self.powercfg_snapshots],
             "git_config_snapshots": [snap.to_dict() for snap in self.git_config_snapshots],
+            "icacls_snapshots": [snap.to_dict() for snap in self.icacls_snapshots],
             "file_snapshots": [snap.to_dict() for snap in self.file_snapshots],
             "installed_winget_packages": list(self.installed_winget_packages),
             "installed_vscode_extensions": list(self.installed_vscode_extensions),
@@ -993,6 +1017,7 @@ class RunRecord:
         fsutil_snaps = tuple(FsutilSnapshot.from_dict(item) for item in payload.get("fsutil_snapshots", []))
         powercfg_snaps = tuple(PowercfgSnapshot.from_dict(item) for item in payload.get("powercfg_snapshots", []))
         git_snaps = tuple(GitConfigSnapshot.from_dict(item) for item in payload.get("git_config_snapshots", []))
+        icacls_snaps = tuple(IcaclsSnapshot.from_dict(item) for item in payload.get("icacls_snapshots", []))
         file_snaps = tuple(FileSnapshot.from_dict(item) for item in payload.get("file_snapshots", []))
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
         vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
@@ -1018,6 +1043,7 @@ class RunRecord:
             fsutil_snapshots=fsutil_snaps,
             powercfg_snapshots=powercfg_snaps,
             git_config_snapshots=git_snaps,
+            icacls_snapshots=icacls_snaps,
             file_snapshots=file_snaps,
             installed_winget_packages=winget_pkgs,
             installed_vscode_extensions=vscode_exts,

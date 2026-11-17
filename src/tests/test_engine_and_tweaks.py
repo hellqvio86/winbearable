@@ -374,7 +374,6 @@ def test_every_catalog_tweak_apply_and_revert_cycle(
         "bloat.remove_bing_weather",
         "bloat.remove_clipchamp",
         "bloat.remove_feedback_hub",
-        "dev.fix_ssh_key_permissions",
     }
 
 

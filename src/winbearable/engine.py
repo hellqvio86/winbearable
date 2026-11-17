@@ -31,6 +31,7 @@ from .models import (
     FsutilCaseSensitiveSpec,
     FsutilSnapshot,
     GitConfigSnapshot,
+    IcaclsSnapshot,
     OperationOutcome,
     OperationStatus,
     OptionalFeatureSnapshot,
@@ -633,6 +634,7 @@ class _PreApplySnapshots:
     fsutil: list[FsutilSnapshot]
     powercfg: list[PowercfgSnapshot]
     git_config: list[GitConfigSnapshot]
+    icacls: list[IcaclsSnapshot]
     files: list[FileSnapshot]
 
 
@@ -655,6 +657,7 @@ def _collect_pre_apply_snapshots(
     fsutil_snapshots: list[FsutilSnapshot] = []
     powercfg_snapshots: list[PowercfgSnapshot] = []
     git_snapshots: list[GitConfigSnapshot] = []
+    icacls_snapshots: list[IcaclsSnapshot] = []
     file_snapshots: list[FileSnapshot] = []
 
     seen_reg_keys: set[tuple[str, str, str]] = set()
@@ -780,6 +783,12 @@ def _collect_pre_apply_snapshots(
             if expanded not in seen_files:
                 file_snapshots.append(snapshot_file_spec(f_spec))
                 seen_files.add(expanded)
+        for ic_idx, ic_spec in enumerate(tweak.icacls_specs):
+            if not any(snap.path_template == ic_spec.path_template for snap in icacls_snapshots):
+                acl_bak = str(backup_dir / f"icacls_{len(icacls_snapshots)}_{ic_idx}.acl") if backup_dir else None
+                if acl_bak is not None:
+                    system.backup_acl(ic_spec.path_template, Path(acl_bak))
+                icacls_snapshots.append(IcaclsSnapshot(path_template=ic_spec.path_template, backup_acl_path=acl_bak))
 
     return _PreApplySnapshots(
         registry=reg_snapshots,
@@ -793,6 +802,7 @@ def _collect_pre_apply_snapshots(
         fsutil=fsutil_snapshots,
         powercfg=powercfg_snapshots,
         git_config=git_snapshots,
+        icacls=icacls_snapshots,
         files=file_snapshots,
     )
 
@@ -888,6 +898,14 @@ def _compensate_run_record(
         target_val = g_snap.previous_value if g_snap.existed else None
         if not system.set_git_global_config(g_snap.key, target_val):
             errors.append(f"git_config {g_snap.key}")
+
+    for ic_snap in reversed(run_record.icacls_snapshots):
+        if (
+            ic_snap.backup_acl_path
+            and Path(ic_snap.backup_acl_path).is_file()
+            and not system.restore_acl(ic_snap.path_template, Path(ic_snap.backup_acl_path))
+        ):
+            errors.append(f"icacls restore {ic_snap.path_template}")
 
     for f_snap in reversed(run_record.file_snapshots):
         try:
@@ -1332,6 +1350,7 @@ def _apply_profile_locked(
                     fsutil_snapshots=tuple(snaps.fsutil),
                     powercfg_snapshots=tuple(snaps.powercfg),
                     git_config_snapshots=tuple(snaps.git_config),
+                    icacls_snapshots=tuple(snaps.icacls),
                     file_snapshots=tuple(snaps.files),
                     installed_winget_packages=tuple(newly_installed_winget),
                     installed_vscode_extensions=tuple(newly_installed_extensions),
@@ -1403,7 +1422,7 @@ def _apply_profile_locked(
                     irrev_notes = [
                         tid
                         for tid in rolled_back_ids
-                        if (tw := get_tweak(tid)) and (tw.uninstall_onedrive or tw.icacls_specs or tw.stop_processes)
+                        if (tw := get_tweak(tid)) and (tw.uninstall_onedrive or tw.stop_processes)
                     ]
                     note = f" (irreversible ops cannot be undone: {', '.join(irrev_notes)})" if irrev_notes else ""
                     full_error = (
