@@ -907,6 +907,19 @@ def _compensate_run_record(
         ):
             errors.append(f"icacls restore {ic_snap.path_template}")
 
+    for hv_snap in reversed(run_record.hyperv_firewall_snapshots):
+        from .hyperv_firewall import set_wsl_hyperv_firewall_setting
+
+        if hv_snap.previous_enabled is not None:
+            hv_res = set_wsl_hyperv_firewall_setting(
+                enabled=hv_snap.previous_enabled,
+                default_inbound=hv_snap.previous_inbound or "NotConfigured",
+                default_outbound=hv_snap.previous_outbound or "NotConfigured",
+                dry_run=False,
+            )
+            if hv_res.get("returncode", 1) != 0:
+                errors.append(f"hyperv_firewall restore {hv_snap.vm_creator_id}: {hv_res.get('error')}")
+
     for f_snap in reversed(run_record.file_snapshots):
         try:
             restore_file_snapshot(f_snap)
@@ -1116,7 +1129,7 @@ def _execute_tweak_mutations(
             )
         _ckpt(f"{tweak.tweak_id}:powercfg:hibernate={p_spec.enabled}")
 
-    if tweak.git_config_specs and getattr(system, "git_installed", True):
+    if tweak.git_config_specs and system.git_installed:
         for g_spec in tweak.git_config_specs:
             if not system.set_git_global_config(g_spec.key, g_spec.value):
                 raise _TweakMutationError(

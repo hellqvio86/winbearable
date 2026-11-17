@@ -2,6 +2,7 @@
 
 import ctypes
 import os
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -552,22 +553,28 @@ def _check_unquoted_service_paths(registry: RegistryBackend) -> AuditFinding:
         raw = str(img_val[0]).strip()
         if not raw or raw.startswith('"'):
             continue
-        exe_part = raw.split(" /", 1)[0].split(" -", 1)[0].strip()
-        if " " in exe_part and not exe_part.lower().startswith((r"\systemroot", "system32", r"c:\windows\system32")):
+        low = raw.lower()
+        if low.startswith((r"\systemroot", "system32", r"c:\windows\system32", r"\??\\", "%systemroot%")):
+            continue
+        exe_match = re.match(r"^([^\s]+\.exe)(?:\s|$)", raw, re.IGNORECASE)
+        if exe_match is not None:
+            continue
+        space_exe_match = re.match(r"^([^\"/]+?\s[^\"/]+?\.exe)(?:\s|$)", raw, re.IGNORECASE)
+        if space_exe_match is not None:
             vulnerable.append(f"{svc}: {raw}")
     if vulnerable:
         obs = PostureObservation(
             ObservationState.ENABLED,
             f"registry:{svc_root}",
-            ObservationConfidence.HIGH,
-            f"{len(vulnerable)} unquoted path(s): {'; '.join(vulnerable[:5])}",
-            "Unquoted service ImagePath containing spaces.",
+            ObservationConfidence.MEDIUM,
+            f"{len(vulnerable)} unquoted path(s) with spaces before .exe: {'; '.join(vulnerable[:5])}",
+            "Unquoted service ImagePath containing spaces before .exe (intermediate directory ACLs not verified).",
         )
         return AuditFinding(
             "chk.unquoted_service_paths",
             "services",
             "Unquoted Service ImagePaths",
-            "medium",
+            "low",
             obs,
             "Quote ImagePath values for third-party services.",
         )
@@ -808,11 +815,11 @@ def _check_hyperv_firewall(*, powershell_clm_active: bool = False) -> AuditFindi
             "Ensure `[wsl]` `firewall = true` is set in .wslconfig or run `wb wsl firewall --apply` on Windows.",
         )
 
-    enabled = bool(setting.get("enabled"))
+    enabled = setting.get("enabled")
     inbound = str(setting.get("default_inbound_action", "Unknown"))
     outbound = str(setting.get("default_outbound_action", "Unknown"))
     evidence = f"Enabled={enabled}, DefaultInboundAction={inbound}, DefaultOutboundAction={outbound}"
-    if enabled and inbound == "Block":
+    if enabled is True and inbound == "Block":
         obs = PostureObservation(
             ObservationState.ENABLED,
             "powershell:Get-NetFirewallHyperVVMSetting",

@@ -149,7 +149,7 @@ AGENTS invariant 7 says "never parse localized human text". Several paths still 
 - **Fix:** use `icacls /save`/`/restore` into the run's backup dir; grant by SID (`*S-1-5-21-…` from the process token); read ACLs via Win32 (`GetNamedSecurityInfo`) or `icacls /save` output instead of counting lines.
 - **Done when:** non-English fixture passes; rollback restores the saved ACL; irreversible gating is consistent between adapter and tweak flags.
 
-### B-04 · P1 · `CODE` — File-config adapter robustness
+### [x] B-04 · P1 · `CODE` — File-config adapter robustness
 - `operations.py:696`: `target.read_text(encoding="utf-8")` sits **outside** the `try`, so a non-UTF-8 or unreadable file crashes `wb plan` with a traceback instead of an `unverified` entry.
 - `operations.py:338`: JSON/JSONC merge re-serialises with `sort_keys=True` and default `ensure_ascii=True` — it reorders the user's `settings.json` and rewrites `å/ä/ö` as `\uXXXX`. Preserve order and `ensure_ascii=False`, or use a minimal textual patch.
 - `operations.py:289,332` UTF-8 BOM is stripped before merging, so it is dropped silently on write (restore is byte-exact, apply is not).
@@ -158,13 +158,13 @@ AGENTS invariant 7 says "never parse localized human text". Several paths still 
 - `operations.py:631` `getattr(system, "git_installed", True)` bypasses the typed `SystemBackend` protocol.
 - **Done when:** one regression test each (non-UTF-8 file in `plan`, unset env var, key order/non-ASCII preserved).
 
-### B-05 · P1 · `NEEDS-WINDOWS` — Hyper-V firewall (DEC-01)
+### [x] B-05 · P1 · `NEEDS-WINDOWS` — Hyper-V firewall (DEC-01)
 - Bare `powershell.exe` (`hyperv_firewall.py:187, 220`) — see S-01.
 - `previous` setting is returned (`hyperv_firewall.py:268`) but **never journaled**, so `--disable` cannot restore the true prior state.
 - `_decode_action` (`:78`) only maps `4→Block`, `2→Allow`; an unset/`NotConfigured` value makes `_parse_ps_setting_json` return `None` for the whole record, which the audit then cannot distinguish from "unavailable/CLM". Verify the enum values on Windows and add an explicit `NotConfigured` state.
 - **Done when:** previous state is stored in `RunRecord` and restored; `NotConfigured` fixture covered.
 
-### B-06 · P2 · `CODE` — `_check_unquoted_service_paths` is a heuristic
+### [x] B-06 · P2 · `CODE` — `_check_unquoted_service_paths` is a heuristic
 - `audit.py:555` splits on `" /"` / `" -"`; any unquoted executable followed by positional args is flagged, and writability of the intermediate directories (what makes it exploitable) is never checked. Tokenise like `CommandLineToArgvW`/service ImagePath rules and check ACLs, or downgrade to `info`.
 
 ---

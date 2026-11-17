@@ -276,9 +276,15 @@ class OneDriveOperationAdapter:
         return [op], drifted, []
 
 
+_UNRESOLVED_WIN_ENV_RE = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*%")
+
+
 def expand_file_spec_path(path_template: str) -> Path:
-    """Expand %VAR% and ~ in a FileSpec path template."""
-    return Path(os.path.expandvars(os.path.expanduser(path_template)))
+    """Expand %VAR% and ~ in a FileSpec path template, rejecting unresolved %VAR% tokens."""
+    expanded = os.path.expandvars(os.path.expanduser(path_template))
+    if _UNRESOLVED_WIN_ENV_RE.search(expanded):
+        raise ValueError(f"Unresolved environment variable in path template: {path_template!r}")
+    return Path(expanded)
 
 
 def has_jsonc_comments(text: str) -> bool:
@@ -308,8 +314,57 @@ def has_jsonc_comments(text: str) -> bool:
 _TOML_TABLE_RE = re.compile(r"^\s*\[.+\]\s*(?:#.*)?$")
 
 
+def _find_first_toml_table_line(lines: list[str]) -> int:
+    """Return index of the first real TOML [table] header, ignoring multi-line strings and brackets."""
+    multiline_delim: str | None = None
+    bracket_depth = 0
+    for idx, ln in enumerate(lines):
+        if multiline_delim is not None:
+            if multiline_delim in ln:
+                multiline_delim = None
+            continue
+        stripped = ln.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if bracket_depth == 0 and _TOML_TABLE_RE.match(ln):
+            return idx
+        in_str = False
+        escape = False
+        str_ch = ""
+        i = 0
+        while i < len(ln):
+            ch = ln[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == str_ch:
+                    in_str = False
+            else:
+                if ln[i : i + 3] in ('"""', "'''"):
+                    delim = ln[i : i + 3]
+                    close_pos = ln.find(delim, i + 3)
+                    if close_pos == -1:
+                        multiline_delim = delim
+                        break
+                    i = close_pos + 2
+                elif ch == "#":
+                    break
+                elif ch in ('"', "'"):
+                    in_str = True
+                    str_ch = ch
+                elif ch in ("[", "{"):
+                    bracket_depth += 1
+                elif ch in ("]", "}") and bracket_depth > 0:
+                    bracket_depth -= 1
+            i += 1
+    return len(lines)
+
+
 def _merge_toml_top_level(existing_text: str, desired_keys: dict[str, Any]) -> str:
     """Merge top-level TOML keys without mutating same-named keys inside [tables]."""
+    has_bom = existing_text.startswith("\ufeff")
     cleaned_text = existing_text.lstrip("\ufeff")
     try:
         parsed = tomllib.loads(cleaned_text) if cleaned_text.strip() else {}
@@ -317,11 +372,7 @@ def _merge_toml_top_level(existing_text: str, desired_keys: dict[str, Any]) -> s
         raise ValueError(f"Invalid TOML input: {exc}") from exc
 
     lines = cleaned_text.splitlines() if cleaned_text.strip() else []
-    first_table_idx = len(lines)
-    for idx, ln in enumerate(lines):
-        if _TOML_TABLE_RE.match(ln):
-            first_table_idx = idx
-            break
+    first_table_idx = _find_first_toml_table_line(lines)
 
     top_lines = lines[:first_table_idx]
     table_lines = lines[first_table_idx:]
@@ -346,12 +397,13 @@ def _merge_toml_top_level(existing_text: str, desired_keys: dict[str, Any]) -> s
             tomllib.loads(result)
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"Merged TOML failed validation: {exc}") from exc
-    return result
+    return ("\ufeff" + result) if has_bom else result
 
 
 def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[str, Any]) -> str:
     """Merge desired_keys into existing_text for json, jsonc, ini, or toml while preserving unrelated keys."""
     fmt = file_format.lower()
+    has_bom = existing_text.startswith("\ufeff")
     if fmt in {"json", "jsonc"}:
         cleaned_json = existing_text.lstrip("\ufeff")
         if fmt == "jsonc" and has_jsonc_comments(cleaned_json):
@@ -359,13 +411,15 @@ def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[
         data: dict[str, Any] = json.loads(cleaned_json) if cleaned_json.strip() else {}
         for k, v in desired_keys.items():
             data[k] = v
-        return json.dumps(data, indent=2, sort_keys=True) + "\n"
+        rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        return ("\ufeff" + rendered) if has_bom else rendered
     if fmt == "ini":
         ini_sections: dict[str, dict[str, str]] = {}
         for sec, kv in desired_keys.items():
             if isinstance(kv, dict):
                 ini_sections[sec] = {str(k): str(v) for k, v in kv.items()}
-        return merge_ini_preserving_comments(existing_text, ini_sections, case_insensitive=True)
+        merged_ini = merge_ini_preserving_comments(existing_text.lstrip("\ufeff"), ini_sections, case_insensitive=True)
+        return ("\ufeff" + merged_ini) if has_bom else merged_ini
     if fmt == "toml":
         return _merge_toml_top_level(existing_text, desired_keys)
     raise ValueError(f"Unsupported FileSpec format: {file_format}")
@@ -652,7 +706,7 @@ class GitConfigOperationAdapter:
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
-        if tweak.git_config_specs and not getattr(system, "git_installed", True):
+        if tweak.git_config_specs and not system.git_installed:
             return [], [], []
         for spec in tweak.git_config_specs:
             actual = system.get_git_global_config(spec.key)
@@ -716,12 +770,12 @@ class FileConfigOperationAdapter:
         drifted: list[str] = []
         unverified: list[str] = []
         for spec in tweak.file_specs:
-            target = expand_file_spec_path(spec.path_template)
-            existing = target.read_text(encoding="utf-8") if target.is_file() else ""
             try:
+                target = expand_file_spec_path(spec.path_template)
+                existing = target.read_text(encoding="utf-8") if target.is_file() else ""
                 merged = merge_file_content(existing, spec.file_format, spec.desired_keys)
-            except ValueError as exc:
-                unverified.append(f"file {target}: {exc}")
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                unverified.append(f"file {spec.path_template}: {exc}")
                 continue
             changed = merged != existing
             ops.append(

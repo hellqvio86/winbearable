@@ -6,7 +6,9 @@ import difflib
 import io
 import json
 import sys
+import uuid
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +48,16 @@ from .engine import (
     rollback_runs,
 )
 from .hyperv_firewall import set_wsl_hyperv_firewall_setting
-from .models import EnvironmentInfo, ObservationState, TweakStatus, UnsupportedPlatformError, WslConfigSpec
+from .models import (
+    EnvironmentInfo,
+    HypervFirewallSnapshot,
+    ObservationState,
+    RunRecord,
+    TransactionState,
+    TweakStatus,
+    UnsupportedPlatformError,
+    WslConfigSpec,
+)
 from .profiles import (
     ProfileValidationError,
     generate_init_profile_toml,
@@ -1137,6 +1148,24 @@ def _run_cli_body(
                 default_outbound=str(args.outbound),
                 dry_run=not bool(args.apply),
             )
+            if bool(args.apply) and fw_res["returncode"] == 0 and isinstance(fw_res.get("previous"), dict):
+                prev_fw = fw_res["previous"]
+                hv_snap = HypervFirewallSnapshot(
+                    vm_creator_id=str(prev_fw.get("vm_creator_id") or fw_res["vm_creator_id"]),
+                    previous_enabled=prev_fw.get("enabled"),
+                    previous_inbound=prev_fw.get("default_inbound_action"),
+                    previous_outbound=prev_fw.get("default_outbound_action"),
+                )
+                StateStore().append_run(
+                    RunRecord(
+                        run_id=f"hvfw-{uuid.uuid4().hex[:12]}",
+                        timestamp=datetime.now(UTC).isoformat(),
+                        profile_name="wsl-firewall",
+                        applied_tweaks=(),
+                        hyperv_firewall_snapshots=(hv_snap,),
+                        state=TransactionState.COMMITTED,
+                    )
+                )
             if args.json:
                 _print_json(fw_res)
             else:

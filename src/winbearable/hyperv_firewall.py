@@ -17,7 +17,7 @@ from typing import Any
 
 from .const import WSL_VM_CREATOR_ID
 
-_ACTION_MAP = {"block": "Block", "allow": "Allow"}
+_ACTION_MAP = {"block": "Block", "allow": "Allow", "notconfigured": "NotConfigured"}
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -73,7 +73,7 @@ def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd=args, timeout=15.0, output=exc.output, stderr=exc.stderr) from exc
 
 
-def _decode_bool(raw: Any) -> bool | None:
+def _decode_enabled(raw: Any) -> bool | str | None:
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, int):
@@ -81,6 +81,8 @@ def _decode_bool(raw: Any) -> bool | None:
             return True
         if raw == 0:
             return False
+        if raw == 2:
+            return "NotConfigured"
         return None
     if isinstance(raw, str):
         low = raw.strip().lower()
@@ -88,6 +90,8 @@ def _decode_bool(raw: Any) -> bool | None:
             return True
         if low in {"0", "false", "no"}:
             return False
+        if low == "notconfigured":
+            return "NotConfigured"
     return None
 
 
@@ -98,6 +102,8 @@ def _decode_action(raw: Any) -> str | None:
         return "Block"
     if raw == 2 or (isinstance(raw, str) and raw.strip().lower() == "allow"):
         return "Allow"
+    if raw == 0 or (isinstance(raw, str) and raw.strip().lower() == "notconfigured"):
+        return "NotConfigured"
     return None
 
 
@@ -124,16 +130,16 @@ def _parse_ps_setting_json(raw_stdout: str) -> dict[str, Any] | None:
     if not isinstance(raw_name, str) or not raw_name.strip():
         return None
 
-    enabled = _decode_bool(parsed.get("Enabled"))
+    enabled = _decode_enabled(parsed.get("Enabled"))
     inbound = _decode_action(parsed.get("DefaultInboundAction"))
     outbound = _decode_action(parsed.get("DefaultOutboundAction"))
     if enabled is None or inbound is None or outbound is None:
         return None
 
     raw_loopback = parsed.get("LoopbackEnabled")
-    loopback: bool | None = None
+    loopback: bool | str | None = None
     if raw_loopback is not None:
-        loopback = _decode_bool(raw_loopback)
+        loopback = _decode_enabled(raw_loopback)
         if loopback is None:
             return None
 
@@ -150,7 +156,7 @@ def verify_hyperv_firewall_setting(
     parsed: dict[str, Any],
     *,
     expected_vm_creator_id: str = WSL_VM_CREATOR_ID,
-    expected_enabled: bool,
+    expected_enabled: bool | str,
     expected_inbound: str,
     expected_outbound: str,
 ) -> str | None:
@@ -158,7 +164,7 @@ def verify_hyperv_firewall_setting(
     actual_id = str(parsed.get("vm_creator_id", "")).strip()
     if actual_id.lower() != expected_vm_creator_id.strip().lower():
         return f"vm_creator_id mismatch: expected {expected_vm_creator_id!r}, got {actual_id!r}"
-    if parsed.get("enabled") is not expected_enabled:
+    if parsed.get("enabled") != expected_enabled:
         return f"enabled mismatch: expected {expected_enabled!r}, got {parsed.get('enabled')!r}"
     if parsed.get("default_inbound_action") != expected_inbound:
         return (
@@ -210,7 +216,7 @@ def get_wsl_hyperv_firewall_setting(
 
 def set_wsl_hyperv_firewall_setting(
     *,
-    enabled: bool = True,
+    enabled: bool | str = True,
     default_inbound: str = "Block",
     default_outbound: str = "Allow",
     dry_run: bool = True,
@@ -221,7 +227,12 @@ def set_wsl_hyperv_firewall_setting(
     inbound = _normalize_action(default_inbound, "default_inbound")
     outbound = _normalize_action(default_outbound, "default_outbound")
 
-    enabled_str = "$true" if enabled else "$false"
+    if enabled == "NotConfigured":
+        enabled_str = "NotConfigured"
+    elif isinstance(enabled, bool):
+        enabled_str = "$true" if enabled else "$false"
+    else:
+        raise ValueError(f"Invalid enabled {enabled!r}; expected bool or 'NotConfigured'.")
     ps_script = (
         "try { "
         f"Set-NetFirewallHyperVVMSetting -Name '{WSL_VM_CREATOR_ID}' "
