@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 JSON_SCHEMA_VERSION = "1.0"
 
 APP_NAME = "winbearable"
@@ -71,6 +71,7 @@ BITLOCKER_STATUS_KEY = r"SYSTEM\CurrentControlSet\Control\BitLockerStatus"
 APPLOCKER_POLICIES_KEY = r"SOFTWARE\Policies\Microsoft\Windows\SrpV2"
 WDAC_POLICIES_KEY = r"SYSTEM\CurrentControlSet\Control\CI\Policy"
 WSL_POLICIES_KEY = r"SOFTWARE\Policies\Microsoft\WSL"
+WSL_VM_CREATOR_ID = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
 
 # Known EDR / endpoint management service names (registry Services\<name> inspection only, no WMI/processes).
 # Verified against vendor documentation:
