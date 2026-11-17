@@ -977,4 +977,13 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "Verified HKLM Policies\\System InactivityTimeoutSecs=900 against Microsoft Learn.",
         supported_editions=("Pro", "Enterprise", "Education"),
     ),
+    "dev.enable_windows_containers": _p(
+        "Enables the Windows Containers optional feature required for Windows-container Docker images.",
+        "Microsoft Learn: Prepare Windows operating system containers",
+        "Medium risk: enables an OS optional feature and requires a reboot; reversible via dism.",
+        "Allows Docker Desktop to switch to Windows containers (Pro/Enterprise/Education).",
+        "dism_optional_feature",
+        "Verified Containers feature name against Microsoft Learn.",
+        supported_editions=("Pro", "Enterprise", "Education"),
+    ),
 }

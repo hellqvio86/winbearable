@@ -3193,6 +3193,23 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             ),
         ),
     ),
+    "dev.enable_windows_containers": TweakDefinition(
+        tweak_id="dev.enable_windows_containers",
+        category="dev",
+        title="Enable Windows Containers Optional Feature",
+        description=(
+            "Enables the Windows `Containers` optional feature via dism.exe so Docker Desktop "
+            "can run Windows containers (Pro/Enterprise/Education; requires reboot)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/virtualization/windowscontainers/quick-start/set-up-environment",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=True,
+        requires_reboot=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        feature_specs=(OptionalFeatureSpec(feature_name="Containers", enabled=True),),
+    ),
 }
 
 TWEAK_CATALOG = {

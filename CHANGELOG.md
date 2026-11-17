@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.5] - 2026-11-17
+
+### Added
+
+- Added `dev.enable_windows_containers` (`OptionalFeatureSpec("Containers", enabled=True)`, Pro/Enterprise/Education, requires admin & reboot) to enable Windows containers for Docker Desktop.
+
 ## [0.9.4] - 2026-11-17
 
 ### Added
