@@ -126,7 +126,7 @@ class OperationOutcome:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "OperationOutcome":
+    def from_dict(cls, payload: dict[str, Any]) -> OperationOutcome:
         """Deserialize operation outcome from a dictionary."""
         raw_rc = payload.get("returncode")
         return cls(
@@ -391,6 +391,9 @@ class TweakProvenance:
     verification_method: str
     review_evidence: str
     supported_editions: tuple[str, ...] = ("Home", "Pro", "Enterprise", "Education")
+    evidence_type: str = "maintainer_assertion"  # "vendor_docs" | "observed_host" | "maintainer_assertion"
+    verified_build: int | None = None
+    verified_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -588,7 +591,7 @@ class RegistryValueSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "RegistryValueSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> RegistryValueSnapshot:
         """Deserialize snapshot from dictionary."""
         raw_view = payload.get("view", RegistryView.DEFAULT)
         try:
@@ -622,7 +625,7 @@ class ServiceSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ServiceSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> ServiceSnapshot:
         """Deserialize service snapshot from dictionary."""
         prev = payload.get("previous_start_type")
         return cls(
@@ -646,7 +649,7 @@ class ScheduledTaskSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ScheduledTaskSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> ScheduledTaskSnapshot:
         """Deserialize scheduled task snapshot from dictionary."""
         prev = payload.get("previous_enabled")
         return cls(
@@ -670,7 +673,7 @@ class OptionalFeatureSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "OptionalFeatureSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> OptionalFeatureSnapshot:
         """Deserialize optional feature snapshot from dictionary."""
         prev = payload.get("previous_enabled")
         return cls(
@@ -702,7 +705,7 @@ class RegistryKeySnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "RegistryKeySnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> RegistryKeySnapshot:
         """Deserialize key snapshot from dictionary."""
         raw_view = payload.get("view", RegistryView.DEFAULT)
         try:
@@ -735,7 +738,7 @@ class AuditpolSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "AuditpolSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> AuditpolSnapshot:
         prev = payload.get("previous_setting")
         bak = payload.get("backup_csv_path")
         return cls(
@@ -761,7 +764,7 @@ class WevtutilSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "WevtutilSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> WevtutilSnapshot:
         prev_en = payload.get("previous_enabled")
         prev_sz = payload.get("previous_max_size_bytes")
         return cls(
@@ -787,7 +790,7 @@ class FirewallGroupSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "FirewallGroupSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> FirewallGroupSnapshot:
         prev = payload.get("previous_enabled")
         wfw = payload.get("export_wfw_path")
         return cls(
@@ -811,7 +814,7 @@ class FsutilSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "FsutilSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> FsutilSnapshot:
         prev = payload.get("previous_enabled")
         return cls(
             directory=str(payload["directory"]),
@@ -829,7 +832,7 @@ class PowercfgSnapshot:
         return {"previous_enabled": self.previous_enabled}
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "PowercfgSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> PowercfgSnapshot:
         prev = payload.get("previous_enabled")
         return cls(previous_enabled=bool(prev) if prev is not None else None)
 
@@ -850,7 +853,7 @@ class GitConfigSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "GitConfigSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> GitConfigSnapshot:
         prev = payload.get("previous_value")
         return cls(
             key=str(payload["key"]),
@@ -879,7 +882,7 @@ class FileSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "FileSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> FileSnapshot:
         sha = payload.get("sha256")
         content = payload.get("previous_content")
         b64 = payload.get("previous_bytes_b64")
@@ -908,7 +911,7 @@ class WslDistroSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "WslDistroSnapshot":
+    def from_dict(cls, payload: dict[str, Any]) -> WslDistroSnapshot:
         return cls(
             distro=str(payload["distro"]),
             existed=bool(payload.get("existed", False)),
@@ -977,7 +980,7 @@ class RunRecord:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "RunRecord":
+    def from_dict(cls, payload: dict[str, Any]) -> RunRecord:
         """Deserialize run record from dictionary."""
         reg_snaps = tuple(RegistryValueSnapshot.from_dict(item) for item in payload.get("registry_snapshots", []))
         reg_key_snaps = tuple(RegistryKeySnapshot.from_dict(item) for item in payload.get("registry_key_snapshots", []))

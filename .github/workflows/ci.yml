@@ -48,7 +48,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Verify uv.lock is up-to-date
         run: uv lock --check
@@ -77,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.14", "3.15"]
 
     steps:
       - name: Checkout code
@@ -103,11 +103,11 @@ jobs:
         run: uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
 
       - name: Generate coverage badge
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.14'
         run: uv run python src/generate_badge.py
 
       - name: Upload coverage report and badge
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.14'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-badge
@@ -181,7 +181,7 @@ jobs:
         if: steps.check_version.outputs.changed == 'true'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Build package
         if: steps.check_version.outputs.changed == 'true'
@@ -268,7 +268,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Build package
         run: uv build
@@ -315,7 +315,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install dependencies
         run: uv sync --frozen

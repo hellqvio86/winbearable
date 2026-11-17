@@ -19,3 +19,15 @@ Run the env-gated Windows integration suite before releases:
 $env:WINBEARABLE_RUN_WINDOWS_INTEGRATION = "1"
 pytest src/tests/test_windows_integration.py -v
 ```
+
+## Verification Ledger (Implemented / Unit-Tested / Windows-Verified)
+
+| Item | Implemented | Unit-Tested (WSL2 Linux) | Windows-Verified (`win32`, `Python 3.15.2`) |
+| --- | --- | --- | --- |
+| **P0.1** UAC bounded wait & ctypes contracts | Yes | Yes (`test_uac_bounded_wait_signatures_and_output_limits`) | `_get_win32_dlls()` ctypes contracts + `set_console_title()` verified (`7 passed`); interactive UAC timeout remains manual |
+| **P0.2** WSL write-ahead journal & checkpoints | Yes | Yes (`test_wsl_write_ahead_journal_before_mutation_and_probe_error_refusal`) | HKCU crash/recover verified; multi-distro real WSL crash remains mocked/manual |
+| **P0.3** Confirmed missing vs read error `/etc/wsl.conf` | Yes | Yes (`probe_distro_wsl_conf` + `plan_or_apply_wsl`) | Mocked unit-tested; live distro error probe manual |
+| **P0.4** Hyper-V firewall semantic verification | Yes | Yes (`test_hyperv_firewall_rejects_missing_fields_invalid_values_and_mismatches`) | Read-only `get_wsl_hyperv_firewall_setting()` verified (`test_windows_hyperv_firewall_readonly_query`) |
+| **P1.1–P1.2, P1.4, P1.6–P1.8** Reliability hardening | Yes | Yes (`test_state_ini_file_and_timeout_hardening`) | Covered via unit tests + HKCU integration |
+| **P1.3 & P1.5** `restore_from_backup()` & byte-exact `FileSnapshot` | Yes | Yes (`test_state_ini_file_and_timeout_hardening`) | Verified on Windows 11 (`test_windows_state_restore_and_byte_exact_file_snapshot`) |
+| **P1.9** Non-registry evidence metadata | Yes | Yes (`test_catalog_non_registry_evidence_metadata`) | `sc.exe` & `auditpol.exe` snapshot capture (`test_readonly_identifier_snapshot_capture`) |

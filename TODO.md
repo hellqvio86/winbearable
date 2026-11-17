@@ -34,15 +34,15 @@ Current baseline: **`v0.9.10`** (Windows 11 `26H2+`, build `>= 26300`).
 - [ ] **P1.6 — Close missing-file race in `apply_file_spec()`** (`operations.py`, `engine.py`) — *implemented / unit-tested / needs Windows verification*
 - [ ] **P1.7 — Table-aware TOML merge validation** (`operations.py`) — *implemented / unit-tested / needs Windows verification*
 - [ ] **P1.8 — Safe reparse-point handling & observable warnings in backup pruning** (`state.py`) — *implemented / unit-tested / needs Windows verification*
-- [ ] **P1.9 — Traceable evidence metadata for non-registry catalog identifiers** (`tweaks/catalog.py`, `tweaks/provenance.py`, `docs/verify-matrix.md`)
-- [ ] **P1.10 — Expand real Windows integration coverage around recovery** (`src/tests/test_windows_integration.py`, `docs/verify-matrix.md`)
+- [x] **P1.9 — Traceable evidence metadata for non-registry catalog identifiers** (`models.py`, `test_catalog_lint.py`, `docs/verify-matrix.md`)
+- [x] **P1.10 — Expand real Windows integration coverage around recovery** (`src/tests/test_windows_integration.py`, `docs/verify-matrix.md`) — *7 passed on Windows 11 (`Python 3.15.2`)*
 
 ---
 
 ## P2 — Tooling, Python 3.14+/3.15 & Release Quality
 
-- [ ] **P2.1 — Drop Python `< 3.14` & target `3.14` / `3.15`** (`pyproject.toml`, `.github/workflows/ci.yml`, `.devcontainer/devcontainer.json`, `Dockerfile*`, `README.md`)
-- [ ] **P2.2 — Make package description/README explicit about the `hyperv_firewall.py` PowerShell exception** (`pyproject.toml`, `README.md`, `AGENTS.md`)
-- [ ] **P2.3 — Document backup/state durability guarantees explicitly** (`state.py`, `wsl.py`, `docs/threat-model.md`)
-- [ ] **P2.4 — Keep verification ledger separated into implemented / unit-tested / Windows-verified** (`TODO.md`, `docs/verify-matrix.md`)
+- [x] **P2.1 — Drop Python `< 3.14` & target `3.14` / `3.15`** (`pyproject.toml`, `.github/workflows/ci.yml`, `.devcontainer/docker-compose.yml`, `README.md`, `AGENTS.md`)
+- [x] **P2.2 — Make package description/README explicit about the `hyperv_firewall.py` PowerShell exception** (`pyproject.toml`, `README.md`, `AGENTS.md`)
+- [x] **P2.3 — Document backup/state durability guarantees explicitly** (`docs/threat-model.md`)
+- [x] **P2.4 — Keep verification ledger separated into implemented / unit-tested / Windows-verified** (`TODO.md`, `docs/verify-matrix.md`)
 - [ ] **P2.5 — Winget publishing (human):** submit/publish manifest once Winget accepts the package.
