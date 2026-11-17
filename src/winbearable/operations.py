@@ -448,6 +448,12 @@ def _atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
         elif os.name == "posix":
             os.chmod(temp_path_str, 0o600)
         os.replace(temp_path_str, target_path)
+        if os.name == "posix":
+            dir_fd = os.open(str(target_path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except Exception:
         if os.path.exists(temp_path_str):
             os.unlink(temp_path_str)

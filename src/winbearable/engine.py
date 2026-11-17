@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -55,6 +54,7 @@ from .models import (
     WslDistroSnapshot,
 )
 from .operations import (
+    _atomic_write_bytes,
     apply_file_spec,
     expand_file_spec_path,
     format_registry_op,
@@ -811,6 +811,7 @@ def _compensate_run_record(
     run_record: RunRecord,
     registry: RegistryBackend,
     system: SystemBackend,
+    restore_full_policy: bool = False,
 ) -> list[str]:
     """Execute compensating rollback for a RunRecord and return any error messages."""
     errors: list[str] = []
@@ -852,7 +853,7 @@ def _compensate_run_record(
 
     restored_auditpol_csv: set[str] = set()
     for ap_snap in reversed(run_record.auditpol_snapshots):
-        if ap_snap.backup_csv_path and Path(ap_snap.backup_csv_path).is_file():
+        if restore_full_policy and ap_snap.backup_csv_path and Path(ap_snap.backup_csv_path).is_file():
             if ap_snap.backup_csv_path not in restored_auditpol_csv:
                 if not system.restore_auditpol(Path(ap_snap.backup_csv_path)):
                     errors.append(f"auditpol restore {ap_snap.backup_csv_path}")
@@ -874,7 +875,7 @@ def _compensate_run_record(
 
     restored_wfw: set[str] = set()
     for fw_snap in reversed(run_record.firewall_group_snapshots):
-        if fw_snap.export_wfw_path and Path(fw_snap.export_wfw_path).is_file():
+        if restore_full_policy and fw_snap.export_wfw_path and Path(fw_snap.export_wfw_path).is_file():
             if fw_snap.export_wfw_path not in restored_wfw:
                 if not system.import_firewall_policy(Path(fw_snap.export_wfw_path)):
                     errors.append(f"firewall import {fw_snap.export_wfw_path}")
@@ -932,11 +933,15 @@ def _compensate_run_record(
     for pkg_id in reversed(run_record.installed_winget_packages):
         if not system.uninstall_winget_package(pkg_id) or system.is_winget_package_installed(pkg_id):
             errors.append(f"winget {pkg_id}")
-    if run_record.wsl_backup_path and run_record.wslconfig_path:
+    if run_record.wslconfig_path:
         try:
-            bak = Path(run_record.wsl_backup_path)
-            if bak.is_file():
-                shutil.copy2(bak, run_record.wslconfig_path)
+            target_cfg = Path(run_record.wslconfig_path)
+            if run_record.wslconfig_existed is False:
+                target_cfg.unlink(missing_ok=True)
+            elif run_record.wsl_backup_path:
+                bak = Path(run_record.wsl_backup_path)
+                if bak.is_file():
+                    _atomic_write_bytes(target_cfg, bak.read_bytes())
         except OSError as exc:
             errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
     for d_snap in reversed(run_record.wsl_distro_snapshots):
@@ -1342,7 +1347,9 @@ def _apply_profile_locked(
             failure_outcomes: list[dict[str, Any]] = []
             wsl_backup_path: str | None = None
             wsl_target_path: str | None = None
+            wslconfig_existed: bool | None = None
             wsl_distro_snapshots: list[WslDistroSnapshot] = []
+            planned_ids = tuple(evaluations[idx].tweak_id for idx in drifted_indices)
             exported_subtrees: set[tuple[str, str]] = set()
             now_iso = datetime.now(tz=UTC).isoformat()
 
@@ -1352,6 +1359,7 @@ def _apply_profile_locked(
                     timestamp=now_iso,
                     profile_name=profile.name,
                     applied_tweaks=tuple(applied_ids),
+                    planned_tweaks=planned_ids,
                     registry_snapshots=tuple(snaps.registry),
                     registry_key_snapshots=tuple(snaps.registry_keys),
                     service_snapshots=tuple(snaps.services),
@@ -1371,6 +1379,7 @@ def _apply_profile_locked(
                     failure_outcomes=tuple(failure_outcomes),
                     wsl_backup_path=wsl_backup_path,
                     wslconfig_path=wsl_target_path,
+                    wslconfig_existed=wslconfig_existed,
                     wsl_distro_snapshots=tuple(wsl_distro_snapshots),
                     state=state,
                     error=error,
@@ -1466,6 +1475,7 @@ def _apply_profile_locked(
                             str(prepared_wsl.backup_path) if prepared_wsl.backup_path is not None else None
                         )
                         wsl_target_path = str(prepared_wsl.target_wslconfig)
+                        wslconfig_existed = prepared_wsl.target_wslconfig.is_file()
                         for d_plan in prepared_wsl.distro_plans:
                             if d_plan.changed:
                                 wsl_distro_snapshots.append(
@@ -1635,6 +1645,7 @@ def rollback_runs(
     to_run_id: str | None = None,
     dry_run: bool = True,
     allow_simulated: bool = False,
+    restore_full_policy: bool = False,
 ) -> list[RunRecord]:
     """Revert the latest run (or all runs back to to_run_id inclusive)."""
     from contextlib import nullcontext
@@ -1650,6 +1661,7 @@ def rollback_runs(
             system=system,
             to_run_id=to_run_id,
             dry_run=dry_run,
+            restore_full_policy=restore_full_policy,
         )
 
 
@@ -1697,6 +1709,7 @@ def _rollback_runs_impl(
     system: SystemBackend,
     to_run_id: str | None = None,
     dry_run: bool = True,
+    restore_full_policy: bool = False,
 ) -> list[RunRecord]:
     all_runs = state_store.load_runs()
     if not all_runs:
@@ -1721,7 +1734,7 @@ def _rollback_runs_impl(
         for run_record in runs_to_revert:
             rolling_back = replace(run_record, state=TransactionState.ROLLING_BACK)
             state_store.upsert_run(rolling_back)
-            comp_errors = _compensate_run_record(run_record, registry, system)
+            comp_errors = _compensate_run_record(run_record, registry, system, restore_full_policy=restore_full_policy)
             if comp_errors:
                 err_msg = f"Rollback errors: {'; '.join(comp_errors)}"
                 state_store.upsert_run(
