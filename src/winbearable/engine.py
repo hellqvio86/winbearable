@@ -1181,10 +1181,50 @@ def apply_profile(
     category_filter: str | None = None,
 ) -> ApplySummary:
     """Plan or apply a profile with a write-ahead transaction journal and rollback on failure."""
+    from contextlib import nullcontext
+
     if not dry_run:
         if not env.is_windows:
             raise UnsupportedPlatformError(f"Applying tweaks is only supported on Windows (current OS: {env.os_name}).")
         _require_native_backends(registry, system, allow_simulated)
+
+    lock_ctx = state_store.transaction_lock() if not dry_run else nullcontext()
+    with lock_ctx:
+        return _apply_profile_locked(
+            profile=profile,
+            env=env,
+            registry=registry,
+            system=system,
+            state_store=state_store,
+            dry_run=dry_run,
+            allow_high_risk=allow_high_risk,
+            allow_irreversible=allow_irreversible,
+            force_kill_processes=force_kill_processes,
+            wslconfig_path=wslconfig_path,
+            allow_managed=allow_managed,
+            only_ids=only_ids,
+            skip_ids=skip_ids,
+            category_filter=category_filter,
+        )
+
+
+def _apply_profile_locked(
+    profile: ProfileSpec,
+    env: EnvironmentInfo,
+    registry: RegistryBackend,
+    system: SystemBackend,
+    state_store: StateStore,
+    dry_run: bool = True,
+    allow_high_risk: bool = False,
+    allow_irreversible: bool = False,
+    force_kill_processes: bool = False,
+    wslconfig_path: Path | None = None,
+    allow_managed: bool = False,
+    only_ids: set[str] | None = None,
+    skip_ids: set[str] | None = None,
+    category_filter: str | None = None,
+) -> ApplySummary:
+    if not dry_run:
         incomplete = state_store.get_incomplete_runs()
         if incomplete:
             run_ids = ", ".join(rec.run_id for rec in incomplete)
@@ -1255,7 +1295,9 @@ def apply_profile(
     run_id: str | None = None
     wsl_result: dict[str, Any] | None = None
     if not dry_run and (drifted_indices or (profile.wsl.enabled and env.wsl_installed)):
-        with state_store.transaction_lock():
+        from contextlib import nullcontext
+
+        with nullcontext():  # transaction_lock already held by apply_profile
             run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
             backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
             snaps = _collect_pre_apply_snapshots(
@@ -1631,34 +1673,37 @@ def _rollback_runs_impl(
         return []
 
     if to_run_id is None:
-        runs_to_revert = [all_runs[-1]]
-        remaining_runs = all_runs[:-1]
+        committed = [rec for rec in all_runs if rec.state == TransactionState.COMMITTED]
+        if not committed:
+            return []
+        runs_to_revert = [committed[-1]]
     else:
         matching_indices = [idx for idx, rec in enumerate(all_runs) if rec.run_id == to_run_id]
         if not matching_indices:
             raise KeyError(f"Run ID '{to_run_id}' not found in state store.")
         cut_idx = matching_indices[0]
-        runs_to_revert = list(reversed(all_runs[cut_idx:]))
-        remaining_runs = all_runs[:cut_idx]
+        runs_to_revert = [rec for rec in reversed(all_runs[cut_idx:]) if rec.state == TransactionState.COMMITTED]
 
+    reverted_records: list[RunRecord] = []
     if not dry_run:
-        failed_records: list[RunRecord] = []
         for run_record in runs_to_revert:
             rolling_back = replace(run_record, state=TransactionState.ROLLING_BACK)
             state_store.upsert_run(rolling_back)
             comp_errors = _compensate_run_record(run_record, registry, system)
             if comp_errors:
-                failed_records.append(
+                err_msg = f"Rollback errors: {'; '.join(comp_errors)}"
+                state_store.upsert_run(
                     replace(
                         run_record,
                         state=TransactionState.FAILED,
-                        error=f"Rollback errors: {'; '.join(comp_errors)}",
+                        error=err_msg,
                     )
                 )
-        if failed_records:
-            state_store.save_runs(remaining_runs + list(reversed(failed_records)))
-            raise RuntimeError(failed_records[0].error or "Rollback failed.")
-        state_store.save_runs(remaining_runs)
+                raise RuntimeError(err_msg)
+            done = replace(run_record, state=TransactionState.ROLLED_BACK)
+            state_store.upsert_run(done)
+            reverted_records.append(done)
+        return reverted_records
 
     return runs_to_revert
 

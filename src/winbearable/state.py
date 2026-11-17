@@ -16,7 +16,7 @@ from .models import RunRecord, TransactionState
 
 STATE_SCHEMA_VERSION = 1
 DEFAULT_MAX_RUN_HISTORY = 100
-DEFAULT_MAX_BACKUP_DIRS = 50
+DEFAULT_MAX_BACKUP_DIRS = DEFAULT_MAX_RUN_HISTORY
 
 
 class StateStoreError(ValueError):
@@ -139,6 +139,8 @@ class StateStore:
         self,
         runs: list[RunRecord],
         max_backup_dirs: int = DEFAULT_MAX_BACKUP_DIRS,
+        *,
+        prune_unreferenced: bool = False,
     ) -> list[str]:
         warnings: list[str] = []
         backups_root = self.state_path.parent / "backups"
@@ -153,8 +155,12 @@ class StateStore:
             TransactionState.ROLLING_BACK,
             TransactionState.FAILED,
         }
-        protected_ids = {run.run_id for run in runs if run.state in incomplete_states}
-        candidates: list[Path] = []
+        protected_ids = (
+            {run.run_id for run in runs}
+            if prune_unreferenced
+            else {run.run_id for run in runs if run.state in incomplete_states}
+        )
+        candidates: list[tuple[float, Path]] = []
         for entry in backups_root.iterdir():
             if entry.is_symlink():
                 warnings.append(f"Skipped symlink/reparse point in backups: {entry.name}")
@@ -164,13 +170,15 @@ class StateStore:
             try:
                 resolved_entry = entry.resolve()
                 resolved_entry.relative_to(resolved_root)
+                mtime = entry.stat().st_mtime
             except OSError, ValueError:
-                warnings.append(f"Skipped backup directory outside root: {entry.name}")
+                warnings.append(f"Skipped backup directory outside root or inaccessible: {entry.name}")
                 continue
-            candidates.append(entry)
+            candidates.append((mtime, entry))
 
-        subdirs = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
-        for stale_dir in subdirs[max_backup_dirs:]:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        stale_slice = candidates if prune_unreferenced else candidates[max_backup_dirs:]
+        for _, stale_dir in stale_slice:
             try:
                 shutil.rmtree(stale_dir)
             except OSError as exc:
@@ -206,10 +214,10 @@ class StateStore:
 
     def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
         runs = self._prune_old_runs(runs)
-        self.last_cleanup_warnings = self._prune_old_backups_unlocked(runs)
         if self.state_path.is_file():
             shutil.copy2(self.state_path, self.state_path.with_suffix(".json.bak"))
         self._write_runs_atomic_unlocked(runs)
+        self.last_cleanup_warnings = self._prune_old_backups_unlocked(runs, prune_unreferenced=True)
 
     def restore_from_backup(self) -> bool:
         """Validate and restore state.json from state.json.bak without overwriting the backup."""
