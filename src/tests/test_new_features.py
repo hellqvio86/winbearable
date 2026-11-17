@@ -600,3 +600,189 @@ def test_enable_windows_containers_roundtrip(state_store: StateStore) -> None:
 
     rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
     assert detect_tweak(get_tweak("dev.enable_windows_containers"), env, reg, sys_b).status == TweakStatus.DRIFTED
+
+
+def test_vscode_settings_defaults_roundtrip_and_guards(
+    state_store: StateStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dev.vscode_settings_defaults merges JSON settings, rolls back, refuses JSONC comments, and gates on build."""
+    import json
+
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    settings_path = tmp_path / "Code" / "User" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text('{"editor.fontSize": 14}\n', encoding="utf-8")
+    monkeypatch.setattr("winbearable.engine.expand_file_spec_path", lambda _tpl: settings_path)
+    monkeypatch.setattr("winbearable.operations.expand_file_spec_path", lambda _tpl: settings_path)
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=False)
+    env = sys_b.detect_environment(reg)
+    tweak = get_tweak("dev.vscode_settings_defaults")
+    prof = ProfileSpec(name="vscode", description="vscode", tweaks={"dev.vscode_settings_defaults": True})
+
+    assert detect_tweak(tweak, env, reg, sys_b).status == TweakStatus.DRIFTED
+    summary = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert "dev.vscode_settings_defaults" in summary.applied_ids
+    assert detect_tweak(tweak, env, reg, sys_b).status == TweakStatus.APPLIED
+
+    merged = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert merged["editor.fontSize"] == 14
+    assert merged["telemetry.telemetryLevel"] == "off"
+    assert merged["terminal.integrated.defaultProfile.windows"] == "Ubuntu (WSL)"
+    assert merged["files.eol"] == "\n"
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert detect_tweak(tweak, env, reg, sys_b).status == TweakStatus.DRIFTED
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == {"editor.fontSize": 14}
+
+    # JSONC comment refusal reports ERROR rather than overwriting comments
+    settings_path.write_text('// user comment\n{"editor.fontSize": 14}\n', encoding="utf-8")
+    comment_res = detect_tweak(tweak, env, reg, sys_b)
+    assert comment_res.status == TweakStatus.ERROR
+
+    # Unsupported build floor
+    from dataclasses import replace
+
+    old_env = replace(env, windows_build=22631)
+    assert detect_tweak(tweak, old_env, reg, sys_b).status == TweakStatus.UNSUPPORTED_BUILD
+
+
+def test_parameterized_tweaks_and_terminal_nerd_font_roundtrip(
+    state_store: StateStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover dev.case_sensitive_dirs, hardening.update_active_hours, dev.terminal_settings_defaults, and nerd font."""
+    import json
+
+    from winbearable.engine import evaluate_profile
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+
+    # Missing [params] reports ERROR
+    missing_prof = ProfileSpec(
+        name="missing",
+        description="missing",
+        tweaks={"dev.case_sensitive_dirs": True, "hardening.update_active_hours": True},
+    )
+    missing_eval = evaluate_profile(missing_prof, env, reg, sys_b)
+    assert all(r.status == TweakStatus.ERROR for r in missing_eval)
+
+    # With [params] populated
+    cs_dir = tmp_path / "src_case"
+    wt_path = tmp_path / "wt" / "settings.json"
+    wt_path.parent.mkdir(parents=True)
+    wt_path.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    monkeypatch.setattr("winbearable.engine.expand_file_spec_path", lambda _tpl: wt_path)
+    monkeypatch.setattr("winbearable.operations.expand_file_spec_path", lambda _tpl: wt_path)
+
+    prof = ProfileSpec(
+        name="dev-params",
+        description="dev-params",
+        tweaks={
+            "dev.case_sensitive_dirs": True,
+            "hardening.update_active_hours": True,
+            "dev.terminal_settings_defaults": True,
+            "dev.install_nerd_font_user": True,
+        },
+        params={
+            "dev.case_sensitive_dirs": {"directories": [str(cs_dir)]},
+            "hardening.update_active_hours": {"active_hours_start": 8, "active_hours_end": 20},
+            "dev.terminal_settings_defaults": {"font_face": "JetBrainsMono Nerd Font"},
+        },
+    )
+    summary = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert set(summary.applied_ids) == {
+        "dev.case_sensitive_dirs",
+        "hardening.update_active_hours",
+        "dev.terminal_settings_defaults",
+        "dev.install_nerd_font_user",
+    }
+    assert sys_b.case_sensitive_dirs[str(cs_dir)] is True
+    assert reg.get_value("HKLM", r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings", "ActiveHoursStart") == (
+        8,
+        "REG_DWORD",
+    )
+    assert reg.get_value("HKLM", r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings", "ActiveHoursEnd") == (
+        20,
+        "REG_DWORD",
+    )
+    wt_data = json.loads(wt_path.read_text(encoding="utf-8"))
+    assert wt_data["copyOnSelect"] is True
+    assert wt_data["profiles"]["defaults"]["font"]["face"] == "JetBrainsMono Nerd Font"
+    assert sys_b.is_winget_package_installed("DEVCOM.JetBrainsMonoNerdFont") is True
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert sys_b.case_sensitive_dirs[str(cs_dir)] is False
+    assert reg.get_value("HKLM", r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings", "ActiveHoursStart") is None
+    assert json.loads(wt_path.read_text(encoding="utf-8")) == {"theme": "dark"}
+    assert sys_b.is_winget_package_installed("DEVCOM.JetBrainsMonoNerdFont") is False
+
+
+def test_parameterized_tweaks_and_terminal_error_paths(
+    state_store: StateStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover invalid [params], non-empty directory revert refusal, and malformed Windows Terminal JSON."""
+    from typing import Any
+
+    from winbearable.engine import evaluate_profile
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+
+    # Out-of-range / boolean / non-int active hours and blank directories report ERROR
+    bad_hours_cases: list[dict[str, Any]] = [
+        {"active_hours_start": -1, "active_hours_end": 17},
+        {"active_hours_start": 8, "active_hours_end": 24},
+        {"active_hours_start": True, "active_hours_end": 17},
+        {"active_hours_start": "8", "active_hours_end": 17},
+    ]
+    for bad_hours in bad_hours_cases:
+        bad_prof = ProfileSpec(
+            name="bad-hours",
+            description="bad-hours",
+            tweaks={"hardening.update_active_hours": True, "dev.case_sensitive_dirs": True},
+            params={
+                "hardening.update_active_hours": bad_hours,
+                "dev.case_sensitive_dirs": {"directories": ["   "]},
+            },
+        )
+        res = evaluate_profile(bad_prof, env, reg, sys_b)
+        assert all(r.status == TweakStatus.ERROR for r in res)
+
+    # Malformed Windows Terminal JSON reports ERROR instead of crashing
+    bad_wt = tmp_path / "wt_bad" / "settings.json"
+    bad_wt.parent.mkdir(parents=True)
+    bad_wt.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr("winbearable.engine.expand_file_spec_path", lambda _tpl: bad_wt)
+    monkeypatch.setattr("winbearable.operations.expand_file_spec_path", lambda _tpl: bad_wt)
+    wt_eval = evaluate_profile(
+        ProfileSpec(name="bad-wt", description="bad-wt", tweaks={"dev.terminal_settings_defaults": True}),
+        env,
+        reg,
+        sys_b,
+    )
+    assert wt_eval[0].status == TweakStatus.ERROR
+
+    # Non-empty case-sensitive directory refuses revert cleanly
+    non_empty_dir = tmp_path / "non_empty_cs"
+    non_empty_dir.mkdir()
+    cs_prof = ProfileSpec(
+        name="cs",
+        description="cs",
+        tweaks={"dev.case_sensitive_dirs": True},
+        params={"dev.case_sensitive_dirs": {"directories": [str(non_empty_dir)]}},
+    )
+    apply_profile(cs_prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    (non_empty_dir / "keep.txt").write_text("data", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Rollback errors: fsutil"):
+        rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert sys_b.case_sensitive_dirs[str(non_empty_dir)] is True

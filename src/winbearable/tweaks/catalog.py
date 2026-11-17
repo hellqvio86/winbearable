@@ -6,6 +6,7 @@ from ..const import (
     ACTION_DELETE,
     ACTION_SET,
     DEFAULT_TESTED_BUILDS,
+    DEFAULT_WSL_DISTRO,
     HIVE_HKCU,
     HIVE_HKLM,
     MIN_SUPPORTED_BUILD,
@@ -20,6 +21,7 @@ from ..const import (
 from ..models import (
     AuditpolSpec,
     CisControlMapping,
+    FileSpec,
     FirewallGroupSpec,
     GitConfigSpec,
     IcaclsUserOnlySpec,
@@ -3209,6 +3211,101 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         feature_specs=(OptionalFeatureSpec(feature_name="Containers", enabled=True),),
+    ),
+    "dev.vscode_settings_defaults": TweakDefinition(
+        tweak_id="dev.vscode_settings_defaults",
+        category="dev",
+        title="Configure VS Code Developer & WSL Defaults",
+        description=(
+            "Sets telemetry.telemetryLevel='off', files.eol='\\n', and "
+            f"terminal.integrated.defaultProfile.windows='{DEFAULT_WSL_DISTRO} (WSL)' "
+            "in %APPDATA%\\Code\\User\\settings.json (refuses if JSONC contains comments)."
+        ),
+        source_url="https://code.visualstudio.com/docs/terminal/profiles",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        file_specs=(
+            FileSpec(
+                path_template=r"%APPDATA%\Code\User\settings.json",
+                file_format="jsonc",
+                desired_keys={
+                    "telemetry.telemetryLevel": "off",
+                    "terminal.integrated.defaultProfile.windows": f"{DEFAULT_WSL_DISTRO} (WSL)",
+                    "files.eol": "\n",
+                },
+            ),
+        ),
+    ),
+    "dev.case_sensitive_dirs": TweakDefinition(
+        tweak_id="dev.case_sensitive_dirs",
+        category="dev",
+        title="Enable NTFS Case-Sensitive Directories",
+        description=(
+            "Runs fsutil.exe file setCaseSensitiveInfo <dir> enable for directories listed in "
+            '[params."dev.case_sensitive_dirs"].directories (revert refuses non-empty directories).'
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/wsl/case-sensitivity",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        parameterized=True,
+    ),
+    "hardening.update_active_hours": TweakDefinition(
+        tweak_id="hardening.update_active_hours",
+        category="hardening",
+        title="Configure Windows Update Active Hours",
+        description=(
+            "Sets ActiveHoursStart and ActiveHoursEnd (0..23) under "
+            "HKLM\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings from "
+            '[params."hardening.update_active_hours"]; no default hours.'
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/deployment/update/waas-restart",
+        risk=RiskLevel.LOW,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        parameterized=True,
+    ),
+    "dev.terminal_settings_defaults": TweakDefinition(
+        tweak_id="dev.terminal_settings_defaults",
+        category="dev",
+        title="Configure Windows Terminal Developer Defaults",
+        description=(
+            "Sets copyOnSelect=true (and optional defaultProfile / font_face from [params]) "
+            "in Windows Terminal settings.json."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/terminal/customize-settings/interaction",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        file_specs=(
+            FileSpec(
+                path_template=r"%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json",
+                file_format="json",
+                desired_keys={"copyOnSelect": True},
+            ),
+        ),
+    ),
+    "dev.install_nerd_font_user": TweakDefinition(
+        tweak_id="dev.install_nerd_font_user",
+        category="dev",
+        title="Install JetBrainsMono Nerd Font (Per-User)",
+        description="Installs DEVCOM.JetBrainsMonoNerdFont in user scope via winget.",
+        source_url="https://learn.microsoft.com/en-us/windows/package-manager/winget/",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        winget_specs=(WingetSpec(package_id="DEVCOM.JetBrainsMonoNerdFont", scope="user"),),
     ),
 }
 

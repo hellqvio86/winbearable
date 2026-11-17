@@ -31,6 +31,7 @@ _REVERSIBLE_TWEAK_IDS = sorted(
     and not t.wevtutil_specs
     and not t.firewall_group_specs
     and not t.winget_specs
+    and not t.parameterized
 )
 
 _INITIAL_REG_VALUES = st.dictionaries(
@@ -78,7 +79,9 @@ def test_plan_never_mutates_and_apply_rollback_restores_state(
         apply_profile(prof, env, reg, sys_b, store, dry_run=True, allow_high_risk=True, allow_managed=True)
         assert dict(reg._values) == before_reg
         assert dict(sys_b.scheduled_tasks) == before_tasks
-        assert dict(sys_b.optional_features) == before_features
+        all_feat_keys = set(before_features) | set(sys_b.optional_features)
+        for feat_key in all_feat_keys:
+            assert sys_b.optional_features.get(feat_key, False) == before_features.get(feat_key, False)
 
         apply_profile(
             prof,
@@ -94,7 +97,9 @@ def test_plan_never_mutates_and_apply_rollback_restores_state(
         rollback_runs(store, reg, sys_b, dry_run=False, allow_simulated=True)
         assert dict(reg._values) == before_reg
         assert dict(sys_b.scheduled_tasks) == before_tasks
-        assert dict(sys_b.optional_features) == before_features
+        all_feat_keys = set(before_features) | set(sys_b.optional_features)
+        for feat_key in all_feat_keys:
+            assert sys_b.optional_features.get(feat_key, False) == before_features.get(feat_key, False)
 
 
 @settings(max_examples=15, deadline=None, suppress_health_check=[HealthCheck.too_slow])

@@ -15,8 +15,10 @@ from .backends.system import SystemBackend
 from .const import (
     ACTION_DELETE,
     ACTION_DELETE_KEY,
+    ACTION_SET,
     DEFENDER_FEATURES_KEY,
     HIVE_HKLM,
+    REG_DWORD,
     UNSUPPORTED_IOT_LTSC_EDITION_IDS,
 )
 from .models import (
@@ -24,7 +26,9 @@ from .models import (
     AuditpolSnapshot,
     EnvironmentInfo,
     FileSnapshot,
+    FileSpec,
     FirewallGroupSnapshot,
+    FsutilCaseSensitiveSpec,
     FsutilSnapshot,
     GitConfigSnapshot,
     OperationOutcome,
@@ -35,6 +39,7 @@ from .models import (
     ProfileSpec,
     RegistryChangeDetail,
     RegistryKeySnapshot,
+    RegistrySpec,
     RegistryValueSnapshot,
     RiskLevel,
     RunRecord,
@@ -399,6 +404,21 @@ def detect_tweak(
             registry_changes=tuple(reg_details),
         )
 
+    if tweak.parameterized and not (
+        tweak.registry_specs
+        or tweak.fsutil_specs
+        or tweak.file_specs
+        or tweak.service_specs
+        or tweak.task_specs
+        or tweak.feature_specs
+        or tweak.winget_specs
+    ):
+        return _make_check_result(
+            tweak,
+            TweakStatus.ERROR,
+            f"Tweak '{tweak.tweak_id}' requires [params.\"{tweak.tweak_id}\"] configuration in the profile.",
+        )
+
     for reg_spec in tweak.registry_specs:
         conflict = registry.check_policy_conflict(reg_spec.policy_checks)
         if conflict is not None:
@@ -491,6 +511,66 @@ def detect_tweak(
     )
 
 
+def resolve_tweak_params(tweak: TweakDefinition, params: dict[str, Any] | None) -> TweakDefinition:
+    """Resolve profile [params] overrides into concrete operation specs on a TweakDefinition."""
+    if not params:
+        return tweak
+    if tweak.tweak_id == "dev.case_sensitive_dirs":
+        dirs = params.get("directories")
+        if isinstance(dirs, (list, tuple)):
+            specs = tuple(FsutilCaseSensitiveSpec(directory=str(d), enabled=True) for d in dirs if str(d).strip())
+            if specs:
+                return replace(tweak, fsutil_specs=specs)
+    elif tweak.tweak_id == "hardening.update_active_hours":
+        start = params.get("active_hours_start")
+        end = params.get("active_hours_end")
+        if (
+            isinstance(start, int)
+            and not isinstance(start, bool)
+            and isinstance(end, int)
+            and not isinstance(end, bool)
+            and 0 <= start <= 23
+            and 0 <= end <= 23
+        ):
+            reg_specs = (
+                RegistrySpec(
+                    hive=HIVE_HKLM,
+                    key_path=r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
+                    value_name="ActiveHoursStart",
+                    value_data=start,
+                    value_type=REG_DWORD,
+                    action=ACTION_SET,
+                ),
+                RegistrySpec(
+                    hive=HIVE_HKLM,
+                    key_path=r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
+                    value_name="ActiveHoursEnd",
+                    value_data=end,
+                    value_type=REG_DWORD,
+                    action=ACTION_SET,
+                ),
+            )
+            return replace(tweak, registry_specs=reg_specs)
+    elif tweak.tweak_id == "dev.terminal_settings_defaults" and tweak.file_specs:
+        base_spec = tweak.file_specs[0]
+        desired = dict(base_spec.desired_keys)
+        if isinstance(params.get("default_profile_guid"), str) and params["default_profile_guid"].strip():
+            desired["defaultProfile"] = params["default_profile_guid"].strip()
+        if isinstance(params.get("font_face"), str) and params["font_face"].strip():
+            desired["profiles"] = {"defaults": {"font": {"face": params["font_face"].strip()}}}
+        return replace(
+            tweak,
+            file_specs=(
+                FileSpec(
+                    path_template=base_spec.path_template,
+                    file_format=base_spec.file_format,
+                    desired_keys=desired,
+                ),
+            ),
+        )
+    return tweak
+
+
 def evaluate_profile(
     profile: ProfileSpec,
     env: EnvironmentInfo,
@@ -514,7 +594,7 @@ def evaluate_profile(
     for tweak_id in candidate_ids:
         if skip_ids and tweak_id in skip_ids:
             continue
-        tweak = get_tweak(tweak_id)
+        tweak = resolve_tweak_params(get_tweak(tweak_id), profile.params.get(tweak_id))
         if category_filter and tweak.category.lower() != category_filter.lower():
             continue
         results.append(detect_tweak(tweak, env, registry, system, allow_managed=allow_managed))
@@ -542,6 +622,7 @@ def _collect_pre_apply_snapshots(
     registry: RegistryBackend,
     system: SystemBackend,
     backup_dir: Path | None = None,
+    profile_params: dict[str, dict[str, Any]] | None = None,
 ) -> _PreApplySnapshots:
     """Capture all pre-change snapshots for drifted tweaks before any mutation occurs."""
     reg_snapshots: list[RegistryValueSnapshot] = []
@@ -575,7 +656,10 @@ def _collect_pre_apply_snapshots(
     for res in evaluations:
         if res.status != TweakStatus.DRIFTED:
             continue
-        tweak = get_tweak(res.tweak_id)
+        tweak = resolve_tweak_params(
+            get_tweak(res.tweak_id),
+            profile_params.get(res.tweak_id) if profile_params else None,
+        )
         for raw_spec in tweak.registry_specs:
             for reg_spec in expand_registry_spec(raw_spec, registry):
                 if reg_spec.action == ACTION_DELETE_KEY:
@@ -1131,7 +1215,9 @@ def apply_profile(
         with state_store.transaction_lock():
             run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
             backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
-            snaps = _collect_pre_apply_snapshots(evaluations, registry, system, backup_dir=backup_dir)
+            snaps = _collect_pre_apply_snapshots(
+                evaluations, registry, system, backup_dir=backup_dir, profile_params=profile.params
+            )
             file_hashes = {fs.path: fs.sha256 for fs in snaps.files}
             newly_installed_winget: list[str] = []
             newly_installed_extensions: list[str] = []
@@ -1181,7 +1267,7 @@ def apply_profile(
 
             for idx in drifted_indices:
                 res = evaluations[idx]
-                tweak = get_tweak(res.tweak_id)
+                tweak = resolve_tweak_params(get_tweak(res.tweak_id), profile.params.get(res.tweak_id))
                 try:
                     _execute_tweak_mutations(
                         tweak=tweak,

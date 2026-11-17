@@ -90,6 +90,7 @@ def _validate_operations(
         or tweak.file_specs
         or tweak.stop_processes
         or tweak.uninstall_onedrive
+        or tweak.parameterized
     )
     if not has_op:
         errors.append(f"{tweak.tweak_id}: must declare at least one operation")

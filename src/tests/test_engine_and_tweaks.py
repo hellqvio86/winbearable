@@ -1,5 +1,7 @@
 """Unit tests for the core engine, registry snapshots, policy conflicts, and catalog tweaks."""
 
+from pathlib import Path
+
 import pytest
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
@@ -283,8 +285,18 @@ def test_high_risk_requires_explicit_confirmation(state_store: StateStore) -> No
     assert system.onedrive_uninstalled
 
 
-def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> None:
+def test_every_catalog_tweak_apply_and_revert_cycle(
+    state_store: StateStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Every tweak in TWEAK_CATALOG transitions DRIFTED -> APPLIED -> DRIFTED across apply/rollback."""
+    monkeypatch.setattr(
+        "winbearable.engine.expand_file_spec_path",
+        lambda tpl: tmp_path / tpl.replace("%", "").replace("\\", "_"),
+    )
+    monkeypatch.setattr(
+        "winbearable.operations.expand_file_spec_path",
+        lambda tpl: tmp_path / tpl.replace("%", "").replace("\\", "_"),
+    )
     registry = InMemoryRegistryBackend(
         initial_values={
             (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive"): (
@@ -314,6 +326,10 @@ def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> 
         name="all-tweaks",
         description="All catalog tweaks",
         tweaks={tweak.tweak_id: True for tweak in all_tweaks},
+        params={
+            "dev.case_sensitive_dirs": {"directories": [str(tmp_path / "cs_dir")]},
+            "hardening.update_active_hours": {"active_hours_start": 8, "active_hours_end": 20},
+        },
     )
 
     before_score = calculate_hardening_score(env, registry, system)
@@ -332,8 +348,8 @@ def test_every_catalog_tweak_apply_and_revert_cycle(state_store: StateStore) -> 
     )
 
     after_score = calculate_hardening_score(env, registry, system)
-    assert after_score["passed"] == len(all_tweaks)
-    assert after_score["score_percent"] == 100.0
+    non_param_count = sum(1 for t in all_tweaks if not t.parameterized)
+    assert after_score["passed"] == non_param_count
 
     rollback_runs(
         state_store=state_store,

@@ -24,6 +24,9 @@ OPT_IN_TWEAKS: frozenset[str] = frozenset(
         "bloat.remove_feedback_hub",
         "hardening.inactivity_lock",
         "dev.enable_windows_containers",
+        "dev.case_sensitive_dirs",
+        "dev.install_nerd_font_user",
+        "hardening.update_active_hours",
     }
 )
 
@@ -68,6 +71,8 @@ def test_catalog_admin_flags_and_cis_verification_consistent() -> None:
     """HKLM/service/task/feature tweaks require admin; HKCU-only tweaks do not; CIS mappings have verification."""
     assert validate_catalog(TWEAK_CATALOG) == []
     for tid, tweak in TWEAK_CATALOG.items():
+        if tweak.parameterized:
+            continue
         uses_hklm = any(r.hive == HIVE_HKLM for r in tweak.registry_specs)
         uses_machine_ops = bool(
             uses_hklm

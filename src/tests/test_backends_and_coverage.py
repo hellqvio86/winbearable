@@ -188,8 +188,9 @@ def test_winreg_backend_full_lifecycle() -> None:
     with patch("sys.platform", "linux"), pytest.raises(RuntimeError):
         WinregBackend(winreg_module=None)
 
-    default_reg = create_default_registry_backend(platform_override="linux")
-    assert isinstance(default_reg, InMemoryRegistryBackend)
+    with patch("winbearable.backends.registry.is_wsl2", return_value=False):
+        default_reg = create_default_registry_backend(platform_override="linux")
+        assert isinstance(default_reg, InMemoryRegistryBackend)
 
 
 def test_in_memory_registry_backend_methods() -> None:
