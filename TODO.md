@@ -221,25 +221,25 @@ State explicitly: mirrored mode → host firewall is primary boundary; WSL is no
 
 # P2 — Catalog governance (123 tweaks)
 
-## [ ] P2.1 — Freeze casual catalog growth
+## [x] P2.1 — Freeze casual catalog growth
 
 **Rule for agents:** No new tweak PRs unless they fix a P0/P1 acceptance gap or a maintainer-filed verification failure. Prefer extending existing tweaks over new IDs (conflict validator already helps).
 
-## [ ] P2.2 — Split or generate catalog modules
+## [x] P2.2 — Split or generate catalog modules
 
 **Where:** `tweaks/catalog.py` (~3.4k LOC)
 
 **Required**  
-Consider category modules (`catalog_hardening.py`, …) or codegen from declarative YAML/TOML **only if** validation/provenance/tests stay single-entrypoint. Do not split without a plan to keep `validate_catalog` and conflict detection global.
+Consider category modules (`catalog_hardening.py`, …) or codegen from declarative YAML/TOML **only if** validation/provenance/tests stay single-entrypoint. Do not split without a plan to keep `validate_catalog` and conflict detection global. *(Resolved: kept single-file `catalog.py` with global `validate_catalog` under the `P2.1` catalog freeze.)*
 
-## [ ] P2.3 — Profile membership audit
+## [x] P2.3 — Profile membership audit
 
 **Where:** `profiles/*.toml`, catalog lint
 
 **Required**  
 Every catalog tweak is in a profile or explicit `OPT_IN_TWEAKS`. `corp-safe` remains HKCU / non-policy. `edge-quiet` stays opt-in. Lint test already intended (QA-03) — ensure it still matches reality after 123 tweaks.
 
-## [ ] P2.4 — Irreversible set review
+## [x] P2.4 — Irreversible set review
 
 **Current:** 6 irreversible, 2 high-risk (snapshot counts).  
 
@@ -254,11 +254,11 @@ Re-validate each irreversible (Appx removals, OneDrive uninstall, etc.) has plan
 
 Document stable codes for success, dry-run pending, blocked (policy/managed/incomplete/high-risk/irreversible), unsupported platform/edition, hard error. Keep DEC-10 unless maintainer reopens.
 
-## [ ] P2-Q.2 — JSON schema discipline
+## [x] P2-Q.2 — JSON schema discipline
 
 Any payload shape change bumps `JSON_SCHEMA_VERSION` and updates schema tests (`wb schema …`).
 
-## [ ] P2-Q.3 — Supply chain CI
+## [x] P2-Q.3 — Supply chain CI
 
 `uv lock --check`, audit job, SHA-pinned actions, ubuntu-only — confirm workflows match AGENTS.md (no paid Windows runners).
 
@@ -266,7 +266,7 @@ Any payload shape change bumps `JSON_SCHEMA_VERSION` and updates schema tests (`
 
 `DOC-07` / `REL-03` remain human-blocked (PyPI/GitHub ownership, winget-pkgs PR). Agents only keep `packaging/winget` manifests accurate.
 
-## [ ] P2-Q.5 — Coverage honesty
+## [x] P2-Q.5 — Coverage honesty
 
 Do not spam `# pragma: no cover`. Weak modules (registry, validation, state, uac, wsl) deserve targeted tests when touching those files.
 
@@ -297,7 +297,7 @@ Do not spam `# pragma: no cover`. Weak modules (registry, validation, state, uac
 - [x] Plan/rollback UX states compensable vs irreversible side effects  
 - [x] `corp-safe` and managed-device guards covered by tests  
 - [x] Doctor refugee summary is the primary “what’s wrong” view  
-- [ ] Release checklist includes `make test-windows` on 24H2 or 25H2  
+- [x] Release checklist includes `make test-windows` on 24H2 or 25H2  
 
 ---
 

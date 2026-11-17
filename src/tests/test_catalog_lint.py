@@ -134,4 +134,18 @@ def test_docs_match_catalog() -> None:
 
     expected = gen_docs.render_tweaks_reference_markdown()
     actual = (repo_root / "docs" / "tweaks-reference.md").read_text(encoding="utf-8")
+    assert actual == expected, "docs/tweaks-reference.md is out of date; run `make docs`."
+
+
+def test_catalog_irreversible_and_high_risk_invariants() -> None:
+    """Every irreversible tweak is opt-in and documented; every HIGH-risk tweak has risk_rationale (P2.4)."""
+    from winbearable.models import RiskLevel
+
+    for tid, tweak in TWEAK_CATALOG.items():
+        if tweak.irreversible:
+            assert tid in OPT_IN_TWEAKS, f"Irreversible tweak {tid} must stay opt-in (OPT_IN_TWEAKS)"
+            assert tweak.provenance is not None and tweak.provenance.reversibility == "irreversible"
+            assert "irreversible" in tweak.description.lower()
+        if tweak.risk == RiskLevel.HIGH:
+            assert tweak.provenance is not None and tweak.provenance.risk_rationale.strip()
     assert actual == expected
