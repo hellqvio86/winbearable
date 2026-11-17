@@ -3074,6 +3074,74 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         tested_builds=DEFAULT_TESTED_BUILDS,
         icacls_specs=(IcaclsUserOnlySpec(path_template=r"%USERPROFILE%\.ssh"),),
     ),
+    "bloat.remove_bing_news": TweakDefinition(
+        tweak_id="bloat.remove_bing_news",
+        category="bloat",
+        title="Remove Microsoft News (Bing News)",
+        description=(
+            "Uninstalls Microsoft News (9WZDNCRFHVFW) per-user via winget; "
+            "irreversible (requires manual reinstall from Store)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/package-manager/winget/uninstall",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        irreversible=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        winget_specs=(WingetSpec(package_id="9WZDNCRFHVFW", scope="user", action="uninstall"),),
+    ),
+    "bloat.remove_bing_weather": TweakDefinition(
+        tweak_id="bloat.remove_bing_weather",
+        category="bloat",
+        title="Remove MSN Weather",
+        description=(
+            "Uninstalls MSN Weather (9WZDNCRFJ3Q2) per-user via winget; "
+            "irreversible (requires manual reinstall from Store)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/package-manager/winget/uninstall",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        irreversible=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        winget_specs=(WingetSpec(package_id="9WZDNCRFJ3Q2", scope="user", action="uninstall"),),
+    ),
+    "bloat.remove_clipchamp": TweakDefinition(
+        tweak_id="bloat.remove_clipchamp",
+        category="bloat",
+        title="Remove Microsoft Clipchamp",
+        description=(
+            "Uninstalls Microsoft Clipchamp (9P1J8S7CCWWT) per-user via winget; "
+            "irreversible (requires manual reinstall from Store)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/package-manager/winget/uninstall",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        irreversible=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        winget_specs=(WingetSpec(package_id="9P1J8S7CCWWT", scope="user", action="uninstall"),),
+    ),
+    "bloat.remove_feedback_hub": TweakDefinition(
+        tweak_id="bloat.remove_feedback_hub",
+        category="bloat",
+        title="Remove Feedback Hub",
+        description=(
+            "Uninstalls Feedback Hub (9NBLGGH4R32N) per-user via winget; "
+            "irreversible (requires manual reinstall from Store)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/package-manager/winget/uninstall",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        irreversible=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        winget_specs=(WingetSpec(package_id="9NBLGGH4R32N", scope="user", action="uninstall"),),
+    ),
 }
 
 TWEAK_CATALOG = {

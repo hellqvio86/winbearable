@@ -9,6 +9,10 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `ai.disable_recall` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Recall & AI Snapshot Analysis |
 | `apps.install_vscode` | `apps` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Install Visual Studio Code (Windows User Scope) + Remote-WSL Extension |
 | `bloat.disable_consumer_features` | `bloat` | Yes | `low` | `18.10.12.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Consumer Features & Auto-Provisioned Junk Apps |
+| `bloat.remove_bing_news` | `bloat` | No | `low` | — | *opt-in* | Remove Microsoft News (Bing News) |
+| `bloat.remove_bing_weather` | `bloat` | No | `low` | — | *opt-in* | Remove MSN Weather |
+| `bloat.remove_clipchamp` | `bloat` | No | `low` | — | *opt-in* | Remove Microsoft Clipchamp |
+| `bloat.remove_feedback_hub` | `bloat` | No | `low` | — | *opt-in* | Remove Feedback Hub |
 | `dev.developer_mode` | `dev` | Yes | `medium` | — | *opt-in* | Enable Windows Developer Mode (Unprivileged Symlinks) |
 | `dev.fix_ssh_key_permissions` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Restrict %USERPROFILE%\.ssh ACLs to Current User Only |
 | `dev.git_sane_defaults` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Configure Sane Global Git Defaults (LF, Symlinks, LongPaths, main) |

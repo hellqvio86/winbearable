@@ -18,6 +18,10 @@ OPT_IN_TWEAKS: frozenset[str] = frozenset(
         "services.disable_spooler",
         "hardening.disable_wpad_service",
         "hardening.credential_guard",
+        "bloat.remove_bing_news",
+        "bloat.remove_bing_weather",
+        "bloat.remove_clipchamp",
+        "bloat.remove_feedback_hub",
     }
 )
 

@@ -296,7 +296,7 @@ Scheduled tasks (`ScheduledTaskSpec`, extend `telemetry.disable_scheduled_tasks`
 
 Optional features (`OptionalFeatureSpec`, reversible): `MicrosoftWindowsPowerShellV2Root` (+ `...V2`), `Internet-Explorer-Optional-amd64` `[VERIFY names with dism /Get-Features]`. (`SMB1Protocol` is already handled.)
 
-Appx removal (DEC-02): explicit named list, per-user via `winget uninstall --id`, provisioned via `dism /Remove-ProvisionedAppxPackage`; candidates `[VERIFY each via winget list]`: Bing News/Weather, Clipchamp, Xbox Gaming Overlay, Feedback Hub, Get Help, Tips, People, Solitaire, Maps, Power Automate, Office Hub. IDs `bloat.remove_*`, all `irreversible`, opt-in.
+Appx removal (DEC-02): explicit named list, per-user via `winget uninstall --id`, provisioned via `dism /Remove-ProvisionedAppxPackage`; verified & shipped as opt-in `irreversible` tweaks (`bloat.remove_bing_news`, `bloat.remove_bing_weather`, `bloat.remove_clipchamp`, `bloat.remove_feedback_hub`). Microsoft Teams and Power Automate are intentionally excluded so corporate workflows are never disrupted.
 
 ### TWK-G: Network and authentication hardening (profiles `HB`, `PA`; ENG-03 guard applies). Category `hardening`.
 
