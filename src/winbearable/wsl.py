@@ -1,5 +1,6 @@
 """Non-destructive .wslconfig and /etc/wsl.conf management and 75% RAM sizing."""
 
+import hashlib
 import os
 import re
 import shutil
@@ -494,18 +495,39 @@ def apply_wslconfig_target(plan: PreparedWslPlan) -> None:
         raise WslOperationError(f"Verification failed after writing {plan.target_wslconfig}.")
 
 
+def lint_wsl_conf_lf(content: str) -> dict[str, Any]:
+    """Lint wsl.conf text for CRLF (\\r\\n) or CR (\\r) line endings that break Linux/WSL parsers."""
+    crlf_lines = [idx + 1 for idx, raw in enumerate(content.split("\n")) if "\r" in raw]
+    return {
+        "clean": not crlf_lines,
+        "has_crlf": bool(crlf_lines),
+        "crlf_lines": crlf_lines,
+    }
+
+
 def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBackend) -> None:
-    """Write and verify /etc/wsl.conf for a single prepared distro."""
+    """Write and byte-verify /etc/wsl.conf (LF-only) for a single prepared distro."""
     if not distro_plan.changed:
         return
+    lf_content = distro_plan.merged_content.replace("\r\n", "\n").replace("\r", "\n")
+    expected_sha256 = hashlib.sha256(lf_content.encode("utf-8")).hexdigest()
     write_res = system.run_wsl_command(
         ["-d", distro_plan.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
-        input_text=distro_plan.merged_content,
+        input_text=lf_content,
     )
     if write_res.returncode != 0:
         raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro_plan.distro}': {write_res.stderr}")
+
+    sha_res = system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "sha256sum", "/etc/wsl.conf"])
+    sha_tokens = sha_res.stdout.strip().split() if sha_res.returncode == 0 else []
+    if sha_tokens and len(sha_tokens[0]) == 64 and sha_tokens[0].lower() != expected_sha256:
+        raise WslOperationError(
+            f"SHA-256 verification failed after writing /etc/wsl.conf in '{distro_plan.distro}' "
+            f"(expected {expected_sha256}, got {sha_tokens[0].lower()})."
+        )
+
     verify_res = system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-    if verify_res.returncode != 0 or verify_res.stdout != distro_plan.merged_content:
+    if verify_res.returncode != 0 or "\r" in verify_res.stdout or verify_res.stdout != lf_content:
         raise WslOperationError(f"Verification failed after writing /etc/wsl.conf in '{distro_plan.distro}'.")
 
 
@@ -868,6 +890,14 @@ def deep_audit_wsl_distro(system: SystemBackend, distro: str) -> dict[str, Any]:
     sd_res = system.run_wsl_command(["-d", distro, "--", "test", "-d", "/run/systemd/system"])
     systemd_running = sd_res.returncode == 0
 
+    wsl_conf_probe = probe_distro_wsl_conf(distro, system)
+    wsl_conf_lint = lint_wsl_conf_lf(wsl_conf_probe.content) if wsl_conf_probe.status == "exists" else None
+    if wsl_conf_lint is not None and wsl_conf_lint["has_crlf"]:
+        issues.append(
+            f"Distro '{distro}' /etc/wsl.conf contains CRLF (\\r\\n) line endings "
+            f"(lines {wsl_conf_lint['crlf_lines']})."
+        )
+
     return {
         "distro": distro,
         "default_uid": default_uid,
@@ -879,6 +909,7 @@ def deep_audit_wsl_distro(system: SystemBackend, distro: str) -> dict[str, Any]:
         "distro_eol": eol,
         "listening_sockets_count": len(listeners),
         "systemd_running": systemd_running,
+        "wsl_conf_lint": wsl_conf_lint,
         "issues": issues,
     }
 

@@ -1092,21 +1092,26 @@ class NativeSystemBackend:
     ) -> CommandResult:
         """Execute a native command with timeout, process-tree cleanup on timeout, and structured outcomes."""
         effective_timeout = self._resolve_timeout(timeout)
-        proc: subprocess.Popen[str] | None = None
+        proc: subprocess.Popen[bytes] | None = None
         try:
             proc = subprocess.Popen(
                 args,
                 stdin=subprocess.PIPE if input_text is not None else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                text=False,
                 shell=False,
             )
-            stdout_raw, stderr_raw = proc.communicate(input=input_text, timeout=effective_timeout)
-            cleaned_stdout = self._truncate_text((stdout_raw or "").replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
-            cleaned_stderr = self._truncate_text((stderr_raw or "").replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
+            input_bytes = input_text.encode("utf-8") if input_text is not None else None
+            stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=effective_timeout)
+            stdout_dec = (
+                stdout_raw.decode("utf-8", errors="replace") if isinstance(stdout_raw, bytes) else (stdout_raw or "")
+            )
+            stderr_dec = (
+                stderr_raw.decode("utf-8", errors="replace") if isinstance(stderr_raw, bytes) else (stderr_raw or "")
+            )
+            cleaned_stdout = self._truncate_text(stdout_dec.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
+            cleaned_stderr = self._truncate_text(stderr_dec.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
             if proc.returncode == 0:
                 cat = OperationStatus.OK
                 self.last_outcome = OperationOutcome(

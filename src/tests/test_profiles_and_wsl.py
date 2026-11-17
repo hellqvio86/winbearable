@@ -207,3 +207,77 @@ def test_wsl_baseline_distro_aware_package_manager() -> None:
 
     with pytest.raises(WslOperationError, match="Unsupported package manager"):
         apply_wsl_linux_baseline(sys_b, distro="CustomLinux", dev_packages=True, dry_run=False)
+
+
+def test_wsl_conf_lf_bytes_sha256_verify_and_crlf_lint() -> None:
+    """R-07: NativeSystemBackend writes raw LF bytes (no CRLF) and lint_wsl_conf_lf flags \\r\\n."""
+    import hashlib
+    from unittest.mock import patch
+
+    from winbearable.backends.system import CommandResult, NativeSystemBackend
+    from winbearable.wsl import (
+        PreparedWslDistroPlan,
+        WslDistroConfProbe,
+        WslOperationError,
+        apply_distro_wsl_conf,
+        lint_wsl_conf_lf,
+    )
+
+    # 1. CRLF lint check
+    assert lint_wsl_conf_lf("[boot]\nsystemd=true\n") == {"clean": True, "has_crlf": False, "crlf_lines": []}
+    bad_lint = lint_wsl_conf_lf("[boot]\r\nsystemd=true\r\n")
+    assert bad_lint == {"clean": False, "has_crlf": True, "crlf_lines": [1, 2]}
+
+    # 2. NativeSystemBackend._run_native_cmd passes raw LF bytes (not text=True) to Popen
+    recorded_inputs: list[object] = []
+
+    class _FakeProc:
+        returncode = 0
+
+        def communicate(self, input: object = None, timeout: float | None = None) -> tuple[bytes, bytes]:
+            recorded_inputs.append(input)
+            return (b"", b"")
+
+    native_sys = NativeSystemBackend(platform_override="win32")
+    with patch("winbearable.backends.system.subprocess.Popen", return_value=_FakeProc()) as mock_popen:
+        native_sys._run_native_cmd(
+            ["wsl.exe", "-d", "Ubuntu", "--", "tee", "/etc/wsl.conf"], input_text="[boot]\nsystemd=true\n"
+        )
+    assert mock_popen.call_args.kwargs.get("text") is False
+    assert recorded_inputs == [b"[boot]\nsystemd=true\n"]
+
+    # 3. apply_distro_wsl_conf verifies sha256sum and rejects mismatched hash (e.g. CRLF on disk)
+    sys_b = InMemorySystemBackend(wsl_distros=("Ubuntu",))
+    lf_content = "[boot]\nsystemd=true\n"
+    expected_sha = hashlib.sha256(lf_content.encode("utf-8")).hexdigest()
+    plan = PreparedWslDistroPlan(
+        distro="Ubuntu",
+        probe=WslDistroConfProbe(status="missing", content="", evidence="confirmed_absent"),
+        merged_content="[boot]\r\nsystemd=true\r\n",  # normalized to LF before write
+        changed=True,
+    )
+
+    def _wsl_sha_mismatch(args: list[str], input_text: str | None = None) -> CommandResult:
+        cmd = args[5] if len(args) > 5 else ""
+        if cmd == "sha256sum":
+            crlf_sha = hashlib.sha256(b"[boot]\r\nsystemd=true\r\n").hexdigest()
+            return CommandResult(tuple(args), 0, f"{crlf_sha}  /etc/wsl.conf\n", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    sys_b.run_wsl_command = _wsl_sha_mismatch  # type: ignore[method-assign]
+    with pytest.raises(WslOperationError, match="SHA-256"):
+        apply_distro_wsl_conf(plan, sys_b)
+
+    def _wsl_sha_ok(args: list[str], input_text: str | None = None) -> CommandResult:
+        cmd = args[5] if len(args) > 5 else ""
+        if cmd == "tee":
+            assert "\r" not in (input_text or "")
+            return CommandResult(tuple(args), 0, "", "")
+        if cmd == "sha256sum":
+            return CommandResult(tuple(args), 0, f"{expected_sha}  /etc/wsl.conf\n", "")
+        if cmd == "cat":
+            return CommandResult(tuple(args), 0, lf_content, "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    sys_b.run_wsl_command = _wsl_sha_ok  # type: ignore[method-assign]
+    apply_distro_wsl_conf(plan, sys_b)
