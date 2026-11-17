@@ -110,3 +110,11 @@ make release-check # lint + test + TruffleHog + Trivy
 - **Use fixtures idiomatically:** Share common setup (`state_store`, `registry`, `onedrive_registry`, `system`, `cli_runner`) in `src/tests/conftest.py` and use pytest's built-in `tmp_path`, `monkeypatch`, `pytest.raises`, and `@pytest.mark.*`.
 - **Descriptive test names:** Name tests for the behavior under test (`test_<subject>_<behavior_or_outcome>`). Never prefix test names with ticket, phase, or version IDs (no `test_p0_*`, `test_p2_1_*`, `test_v070_*`).
 - **Happy path + error path coverage (mandatory):** Every new feature, tweak, or helper must have tests covering **both** the happy path (e.g., `detect -> apply -> detect -> rollback -> detect` with valid inputs) and realistic error/failure paths (e.g., invalid/missing `[params]`, policy conflicts, unsupported builds, malformed files, I/O or subprocess failures, permission denied). Coverage percentage is only a floor—meaningful behavioral assertions on both success and failure cases are required.
+
+## Pull Request Hygiene (No Ugly PRs)
+
+- **Write clean, scannable Markdown PRs:** Always pass PR bodies via `--body-file` (never cramped single-line `--body` strings or escaped shell backticks).
+- **Use a clear structure:**
+  - Short `## Summary` (2–5 concise bullets explaining *what* changed and *why*).
+  - `## Verification` listing exact commands run and observed results (distinguishing Linux unit tests vs Windows integration tests).
+  - Keep PR titles short, conventional (`fix(scope): ...`, `feat(scope): ...`, `docs: ...`), and focused on one logical change.
