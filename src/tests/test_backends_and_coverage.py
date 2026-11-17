@@ -238,6 +238,7 @@ def test_native_system_backend_linux_and_simulated_win32(tmp_path: Path) -> None
 
     # Service start type get/set on non-Windows
     assert linux_sys.get_service_start_type(reg, "WSearch") is None
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\WSearch", "Start", 2, REG_DWORD)
     linux_sys.set_service_start_type(reg, "WSearch", 4)
     assert linux_sys.get_service_start_type(reg, "WSearch") == 4
 

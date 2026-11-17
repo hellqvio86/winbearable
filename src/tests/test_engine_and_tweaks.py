@@ -324,6 +324,11 @@ def test_every_catalog_tweak_apply_and_revert_cycle(
     env = system.detect_environment(registry)
 
     all_tweaks = get_all_tweaks()
+    for tweak in all_tweaks:
+        for svc_spec in tweak.service_specs:
+            registry.set_value(
+                HIVE_HKLM, rf"SYSTEM\CurrentControlSet\Services\{svc_spec.service_name}", "Start", 2, REG_DWORD
+            )
     profile = ProfileSpec(
         name="all-tweaks",
         description="All catalog tweaks",
@@ -488,6 +493,11 @@ def test_separated_audit_dimensions_and_cis_provenance(state_store: StateStore) 
             ),
         }
     )
+    for tw in get_all_tweaks():
+        for svc_spec in tw.service_specs:
+            reg.set_value(
+                HIVE_HKLM, rf"SYSTEM\CurrentControlSet\Services\{svc_spec.service_name}", "Start", 2, REG_DWORD
+            )
     sys_b = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=False)
     env = sys_b.detect_environment(reg)
 
@@ -720,3 +730,54 @@ def test_failed_apply_with_clean_rollback_is_rolled_back(tmp_path: Path) -> None
     reg_err.restore_snapshot = orig_restore  # type: ignore[method-assign]
     with pytest.raises(IncompleteJournalError):
         apply_profile(profile, env_err, reg_err, sysb, store_err, dry_run=False, allow_simulated=True)
+
+
+def test_absent_service_skipped_and_unreadable_rollback_safe(tmp_path: Path) -> None:
+    """R-03: Absent service creates no stub key; unreadable Start refuses delete; rollback error skips nothing."""
+    from unittest.mock import patch
+
+    from winbearable.engine import _compensate_run_record
+    from winbearable.models import RunRecord, ScheduledTaskSnapshot, ServiceSnapshot
+
+    store = StateStore(tmp_path / "state.json")
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    env = sysb.detect_environment(reg)
+    p = load_profile("hardened-baseline")
+    xbox_key = r"SYSTEM\CurrentControlSet\Services\XboxGipSvc"
+
+    # 1. Absent service -> no stub Start value created and not reported in applied_ids
+    s = apply_profile(
+        p,
+        env,
+        reg,
+        sysb,
+        store,
+        dry_run=False,
+        allow_simulated=True,
+        allow_high_risk=True,
+        allow_irreversible=True,
+        only_ids={"services.disable_xbox"},
+    )
+    assert reg.get_value(HIVE_HKLM, xbox_key, "Start") is None
+    assert "services.disable_xbox" not in s.applied_ids
+
+    # 2. Unreadable Start value -> get_service_state is 'unreadable' and rollback does NOT delete Start
+    diag_key = r"SYSTEM\CurrentControlSet\Services\DiagTrack"
+    reg.set_value(HIVE_HKLM, diag_key, "Start", "corrupt", REG_SZ)
+    assert sysb.get_service_state(reg, "DiagTrack") == ("unreadable", None)
+
+    rec = RunRecord(
+        run_id="r03-unreadable",
+        timestamp="2026-11-17T00:00:00Z",
+        profile_name="test",
+        applied_tweaks=(),
+        service_snapshots=(ServiceSnapshot(service_name="DiagTrack", previous_start_type=None),),
+        task_snapshots=(ScheduledTaskSnapshot(task_path=r"\Microsoft\Windows\DiagTrack\Test", previous_enabled=True),),
+        state=TransactionState.ROLLING_BACK,
+    )
+    with patch.object(sysb, "set_scheduled_task_enabled", return_value=True) as mock_task:
+        comp_errors = _compensate_run_record(rec, reg, sysb)
+    assert any("DiagTrack" in err for err in comp_errors)
+    assert reg.get_value(HIVE_HKLM, diag_key, "Start") == ("corrupt", REG_SZ)
+    mock_task.assert_called_once()

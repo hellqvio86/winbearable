@@ -46,13 +46,37 @@ class ServiceOperationAdapter:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
         for svc_spec in tweak.service_specs:
-            actual_start = system.get_service_start_type(registry, svc_spec.service_name)
+            svc_state, actual_start = system.get_service_state(registry, svc_spec.service_name)
+            if svc_state == "absent":
+                ops.append(
+                    PlannedOperation(
+                        operation_type=self.kind,
+                        target=svc_spec.service_name,
+                        action="skip_absent",
+                        before_state="<absent>",
+                        after_state="<absent>",
+                        reversible=True,
+                    )
+                )
+                continue
+            if svc_state == "unreadable":
+                ops.append(
+                    PlannedOperation(
+                        operation_type=self.kind,
+                        target=svc_spec.service_name,
+                        action="skip_unreadable",
+                        before_state="<unreadable>",
+                        after_state="<unreadable>",
+                        reversible=True,
+                    )
+                )
+                continue
             ops.append(
                 PlannedOperation(
                     operation_type=self.kind,
                     target=svc_spec.service_name,
                     action="configure",
-                    before_state=str(actual_start) if actual_start is not None else "<unknown>",
+                    before_state=str(actual_start),
                     after_state=str(svc_spec.start_type),
                     reversible=True,
                 )
