@@ -21,8 +21,8 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
    - `trufflehog` verified secret scan
    - `trivy fs --severity HIGH,CRITICAL` vulnerability scan
 3. **Never pass `--no-verify` to `git commit`.**
-4. **No Paid Microsoft Cloud CI Runners — Run Windows & Container Tests Locally:**
-   - Never add `windows-latest` runners to GitHub Actions (they burn 2x billing minutes, waste cloud credits, and send money to Microsoft). CI runs exclusively on free Linux (`ubuntu-latest`).
+4. **No Paid Microsoft Cloud CI Runners for Tests — Release-Only Winget Exception:**
+   - Never add `windows-latest` runners for PR/push CI or test jobs (CI tests run exclusively on free `ubuntu-latest`). The sole permitted `windows-latest` job is `publish-winget-asset` in `.github/workflows/ci.yml`, which runs **only** on `release: published` to build and attach the PyInstaller Winget zip.
    - Run as much as possible **locally**:
      - Unit tests & Linux dev flow: inside the Linux **Dev Container** (`.devcontainer/devcontainer.json`, using free open-source `ghcr.io/astral-sh/uv:python3.13-bookworm-slim`) or WSL2.
      - Real Windows integration tests (`src/tests/test_windows_integration.py`): run locally on Windows (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py`) or in a local Windows Docker container (`Dockerfile.windows` when Docker Desktop is in Windows-container mode).
