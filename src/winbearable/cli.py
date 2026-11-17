@@ -57,7 +57,7 @@ from .profiles import (
 from .state import StateStore, StateStoreError
 from .tui import launch_tui
 from .tweaks import TWEAK_CATALOG, get_all_tweaks, get_tweak
-from .uac import UacCancelledError, UacElevationError, run_elevated_wb
+from .uac import UacCancelledError, UacElevationError, run_elevated_wb, set_console_title
 from .wsl import (
     WslOperationError,
     apply_wsl_linux_baseline,
@@ -1321,4 +1321,5 @@ def _run_cli_body(
 
 def main() -> None:
     """Console script entrypoint for `wb` and `winbearable`."""
+    set_console_title("winbearable")
     sys.exit(run_cli())
