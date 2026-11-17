@@ -369,3 +369,24 @@ def test_rollback_keeps_history_and_does_not_create_service_keys(tmp_path):
     rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
     assert [r.state.value for r in store.load_runs()] == ["rolled_back"]  # currently []
 ```
+
+---
+
+## 11. `0.11.0` Follow-up Security & Reliability Review
+
+- [x] **P0.1 (`CODE` + `NEEDS-WINDOWS`)** — Elevated Python launches use `-I` (isolated mode); `NativeSystemBackend._sys32_exe` uses Win32 `GetSystemDirectoryW` on Windows (verified on Build `26300` with poisoned `SYSTEMROOT=C:\Temp\Evil` -> `C:\WINDOWS\system32\sc.exe`).
+- [x] **P0.2 (`CODE`)** — Refuse executing user-writable `code.cmd` under `%LOCALAPPDATA%` / `%USERPROFILE%` when elevated (`OperationStatus.ACCESS_DENIED`).
+- [x] **P0.3 (`CODE`)** — Pass per-run `backup_dir` into `prepare_wsl_plan` / `_create_backup_file` so `.wslconfig.bak` is isolated per `run_id`.
+- [ ] **P0.4 (`CODE`)** — Persist verified post-apply state and detect post-apply external drift before rollback.
+- [ ] **P1.1 (`CODE`)** — Add optimistic SHA-256 / existence concurrency checks between `prepare_wsl_plan` and `apply_wslconfig_target`.
+- [x] **P1.2 (`NEEDS-WINDOWS`)** — Preserve existing Windows file DACLs across `_atomic_write_bytes` via `System32\icacls.exe /save` and `/restore`.
+- [x] **P1.3 (`CODE`)** — Extend `_check_listening_ports` to enumerate IPv4/IPv6 TCP listeners (`GetExtendedTcpTable`) and IPv4/IPv6 UDP endpoints (`GetExtendedUdpTable`), verified live on Build `26300`.
+- [x] **P1.4 (`CODE`)** — *Declined per `AGENTS.md` rule 4 (CI tests run exclusively on free `ubuntu-latest`; Windows integration tests run locally on Build `26300` and are recorded in `docs/verify-matrix.md`).*
+- [ ] **P1.5 (`CODE`)** — Bound `_run_native_cmd` stdout/stderr capture during streaming instead of after `communicate()`.
+- [x] **P1.6 (`CODE`)** — Include `RegistryView` in `seen_reg_keys` and `seen_del_keys` snapshot deduplication keys.
+- [ ] **P1.7 (`CODE` + `NEEDS-WINDOWS`)** — Bind `WslDistroSnapshot` to a stable distro registration identity.
+- [ ] **P1.8 (`CODE`)** — Validate release tag `v${__version__}` agreement before PyPI/Winget publishing.
+- [ ] **P2.1 (`CODE`)** — Bound `load_profile` `extends`/`include` recursion depth and include full traversal chain in `ProfileValidationError`.
+- [ ] **P2.2 (`CODE`)** — Add module-level coverage floor for `audit.py`.
+- [ ] **P2.3 (`CODE`)** — Authenticode-sign and attest `wb.exe` in release workflow.
+- [ ] **P2.4 (`CODE`)** — Reconcile verification matrix statuses (`implemented`, `unit-tested`, `Windows-verified`, `release-verified`).

@@ -1539,12 +1539,36 @@ class NativeSystemBackend:
         self._winget_installed_cache[package_id.lower()] = True
         return True
 
+    @staticmethod
+    def _is_user_writable_binary(exe_path: str) -> bool:
+        """Return True if *exe_path* resides inside a user-writable profile directory."""
+        norm = os.path.normcase(os.path.abspath(exe_path))
+        for env_key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
+            base = os.environ.get(env_key, "").strip()
+            if base:
+                norm_base = os.path.normcase(os.path.abspath(base)).rstrip("\\/") + os.sep
+                if norm.startswith(norm_base):
+                    return True
+        return False
+
+    def _guard_elevated_code_cmd(self) -> str | None:
+        code_cmd = self._resolve_code_cmd()
+        if self._check_is_admin() and self._is_user_writable_binary(code_cmd):
+            self.last_outcome = OperationOutcome(
+                status=OperationStatus.ACCESS_DENIED,
+                message=f"Refusing to execute user-writable '{code_cmd}' while elevated.",
+                command=(code_cmd,),
+            )
+            return None
+        return code_cmd
+
     def install_vscode_extension(self, extension_id: str) -> bool:
         if self._platform != "win32":
             return False
-        ext_res = self._run_native_cmd(
-            [self._resolve_code_cmd(), "--install-extension", extension_id, "--force"], timeout=120.0
-        )
+        code_cmd = self._guard_elevated_code_cmd()
+        if code_cmd is None:
+            return False
+        ext_res = self._run_native_cmd([code_cmd, "--install-extension", extension_id, "--force"], timeout=120.0)
         return ext_res.returncode == 0
 
     def uninstall_winget_package(self, package_id: str) -> bool:
@@ -1578,7 +1602,10 @@ class NativeSystemBackend:
     def uninstall_vscode_extension(self, extension_id: str) -> bool:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd([self._resolve_code_cmd(), "--uninstall-extension", extension_id], timeout=60.0)
+        code_cmd = self._guard_elevated_code_cmd()
+        if code_cmd is None:
+            return False
+        res = self._run_native_cmd([code_cmd, "--uninstall-extension", extension_id], timeout=60.0)
         return res.returncode == 0
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
@@ -1606,7 +1633,13 @@ class NativeSystemBackend:
 
     @staticmethod
     def _sys32_exe(exe_name: str) -> str:
-        """Resolve a system binary from %SystemRoot%\\System32 so a hostile PATH cannot substitute it."""
+        """Resolve a system binary from Win32 GetSystemDirectoryW (or %SystemRoot%\\System32 off-Windows)."""
+        if sys.platform == "win32":
+            windll: Any = getattr(ctypes, "windll", None)
+            if windll is not None:
+                buf = ctypes.create_unicode_buffer(260)
+                if windll.kernel32.GetSystemDirectoryW(buf, 260) > 0:
+                    return f"{buf.value.rstrip('/\\')}\\{exe_name}"
         sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
         if sys_root.endswith("\\") or sys_root.endswith("/"):
             sys_root = sys_root[:-1]

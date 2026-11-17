@@ -6,6 +6,8 @@ import json
 import os
 import re
 import stat
+import subprocess
+import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -428,12 +430,31 @@ def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[
 MAX_FILE_SNAPSHOT_BYTES = 512 * 1024
 
 
+def _icacls_exe_path() -> str:
+    sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+    return f"{sys_root.rstrip('/\\')}\\System32\\icacls.exe"
+
+
 def _atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
-    """Atomically write exact bytes to *target_path*, preserving file mode when present."""
+    """Atomically write exact bytes to *target_path*, preserving file mode and Windows DACL when present."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
     existing_mode: int | None = None
-    if target_path.is_file():
+    existed = target_path.is_file()
+    if existed:
         existing_mode = stat.S_IMODE(target_path.stat().st_mode)
+    acl_bak_dir: tempfile.TemporaryDirectory[str] | None = None
+    acl_bak_file: Path | None = None
+    if existed and sys.platform == "win32":
+        acl_bak_dir = tempfile.TemporaryDirectory(prefix="wb-acl-")
+        candidate = Path(acl_bak_dir.name) / "target.acl"
+        save_res = subprocess.run(
+            [_icacls_exe_path(), str(target_path), "/save", str(candidate)],
+            capture_output=True,
+            shell=False,
+            check=False,
+        )
+        if save_res.returncode == 0 and candidate.is_file():
+            acl_bak_file = candidate
     fd, temp_path_str = tempfile.mkstemp(
         prefix=f"{target_path.name}.",
         dir=str(target_path.parent),
@@ -448,6 +469,13 @@ def _atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
         elif os.name == "posix":
             os.chmod(temp_path_str, 0o600)
         os.replace(temp_path_str, target_path)
+        if acl_bak_file is not None:
+            subprocess.run(
+                [_icacls_exe_path(), str(target_path.parent), "/restore", str(acl_bak_file)],
+                capture_output=True,
+                shell=False,
+                check=False,
+            )
         if os.name == "posix":
             dir_fd = os.open(str(target_path.parent), os.O_RDONLY)
             try:
@@ -458,6 +486,9 @@ def _atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
         if os.path.exists(temp_path_str):
             os.unlink(temp_path_str)
         raise
+    finally:
+        if acl_bak_dir is not None:
+            acl_bak_dir.cleanup()
 
 
 def snapshot_file_spec(spec: FileSpec) -> FileSnapshot:

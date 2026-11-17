@@ -315,11 +315,15 @@ def _parse_ini_sections(text: str) -> dict[str, dict[str, str]]:
     return sections
 
 
-def _create_backup_file(target_path: Path) -> Path | None:
-    """Create a durable .bak copy of *target_path* if it exists."""
+def _create_backup_file(target_path: Path, *, backup_dir: Path | None = None) -> Path | None:
+    """Create a durable .bak copy of *target_path* in *backup_dir* (or sibling) if it exists."""
     if not target_path.is_file():
         return None
-    backup_path = target_path.with_suffix(f"{target_path.suffix}.bak")
+    if backup_dir is not None:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"{target_path.name}.bak"
+    else:
+        backup_path = target_path.with_suffix(f"{target_path.suffix}.bak")
     shutil.copy2(target_path, backup_path)
     return backup_path
 
@@ -436,6 +440,7 @@ def prepare_wsl_plan(
     wslconfig_path: Path | None = None,
     distros: tuple[str, ...] = (),
     create_host_backup: bool = True,
+    backup_dir: Path | None = None,
 ) -> PreparedWslPlan:
     """Read host .wslconfig and probe all target distros before any WSL mutation occurs."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
@@ -454,7 +459,7 @@ def prepare_wsl_plan(
 
     backup_path: Path | None = None
     if create_host_backup and wslconfig_changed:
-        backup_path = _create_backup_file(target_wslconfig)
+        backup_path = _create_backup_file(target_wslconfig, backup_dir=backup_dir)
 
     distro_sections = build_distro_wsl_conf_sections(spec)
     distro_plans: list[PreparedWslDistroPlan] = []

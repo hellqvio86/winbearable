@@ -1093,7 +1093,7 @@ def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: py
     assert resolve_elevation_target(elevated_args, executable=str(wb_exe)) == (str(wb_exe.resolve()), elevated_args)
     assert resolve_elevation_target(elevated_args, executable=str(py_exe)) == (
         str(py_exe.resolve()),
-        ["-m", "winbearable", *elevated_args],
+        ["-I", "-m", "winbearable", *elevated_args],
     )
 
     # Frozen PyInstaller binary uses sys.executable directly without '-m winbearable'
@@ -1113,7 +1113,7 @@ def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: py
     wb_exe.unlink()
     assert resolve_elevation_target(elevated_args, argv0="") == (
         str(py_exe.resolve()),
-        ["-m", "winbearable", *elevated_args],
+        ["-I", "-m", "winbearable", *elevated_args],
     )
 
     # Console title happy path & error paths
@@ -1767,3 +1767,75 @@ def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path
 
     # C-07: InMemorySystemBackend defaults to 26H2
     assert InMemorySystemBackend().display_version == "26H2"
+
+
+def test_uac_isolated_python_elevated_code_guard_wsl_backup_dir_and_network_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UAC -I flag, user-writable code.cmd refusal when elevated, per-run WSL backup dir, and TCP/UDP audit."""
+    import ctypes
+    from typing import Any
+    from unittest.mock import patch
+
+    from winbearable.audit import _check_listening_ports
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import InMemorySystemBackend, NativeSystemBackend
+    from winbearable.models import OperationStatus, WslConfigSpec
+    from winbearable.uac import resolve_elevation_target
+    from winbearable.wsl import prepare_wsl_plan
+
+    # 1. UAC python.exe launch uses -I (isolated mode)
+    exe, args = resolve_elevation_target(["apply"], executable=r"C:\Python314\python.exe")
+    assert exe.endswith("python.exe") and args[:3] == ["-I", "-m", "winbearable"]
+
+    # 2. Elevated NativeSystemBackend refuses user-writable code.cmd under LOCALAPPDATA
+    local_app = tmp_path / "LocalApp"
+    code_cmd = local_app / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd"
+    code_cmd.parent.mkdir(parents=True)
+    code_cmd.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app))
+    native = NativeSystemBackend(platform_override="win32")
+    with patch.object(native, "_check_is_admin", return_value=True):
+        assert native.install_vscode_extension("ms-python.python") is False
+        assert native.last_outcome is not None and native.last_outcome.status == OperationStatus.ACCESS_DENIED
+
+    # 3. prepare_wsl_plan(..., backup_dir=...) stores backup inside per-run backup_dir
+    wsl_cfg = tmp_path / ".wslconfig"
+    wsl_cfg.write_text("[wsl2]\nmemory=2GB\n", encoding="utf-8")
+    run_bak_dir = tmp_path / "backups" / "run-123"
+    plan = prepare_wsl_plan(
+        WslConfigSpec(enabled=True, mode="strict", memory_gb=4),
+        InMemorySystemBackend(total_memory_gb=16),
+        wslconfig_path=wsl_cfg,
+        backup_dir=run_bak_dir,
+    )
+    assert plan.backup_path == run_bak_dir / ".wslconfig.bak"
+    assert plan.backup_path is not None and plan.backup_path.is_file()
+
+    # 4. _check_listening_ports queries TCP4, TCP6, UDP4, UDP6
+    def _fake_table(buf: Any, size_ptr: Any, _order: bool, af: int, _cls: int, _res: int) -> int:
+        stride = {2: 24, 23: 56} if _cls == 3 else {2: 12, 23: 28}
+        port_off = {2: 8, 23: 24} if _cls == 3 else {2: 4, 23: 20}
+        needed = 4 + stride[af]
+        if buf is None:
+            size_ptr._obj.value = needed
+            return 122
+        raw = bytearray(needed)
+        raw[:4] = (1).to_bytes(4, "little")
+        port_val = 445 if af == 2 else 5353
+        raw[4 + port_off[af] : 4 + port_off[af] + 2] = port_val.to_bytes(2, "big")
+        ctypes.memmove(buf, bytes(raw), needed)
+        return 0
+
+    class _FakeIphlpapi:
+        GetExtendedTcpTable = staticmethod(_fake_table)
+        GetExtendedUdpTable = staticmethod(_fake_table)
+
+    class _FakeWindll:
+        iphlpapi = _FakeIphlpapi()
+
+    env = InMemorySystemBackend(is_windows=True, windows_build=26300).detect_environment(InMemoryRegistryBackend())
+    with patch("winbearable.audit.sys.platform", "win32"), patch.object(ctypes, "windll", _FakeWindll(), create=True):
+        finding = _check_listening_ports(env)
+    assert "TCP4=1, TCP6=1, UDP4=1, UDP6=1" in finding.observation.evidence
+    assert "445" in finding.observation.evidence and "5353" in finding.observation.evidence

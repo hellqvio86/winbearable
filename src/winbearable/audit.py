@@ -409,25 +409,36 @@ def _check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
         if windll is None:
             raise OSError("windll unavailable")
         iphlpapi = windll.iphlpapi
-        size = ctypes.c_ulong(0)
-        # AF_INET=2, TCP_TABLE_OWNER_PID_LISTENER=3
-        iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 3, 0)
-        buf = (ctypes.c_ubyte * size.value)()
-        rc = iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(size), False, 2, 3, 0)
-        if rc != 0:
-            raise OSError(f"GetExtendedTcpTable returned {rc}")
-        num_entries = int.from_bytes(bytes(buf[:4]), "little")
-        ports: list[int] = []
-        for idx in range(min(num_entries, 200)):
-            off = 4 + idx * 24
-            port_raw = int.from_bytes(bytes(buf[off + 8 : off + 10]), "big")
-            ports.append(port_raw)
+
+        def _query_table(fn: Any, af: int, table_cls: int, stride: int, port_off: int) -> tuple[int, list[int]]:
+            sz = ctypes.c_ulong(0)
+            fn(None, ctypes.byref(sz), False, af, table_cls, 0)
+            if sz.value == 0:
+                return 0, []
+            buf = (ctypes.c_ubyte * sz.value)()
+            rc = fn(buf, ctypes.byref(sz), False, af, table_cls, 0)
+            if rc != 0:
+                return 0, []
+            count = int.from_bytes(bytes(buf[:4]), "little")
+            found: list[int] = []
+            for idx in range(min(count, 200)):
+                off = 4 + idx * stride
+                if off + port_off + 2 <= len(buf):
+                    found.append(int.from_bytes(bytes(buf[off + port_off : off + port_off + 2]), "big"))
+            return count, found
+
+        # AF_INET=2, AF_INET6=23; TCP_TABLE_OWNER_PID_LISTENER=3, UDP_TABLE_OWNER_PID=1
+        tcp4_n, tcp4_ports = _query_table(iphlpapi.GetExtendedTcpTable, 2, 3, 24, 8)
+        tcp6_n, tcp6_ports = _query_table(iphlpapi.GetExtendedTcpTable, 23, 3, 56, 24)
+        udp4_n, udp4_ports = _query_table(iphlpapi.GetExtendedUdpTable, 2, 1, 12, 4)
+        udp6_n, udp6_ports = _query_table(iphlpapi.GetExtendedUdpTable, 23, 1, 28, 20)
+        all_ports = sorted(set(tcp4_ports + tcp6_ports + udp4_ports + udp6_ports))
         obs = PostureObservation(
             ObservationState.ENABLED,
-            "win32:GetExtendedTcpTable",
+            "win32:GetExtendedTcpTable+GetExtendedUdpTable",
             ObservationConfidence.HIGH,
-            f"{num_entries} IPv4 TCP listener(s); sample ports={sorted(set(ports))[:15]}",
-            "Enumerated TCP listeners via GetExtendedTcpTable.",
+            f"TCP4={tcp4_n}, TCP6={tcp6_n}, UDP4={udp4_n}, UDP6={udp6_n}; sample ports={all_ports[:15]}",
+            "Enumerated IPv4/IPv6 TCP listeners and UDP endpoints via iphlpapi.",
         )
         return AuditFinding("chk.listening_ports", "network", "Listening TCP/UDP Ports", "info", obs)
     except Exception as exc:

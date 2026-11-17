@@ -148,7 +148,7 @@ def resolve_elevation_target(
     """
     if executable is not None:
         target = Path(executable).resolve()
-        args = elevated_args if _is_wb_launcher(target) else ["-m", "winbearable", *elevated_args]
+        args = elevated_args if _is_wb_launcher(target) else ["-I", "-m", "winbearable", *elevated_args]
         return str(target), args
 
     if getattr(sys, "frozen", False):
@@ -164,7 +164,7 @@ def resolve_elevation_target(
     if sibling_wb.is_file():
         return str(sibling_wb), elevated_args
 
-    return str(Path(sys.executable).resolve()), ["-m", "winbearable", *elevated_args]
+    return str(Path(sys.executable).resolve()), ["-I", "-m", "winbearable", *elevated_args]
 
 
 def set_console_title(title: str = "winbearable", windll_override: Any = None) -> bool:
