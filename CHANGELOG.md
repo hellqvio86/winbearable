@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.10] - 2026-11-17
+
+### Fixed & Improved
+
+- **UAC Launcher & Console Branding:** `run_elevated_wb()` now prefers frozen `wb.exe` or `uv`/`pip` `wb.exe` console-script launchers over `python.exe`, `cli.main()` sets the Windows console title to `winbearable` via `kernel32.SetConsoleTitleW`, and `bin/build_winget.py` embeds Windows `VSVersionInfo` metadata into `wb.exe`.
+
 ## [0.9.9] - 2026-11-17
 
 ### Improved & Verified
