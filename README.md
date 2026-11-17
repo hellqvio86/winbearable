@@ -12,7 +12,7 @@
   <a href="https://pypi.org/project/winbearable/"><img src="https://img.shields.io/pypi/pyversions/winbearable.svg" alt="Python Versions"></a>
   <a href="https://github.com/astral-sh/uv"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v1.json" alt="uv"></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
-  <img src="https://img.shields.io/badge/Windows_11-26H2%2B%20(Build%20%3E%3D%2026300%2C%20No%20IoT)-0078D6.svg?logo=windows11&logoColor=white" alt="Windows 11 26H2+ Build >= 26300 (No IoT)">
+  <img src="https://img.shields.io/badge/Windows_11-26H2%2B%20(Build%20%3E%3D%2026300%2C%20No%20IoT)-0078D6?logo=windows&logoColor=white" alt="Windows 11 26H2+ Build >= 26300 (No IoT)">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
