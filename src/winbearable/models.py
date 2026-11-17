@@ -823,6 +823,38 @@ class FsutilSnapshot:
 
 
 @dataclass(frozen=True)
+class HypervFirewallSnapshot:
+    """Recorded pre-apply state of the WSL2 Hyper-V firewall setting."""
+
+    vm_creator_id: str
+    previous_enabled: bool | str | None
+    previous_inbound: str | None
+    previous_outbound: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "vm_creator_id": self.vm_creator_id,
+            "previous_enabled": self.previous_enabled,
+            "previous_inbound": self.previous_inbound,
+            "previous_outbound": self.previous_outbound,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> HypervFirewallSnapshot:
+        prev_en = payload.get("previous_enabled")
+        if prev_en is not None and not isinstance(prev_en, bool):
+            prev_en = str(prev_en)
+        prev_in = payload.get("previous_inbound")
+        prev_out = payload.get("previous_outbound")
+        return cls(
+            vm_creator_id=str(payload["vm_creator_id"]),
+            previous_enabled=prev_en,
+            previous_inbound=str(prev_in) if prev_in is not None else None,
+            previous_outbound=str(prev_out) if prev_out is not None else None,
+        )
+
+
+@dataclass(frozen=True)
 class IcaclsSnapshot:
     """Recorded pre-apply ACL backup for a user-owned path."""
 
@@ -961,6 +993,7 @@ class RunRecord:
     powercfg_snapshots: tuple[PowercfgSnapshot, ...] = ()
     git_config_snapshots: tuple[GitConfigSnapshot, ...] = ()
     icacls_snapshots: tuple[IcaclsSnapshot, ...] = ()
+    hyperv_firewall_snapshots: tuple[HypervFirewallSnapshot, ...] = ()
     file_snapshots: tuple[FileSnapshot, ...] = ()
     installed_winget_packages: tuple[str, ...] = ()
     installed_vscode_extensions: tuple[str, ...] = ()
@@ -991,6 +1024,7 @@ class RunRecord:
             "powercfg_snapshots": [snap.to_dict() for snap in self.powercfg_snapshots],
             "git_config_snapshots": [snap.to_dict() for snap in self.git_config_snapshots],
             "icacls_snapshots": [snap.to_dict() for snap in self.icacls_snapshots],
+            "hyperv_firewall_snapshots": [snap.to_dict() for snap in self.hyperv_firewall_snapshots],
             "file_snapshots": [snap.to_dict() for snap in self.file_snapshots],
             "installed_winget_packages": list(self.installed_winget_packages),
             "installed_vscode_extensions": list(self.installed_vscode_extensions),
@@ -1018,6 +1052,9 @@ class RunRecord:
         powercfg_snaps = tuple(PowercfgSnapshot.from_dict(item) for item in payload.get("powercfg_snapshots", []))
         git_snaps = tuple(GitConfigSnapshot.from_dict(item) for item in payload.get("git_config_snapshots", []))
         icacls_snaps = tuple(IcaclsSnapshot.from_dict(item) for item in payload.get("icacls_snapshots", []))
+        hv_snaps = tuple(
+            HypervFirewallSnapshot.from_dict(item) for item in payload.get("hyperv_firewall_snapshots", [])
+        )
         file_snaps = tuple(FileSnapshot.from_dict(item) for item in payload.get("file_snapshots", []))
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
         vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
@@ -1044,6 +1081,7 @@ class RunRecord:
             powercfg_snapshots=powercfg_snaps,
             git_config_snapshots=git_snaps,
             icacls_snapshots=icacls_snaps,
+            hyperv_firewall_snapshots=hv_snaps,
             file_snapshots=file_snaps,
             installed_winget_packages=winget_pkgs,
             installed_vscode_extensions=vscode_exts,

@@ -1529,3 +1529,101 @@ def test_locale_decoding_task_xml_and_icacls_sddl(tmp_path: Path) -> None:
         fake_sys,
     )
     assert ops and ops[0].reversible is True
+
+
+def test_file_config_robustness_hyperv_not_configured_and_service_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B-04..B-06: file-config BOM/order/env/UTF-8 safety, Hyper-V NotConfigured + journal, and ImagePath tokenizer."""
+    from winbearable.audit import _check_unquoted_service_paths
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import InMemorySystemBackend
+    from winbearable.const import HIVE_HKLM, REG_SZ
+    from winbearable.hyperv_firewall import _parse_ps_setting_json
+    from winbearable.models import FileSpec, HypervFirewallSnapshot, RiskLevel, RunRecord, TweakDefinition
+    from winbearable.operations import FileConfigOperationAdapter, expand_file_spec_path, merge_file_content
+
+    # B-04: non-UTF-8 file in FileConfigOperationAdapter.inspect -> unverified, not traceback
+    bad_file = tmp_path / "bad.json"
+    bad_file.write_bytes(b"\xff\xfe\x00\x80")
+    tweak = TweakDefinition(
+        tweak_id="test.bad_file",
+        category="dev",
+        title="Test",
+        description="Test",
+        source_url="https://example.com",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=26300,
+        max_build=None,
+        tested_builds=(26300,),
+        file_specs=(FileSpec(path_template=str(bad_file), file_format="json", desired_keys={"a": 1}),),
+    )
+    ops, drifted, unverified = FileConfigOperationAdapter().inspect(
+        tweak, InMemoryRegistryBackend(), InMemorySystemBackend()
+    )
+    assert ops == [] and drifted == [] and len(unverified) == 1
+
+    # B-04: unresolved %VAR% raises ValueError instead of creating literal %UNSET_VAR% dir
+    monkeypatch.delenv("WB_UNSET_TEST_VAR", raising=False)
+    with pytest.raises(ValueError, match="Unresolved"):
+        expand_file_spec_path(r"%WB_UNSET_TEST_VAR%\settings.json")
+
+    # B-04: JSON preserves key order, non-ASCII characters, and UTF-8 BOM
+    bom_json = '\ufeff{"zebra": "ÅÄÖ", "alpha": 1}\n'
+    merged_json = merge_file_content(bom_json, "json", {"beta": "ö"})
+    assert merged_json.startswith("\ufeff")
+    assert "ÅÄÖ" in merged_json and '"ö"' in merged_json
+    assert merged_json.index('"zebra"') < merged_json.index('"alpha"') < merged_json.index('"beta"')
+
+    # B-04: TOML ignores [bracket] inside multi-line string before first real [table]
+    toml_in = 'desc = """\n[not_a_table]\n"""\n[real_table]\nx = 1\n'
+    merged_toml = merge_file_content(toml_in, "toml", {"top_key": "ok"})
+    assert merged_toml.index('top_key = "ok"') < merged_toml.index("[real_table]")
+
+    # B-05: Hyper-V NotConfigured (0 for action, 2 for Enabled) + HypervFirewallSnapshot round-trip
+    parsed_nc = _parse_ps_setting_json(
+        '{"Name": "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}", "Enabled": 2, '
+        '"DefaultInboundAction": 0, "DefaultOutboundAction": 0, "LoopbackEnabled": 2}'
+    )
+    assert parsed_nc is not None
+    assert parsed_nc["enabled"] == "NotConfigured"
+    assert parsed_nc["default_inbound_action"] == "NotConfigured"
+    assert parsed_nc["default_outbound_action"] == "NotConfigured"
+
+    hv_snap = HypervFirewallSnapshot.from_dict(
+        HypervFirewallSnapshot(
+            vm_creator_id="{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}",
+            previous_enabled="NotConfigured",
+            previous_inbound="NotConfigured",
+            previous_outbound="NotConfigured",
+        ).to_dict()
+    )
+    rec = RunRecord.from_dict(
+        RunRecord(
+            run_id="r1",
+            timestamp="2026-01-01T00:00:00Z",
+            profile_name="wsl-firewall",
+            applied_tweaks=(),
+            hyperv_firewall_snapshots=(hv_snap,),
+        ).to_dict()
+    )
+    assert rec.hyperv_firewall_snapshots == (hv_snap,)
+
+    # B-06: unquoted service path tokenizer ignores positional args after .exe, catches spaces before .exe
+    reg = InMemoryRegistryBackend(
+        initial_values={
+            (HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\CleanArgs", "ImagePath"): (
+                r"C:\Tools\svc.exe arg1 arg2",
+                REG_SZ,
+            ),
+            (HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\VulnSpace", "ImagePath"): (
+                r"C:\Program Files\My App\svc.exe --run",
+                REG_SZ,
+            ),
+        }
+    )
+    finding = _check_unquoted_service_paths(reg)
+    assert "CleanArgs" not in finding.observation.evidence
+    assert "VulnSpace" in finding.observation.evidence
+    assert finding.severity == "low"

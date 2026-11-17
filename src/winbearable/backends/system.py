@@ -669,6 +669,10 @@ class SystemBackend(Protocol):
     def set_hibernate_enabled(self, registry: RegistryBackend, enabled: bool) -> bool:
         """Enable or disable hibernation via powercfg.exe /hibernate."""
 
+    @property
+    def git_installed(self) -> bool:
+        """Return True if git.exe is available on this system."""
+
     def get_git_global_config(self, key: str) -> str | None:
         """Read global git configuration value via git.exe config --global."""
 
@@ -1042,6 +1046,10 @@ class NativeSystemBackend:
     """Native Windows/WSL system backend using ctypes, winreg, and direct Win32 executables."""
 
     is_simulated: bool = False
+
+    @property
+    def git_installed(self) -> bool:
+        return self._resolve_git_exe() is not None
 
     def __init__(
         self,
