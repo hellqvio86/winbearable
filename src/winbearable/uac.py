@@ -8,10 +8,17 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-SEE_MASK_NOCLOSEPROCESS = 0x00000040
-SW_HIDE = 0
-INFINITE = 0xFFFFFFFF
-ERROR_CANCELLED = 1223
+from .const import (
+    DEFAULT_UAC_TERMINATE_GRACE_MS,
+    DEFAULT_UAC_TIMEOUT_MS,
+    MAX_UAC_OUTPUT_BYTES,
+    SEE_MASK_NOCLOSEPROCESS,
+    SW_HIDE,
+    WAIT_FAILED,
+    WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
+)
+from .const import ERROR_CANCELLED as ERROR_CANCELLED
 
 
 class UacCancelledError(RuntimeError):
@@ -20,6 +27,10 @@ class UacCancelledError(RuntimeError):
 
 class UacElevationError(RuntimeError):
     """Raised when programmatic UAC elevation fails."""
+
+
+class UacTimeoutError(UacElevationError):
+    """Raised when an elevated child process exceeds the bounded wait timeout."""
 
 
 class _ShellExecuteInfoW(ctypes.Structure):
@@ -61,13 +72,61 @@ def build_elevated_cmdline_args(argv: list[str], uac_output_path: Path) -> list[
     return [*cleaned, "--uac-output", str(uac_output_path)]
 
 
+def _configure_win32_signatures(shell32: Any, kernel32: Any) -> None:
+    """Configure explicit ctypes argtypes and restype contracts for Win32 UAC APIs."""
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(_ShellExecuteInfoW)]
+    shell32.ShellExecuteExW.restype = ctypes.c_int
+
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.TerminateProcess.restype = ctypes.c_int
+
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    kernel32.GetLastError.argtypes = []
+    kernel32.GetLastError.restype = ctypes.c_ulong
+
+    kernel32.SetConsoleTitleW.argtypes = [ctypes.c_wchar_p]
+    kernel32.SetConsoleTitleW.restype = ctypes.c_int
+
+
 def _get_win32_dlls(windll_override: Any = None) -> tuple[Any, Any]:
     if windll_override is not None:
         return windll_override.shell32, windll_override.kernel32
     windll_factory = getattr(ctypes, "WinDLL", None)
     if windll_factory is None:
         raise UacElevationError("WinDLL is unavailable on this platform.")
-    return windll_factory("shell32", use_last_error=True), windll_factory("kernel32", use_last_error=True)
+    shell32 = windll_factory("shell32", use_last_error=True)
+    kernel32 = windll_factory("kernel32", use_last_error=True)
+    _configure_win32_signatures(shell32, kernel32)
+    return shell32, kernel32
+
+
+def _last_win32_error(kernel32: Any) -> int:
+    get_last_error_fn = getattr(ctypes, "get_last_error", None)
+    err_code = int(get_last_error_fn()) if get_last_error_fn is not None else 0
+    if err_code == 0:
+        err_code = int(kernel32.GetLastError())
+    return err_code
+
+
+def _read_bounded_uac_output(out_path: Path, max_bytes: int = MAX_UAC_OUTPUT_BYTES) -> str:
+    """Read elevated output up to *max_bytes* after child termination."""
+    if not out_path.is_file():
+        return ""
+    with out_path.open("rb") as fh:
+        raw = fh.read(max_bytes + 1)
+    truncated = len(raw) > max_bytes
+    text = raw[:max_bytes].decode("utf-8", errors="replace")
+    if truncated:
+        return f"{text}\n...[UAC output truncated at {max_bytes} bytes]\n"
+    return text
 
 
 def _is_wb_launcher(path: Path) -> bool:
@@ -122,8 +181,12 @@ def run_elevated_wb(
     executable: str | None = None,
     cwd: str | None = None,
     windll_override: Any = None,
+    timeout_ms: int = DEFAULT_UAC_TIMEOUT_MS,
 ) -> tuple[int, str]:
-    """Re-launch `wb` elevated via ShellExecuteExW('runas'), wait for completion, and return (exit_code, output)."""
+    """Re-launch `wb` elevated via ShellExecuteExW('runas'), wait up to *timeout_ms*, and return (exit_code, output)."""
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be a positive integer.")
+
     shell32, kernel32 = _get_win32_dlls(windll_override)
 
     with tempfile.TemporaryDirectory(prefix="wb-uac-") as tmp_dir:
@@ -144,23 +207,32 @@ def run_elevated_wb(
 
         ok = shell32.ShellExecuteExW(ctypes.byref(sei))
         if not ok:
-            get_last_error_fn = getattr(ctypes, "get_last_error", None)
-            err_code = int(get_last_error_fn()) if get_last_error_fn is not None else 0
-            if err_code == 0:
-                err_code = int(kernel32.GetLastError())
+            err_code = _last_win32_error(kernel32)
             if err_code == ERROR_CANCELLED:
                 raise UacCancelledError("UAC elevation was cancelled by the user.")
             raise UacElevationError(f"Windows UAC elevation failed (Win32 error {err_code}).")
 
+        if not sei.hProcess:
+            raise UacElevationError("Windows UAC elevation succeeded without returning a process handle.")
+
         exit_code = ctypes.c_ulong(1)
         try:
-            if sei.hProcess:
-                kernel32.WaitForSingleObject(sei.hProcess, INFINITE)
-                if not kernel32.GetExitCodeProcess(sei.hProcess, ctypes.byref(exit_code)):
-                    raise UacElevationError("Failed to read exit code from elevated winbearable process.")
+            wait_res = int(kernel32.WaitForSingleObject(sei.hProcess, timeout_ms))
+            if wait_res == WAIT_TIMEOUT:
+                kernel32.TerminateProcess(sei.hProcess, 1)
+                kernel32.WaitForSingleObject(sei.hProcess, DEFAULT_UAC_TERMINATE_GRACE_MS)
+                raise UacTimeoutError(
+                    f"Elevated winbearable process timed out after {timeout_ms} ms and was terminated; "
+                    "host state may have been partially modified. Run `wb doctor` and `wb recover` before retrying."
+                )
+            if wait_res != WAIT_OBJECT_0:
+                err_code = _last_win32_error(kernel32) if wait_res == WAIT_FAILED else 0
+                raise UacElevationError(
+                    f"Waiting for elevated winbearable process failed (wait_result={wait_res}, Win32 error {err_code})."
+                )
+            if not kernel32.GetExitCodeProcess(sei.hProcess, ctypes.byref(exit_code)):
+                raise UacElevationError("Failed to read exit code from elevated winbearable process.")
         finally:
-            if sei.hProcess:
-                kernel32.CloseHandle(sei.hProcess)
+            kernel32.CloseHandle(sei.hProcess)
 
-        output_text = out_path.read_text(encoding="utf-8", errors="replace") if out_path.is_file() else ""
-        return int(exit_code.value), output_text
+        return int(exit_code.value), _read_bounded_uac_output(out_path)

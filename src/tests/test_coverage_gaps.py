@@ -150,6 +150,7 @@ def test_uac_error_paths_and_cmdline_stripping(tmp_path: Path, monkeypatch: pyte
         return 1
 
     fake_windll2.shell32.ShellExecuteExW.side_effect = _set_proc
+    fake_windll2.kernel32.WaitForSingleObject.return_value = 0
     fake_windll2.kernel32.GetExitCodeProcess.return_value = 0
     with (
         patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
@@ -1123,3 +1124,91 @@ def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr("winbearable.uac.sys.platform", "linux")
     assert set_console_title("winbearable") is False
+
+
+def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
+    """Cover Win32 ctypes signature contracts, null handle, wait outcomes, timeout termination, and bounded output."""
+    import ctypes
+
+    from winbearable.const import WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT
+    from winbearable.uac import (
+        UacElevationError,
+        UacTimeoutError,
+        _configure_win32_signatures,
+        _read_bounded_uac_output,
+        run_elevated_wb,
+    )
+
+    # 1. Signature configuration sets argtypes and restype for all Win32 UAC APIs
+    stub_shell32 = MagicMock()
+    stub_kernel32 = MagicMock()
+    _configure_win32_signatures(stub_shell32, stub_kernel32)
+    assert stub_shell32.ShellExecuteExW.restype is ctypes.c_int
+    assert stub_kernel32.WaitForSingleObject.argtypes == [ctypes.c_void_p, ctypes.c_ulong]
+    assert stub_kernel32.WaitForSingleObject.restype is ctypes.c_ulong
+    assert stub_kernel32.GetExitCodeProcess.restype is ctypes.c_int
+    assert stub_kernel32.TerminateProcess.argtypes == [ctypes.c_void_p, ctypes.c_uint]
+    assert stub_kernel32.CloseHandle.argtypes == [ctypes.c_void_p]
+    assert stub_kernel32.GetLastError.argtypes == []
+    assert stub_kernel32.SetConsoleTitleW.argtypes == [ctypes.c_wchar_p]
+
+    # 2. Invalid timeout_ms rejected
+    with pytest.raises(ValueError, match="positive"):
+        run_elevated_wb(["apply"], windll_override=MagicMock(), timeout_ms=0)
+
+    # 3. Null hProcess after ShellExecuteExW returns 1 fails explicitly
+    null_handle_dll = MagicMock()
+    null_handle_dll.shell32.ShellExecuteExW.return_value = 1
+    with (
+        patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
+        patch("winbearable.uac.ctypes.sizeof", return_value=64),
+        patch("winbearable.uac.ctypes.byref"),
+        pytest.raises(UacElevationError, match="without returning a process handle"),
+    ):
+        inst = MagicMock()
+        inst.hProcess = None
+        mock_sei_cls.return_value = inst
+        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=null_handle_dll)
+
+    # 4. WAIT_TIMEOUT terminates child, waits grace period, closes handle, and warns to run doctor/recover
+    timeout_dll = MagicMock()
+    timeout_dll.shell32.ShellExecuteExW.return_value = 1
+    timeout_dll.kernel32.WaitForSingleObject.side_effect = [WAIT_TIMEOUT, WAIT_OBJECT_0]
+    with (
+        patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
+        patch("winbearable.uac.ctypes.sizeof", return_value=64),
+        patch("winbearable.uac.ctypes.byref"),
+        pytest.raises(UacTimeoutError, match=r"partially modified.*wb doctor.*wb recover"),
+    ):
+        inst = MagicMock()
+        inst.hProcess = 456
+        mock_sei_cls.return_value = inst
+        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=timeout_dll, timeout_ms=250)
+    timeout_dll.kernel32.TerminateProcess.assert_called_once_with(456, 1)
+    timeout_dll.kernel32.CloseHandle.assert_called_once_with(456)
+
+    # 5. WAIT_FAILED raises UacElevationError and still closes handle
+    failed_dll = MagicMock()
+    failed_dll.shell32.ShellExecuteExW.return_value = 1
+    failed_dll.kernel32.WaitForSingleObject.return_value = WAIT_FAILED
+    failed_dll.kernel32.GetLastError.return_value = 6
+    with (
+        patch("winbearable.uac.ctypes.get_last_error", return_value=0, create=True),
+        patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
+        patch("winbearable.uac.ctypes.sizeof", return_value=64),
+        patch("winbearable.uac.ctypes.byref"),
+        pytest.raises(UacElevationError, match="Win32 error 6"),
+    ):
+        inst = MagicMock()
+        inst.hProcess = 789
+        mock_sei_cls.return_value = inst
+        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=failed_dll)
+    failed_dll.kernel32.CloseHandle.assert_called_once_with(789)
+
+    # 6. Bounded output helper handles absent file and truncates oversized output
+    assert _read_bounded_uac_output(tmp_path / "missing.txt") == ""
+    big_out = tmp_path / "big.txt"
+    big_out.write_text("A" * 40, encoding="utf-8")
+    bounded = _read_bounded_uac_output(big_out, max_bytes=16)
+    assert bounded.startswith("A" * 16)
+    assert "truncated at 16 bytes" in bounded
