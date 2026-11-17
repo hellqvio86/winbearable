@@ -646,7 +646,7 @@ def _read_git_system_credential_helpers(git_config_path: Path | None = None) -> 
             for line in res.stdout.splitlines()
             if (cleaned := line.replace("\x00", "").lstrip("\ufeff").strip())
         ]
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return []
 
 

@@ -164,7 +164,7 @@ class StateStore:
             try:
                 resolved_entry = entry.resolve()
                 resolved_entry.relative_to(resolved_root)
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 warnings.append(f"Skipped backup directory outside root: {entry.name}")
                 continue
             candidates.append(entry)

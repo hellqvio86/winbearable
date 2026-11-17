@@ -47,7 +47,7 @@ def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
         proc.kill()
         try:
             proc.communicate(timeout=5.0)
-        except (subprocess.TimeoutExpired, OSError):
+        except subprocess.TimeoutExpired, OSError:
             pass
         finally:
             if proc.stdout is not None:
@@ -185,7 +185,7 @@ def get_wsl_hyperv_firewall_setting(
     exec_fn = runner or _default_ps_runner
     try:
         res = exec_fn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script])
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     if res.returncode != 0:
         return None

@@ -1138,7 +1138,7 @@ class NativeSystemBackend:
                 try:
                     proc.kill()
                     proc.communicate(timeout=2.0)
-                except (OSError, subprocess.SubprocessError):
+                except OSError, subprocess.SubprocessError:
                     pass
             raw_out = (
                 exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -1508,7 +1508,7 @@ class NativeSystemBackend:
                 page_size = sysconf("SC_PAGE_SIZE")
                 page_count = sysconf("SC_PHYS_PAGES")
                 return max(4 * GIB_BYTES, int(page_size) * int(page_count))
-            except (AttributeError, ValueError, OSError):
+            except AttributeError, ValueError, OSError:
                 pass
         return 16 * GIB_BYTES
 
