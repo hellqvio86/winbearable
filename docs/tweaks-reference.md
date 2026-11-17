@@ -14,6 +14,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `bloat.remove_clipchamp` | `bloat` | No | `low` | — | *opt-in* | Remove Microsoft Clipchamp |
 | `bloat.remove_feedback_hub` | `bloat` | No | `low` | — | *opt-in* | Remove Feedback Hub |
 | `dev.developer_mode` | `dev` | Yes | `medium` | — | *opt-in* | Enable Windows Developer Mode (Unprivileged Symlinks) |
+| `dev.enable_windows_containers` | `dev` | Yes | `medium` | — | *opt-in* | Enable Windows Containers Optional Feature |
 | `dev.fix_ssh_key_permissions` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Restrict %USERPROFILE%\.ssh ACLs to Current User Only |
 | `dev.git_sane_defaults` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Configure Sane Global Git Defaults (LF, Symlinks, LongPaths, main) |
 | `dev.long_paths` | `dev` | Yes | `low` | — | `dev-comfort` | Enable Win32 Long Paths (> 260 chars) |

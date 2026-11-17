@@ -584,3 +584,19 @@ def test_controlled_folder_access_audit_and_inactivity_lock_roundtrip(state_stor
     reg.set_value(HIVE_HKLM, DEFENDER_FEATURES_KEY, "TamperProtection", 5, REG_DWORD)
     cfa_res = detect_tweak(get_tweak("hardening.defender_controlled_folder_access_audit"), env, reg, sys_b)
     assert cfa_res.status == TweakStatus.BLOCKED_BY_POLICY
+
+
+def test_enable_windows_containers_roundtrip(state_store: StateStore) -> None:
+    """dev.enable_windows_containers enables Containers optional feature and rolls back cleanly."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+    prof = ProfileSpec(name="containers", description="containers", tweaks={"dev.enable_windows_containers": True})
+
+    assert detect_tweak(get_tweak("dev.enable_windows_containers"), env, reg, sys_b).status == TweakStatus.DRIFTED
+    summary = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert "dev.enable_windows_containers" in summary.applied_ids
+    assert detect_tweak(get_tweak("dev.enable_windows_containers"), env, reg, sys_b).status == TweakStatus.APPLIED
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert detect_tweak(get_tweak("dev.enable_windows_containers"), env, reg, sys_b).status == TweakStatus.DRIFTED
