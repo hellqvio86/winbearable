@@ -554,6 +554,9 @@ class SystemBackend(Protocol):
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         """Inspect host environment using native registry and Win32 APIs."""
 
+    def get_service_state(self, registry: RegistryBackend, service_name: str) -> tuple[str, int | None]:
+        """Return ('present', start_type), ('absent', None), or ('unreadable', None) for a service."""
+
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
         """Read service Start type (2=Auto, 3=Manual, 4=Disabled) from HKLM\\SYSTEM\\CurrentControlSet\\Services."""
 
@@ -676,6 +679,20 @@ class SystemBackend(Protocol):
         """Restrict directory/file ACL to current user via icacls.exe."""
 
 
+def _read_service_start_state(registry: RegistryBackend, service_name: str) -> tuple[str, int | None]:
+    """Distinguish 'absent' service key, 'unreadable' Start value, and 'present' Start int."""
+    svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
+    if not registry.key_exists(HIVE_HKLM, svc_key):
+        return ("absent", None)
+    val = registry.get_value(HIVE_HKLM, svc_key, "Start")
+    if val is None or isinstance(val[0], bool) or not isinstance(val[0], (int, str)):
+        return ("unreadable", None)
+    try:
+        return ("present", int(val[0]))
+    except ValueError:
+        return ("unreadable", None)
+
+
 class InMemorySystemBackend:
     """Deterministic fake system backend for unit testing on Linux and Windows."""
 
@@ -786,15 +803,17 @@ class InMemorySystemBackend:
             observations=observations,
         )
 
+    def get_service_state(self, registry: RegistryBackend, service_name: str) -> tuple[str, int | None]:
+        return _read_service_start_state(registry, service_name)
+
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
-        svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
-        val = registry.get_value(HIVE_HKLM, svc_key, "Start")
-        if val is None or not isinstance(val[0], (int, str)):
-            return None
-        return int(val[0])
+        state, val = _read_service_start_state(registry, service_name)
+        return val if state == "present" else None
 
     def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> bool:
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
+        if not registry.key_exists(HIVE_HKLM, svc_key):
+            return False
         registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
         return True
 
@@ -1253,21 +1272,24 @@ class NativeSystemBackend:
             observations=observations,
         )
 
+    def get_service_state(self, registry: RegistryBackend, service_name: str) -> tuple[str, int | None]:
+        return _read_service_start_state(registry, service_name)
+
     def get_service_start_type(self, registry: RegistryBackend, service_name: str) -> int | None:
-        svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
-        val = registry.get_value(HIVE_HKLM, svc_key, "Start")
-        if val is None or not isinstance(val[0], (int, str)):
-            return None
-        return int(val[0])
+        state, val = _read_service_start_state(registry, service_name)
+        return val if state == "present" else None
 
     def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> bool:
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
-        registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
+        if not registry.key_exists(HIVE_HKLM, svc_key):
+            return False
         if self._platform == "win32":
             start_map = {2: "auto", 3: "demand", 4: "disabled"}
             sc_mode = start_map.get(start_type, "demand")
             res = self._run_native_cmd(["sc.exe", "config", service_name, f"start={sc_mode}"])
-            return res.returncode == 0
+            if res.returncode != 0:
+                return False
+        registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
         return True
 
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:

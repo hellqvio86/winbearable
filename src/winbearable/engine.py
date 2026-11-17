@@ -815,11 +815,20 @@ def _compensate_run_record(
         except Exception as exc:
             errors.append(f"registry_key {key_snap.hive}\\{key_snap.key_path}: {exc}")
     for svc_snap in reversed(run_record.service_snapshots):
-        if svc_snap.previous_start_type is not None:
-            if not system.set_service_start_type(registry, svc_snap.service_name, svc_snap.previous_start_type):
-                errors.append(f"service {svc_snap.service_name}")
-        else:
-            registry.delete_value(HIVE_HKLM, f"SYSTEM\\CurrentControlSet\\Services\\{svc_snap.service_name}", "Start")
+        try:
+            if svc_snap.previous_start_type is not None:
+                if not system.set_service_start_type(registry, svc_snap.service_name, svc_snap.previous_start_type):
+                    errors.append(f"service {svc_snap.service_name}")
+            elif getattr(svc_snap, "created_by_run", False):
+                registry.delete_value(
+                    HIVE_HKLM, f"SYSTEM\\CurrentControlSet\\Services\\{svc_snap.service_name}", "Start"
+                )
+            else:
+                errors.append(
+                    f"service {svc_snap.service_name}: missing/unreadable previous Start type; refusing to delete"
+                )
+        except Exception as exc:
+            errors.append(f"service {svc_snap.service_name}: {exc}")
     for task_snap in reversed(run_record.task_snapshots):
         if task_snap.previous_enabled is not None and not system.set_scheduled_task_enabled(
             task_snap.task_path, task_snap.previous_enabled

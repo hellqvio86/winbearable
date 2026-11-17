@@ -514,6 +514,7 @@ def test_randomized_apply_rollback_and_recover_property(tmp_path: Path) -> None:
 def test_new_tweaks_roundtrip_and_tamper_protection(state_store: StateStore) -> None:
     """TWK-A..J: Representative new tweaks roundtrip cleanly and TWK-H honours Tamper Protection."""
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = sys_b.detect_environment(reg)
 
@@ -567,6 +568,7 @@ def test_bloat_remove_appx_opt_in_irreversible_guard(state_store: StateStore) ->
 def test_controlled_folder_access_audit_and_inactivity_lock_roundtrip(state_store: StateStore) -> None:
     """hardening.defender_controlled_folder_access_audit & inactivity_lock roundtrip and honour Tamper Protection."""
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = sys_b.detect_environment(reg)
     ids = ["hardening.defender_controlled_folder_access_audit", "hardening.inactivity_lock"]
@@ -589,6 +591,7 @@ def test_controlled_folder_access_audit_and_inactivity_lock_roundtrip(state_stor
 def test_enable_windows_containers_roundtrip(state_store: StateStore) -> None:
     """dev.enable_windows_containers enables Containers optional feature and rolls back cleanly."""
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = sys_b.detect_environment(reg)
     prof = ProfileSpec(name="containers", description="containers", tweaks={"dev.enable_windows_containers": True})
@@ -661,6 +664,7 @@ def test_parameterized_tweaks_and_terminal_nerd_font_roundtrip(
     from winbearable.engine import evaluate_profile
 
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = sys_b.detect_environment(reg)
 
@@ -734,6 +738,7 @@ def test_parameterized_tweaks_and_terminal_error_paths(
     from winbearable.engine import evaluate_profile
 
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = sys_b.detect_environment(reg)
 
@@ -844,6 +849,7 @@ def test_defender_asr_mode_selection_block_and_invalid_param(state_store: StateS
     from winbearable.engine import evaluate_profile
 
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = sys_b.detect_environment(reg)
 
@@ -937,6 +943,7 @@ def test_operation_adapters_surface_structured_outcomes_on_failure(
     from winbearable.models import OperationOutcome, OperationStatus, TransactionState
 
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = sys_b.detect_environment(reg)
 
@@ -985,6 +992,7 @@ def test_file_config_sha256_drift_refusal_and_managed_device_guard(
 
     # Managed device (MDM) skips machine-scope tweaks unless --allow-managed
     reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
     env = replace(sys_b.detect_environment(reg), mdm_enrolled=True)
     owner_prof = load_profile("owner")

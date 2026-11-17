@@ -44,7 +44,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** mark rolled-back records `ROLLED_BACK` (keep them, subject to retention) instead of deleting; fail-fast on the first failing run and leave older runs untouched; make `rollback` select only `COMMITTED` runs by default.
 - **Done when:** test with two overlapping runs where the newer rollback fails: older run is not touched, state is unambiguous, `recover` is idempotent. Rolled-back runs remain listed in `wb history`/state with `ROLLED_BACK`.
 
-### R-03 · P0 · `REPRODUCED` — Service handling: writes stub service keys; rollback deletes `Start`
+### [x] R-03 · P0 · `REPRODUCED` — Service handling: writes stub service keys; rollback deletes `Start`
 - **Where:** `backends/system.py:1258-1266` (`set_service_start_type` writes `HKLM\SYSTEM\CCS\Services\<name>\Start` unconditionally), `engine.py:820` (rollback `delete_value(..., "Start")` when `previous_start_type is None`).
 - **Evidence (repro):** `services.disable_xbox` on a machine without `XboxGipSvc`: apply creates `Start=4` for a service that does not exist; rollback deletes only the value. On real Windows this leaves an empty service key.
 - **Second hazard:** `get_service_start_type` returns `None` both for "service absent" *and* for "value unreadable / wrong type" (`system.py:1254`, and `int(val[0])` can raise `ValueError` on a `str`). In the unreadable case rollback would delete the `Start` value of a service that exists.
