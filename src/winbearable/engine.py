@@ -660,8 +660,8 @@ def _collect_pre_apply_snapshots(
     icacls_snapshots: list[IcaclsSnapshot] = []
     file_snapshots: list[FileSnapshot] = []
 
-    seen_reg_keys: set[tuple[str, str, str]] = set()
-    seen_del_keys: set[tuple[str, str]] = set()
+    seen_reg_keys: set[tuple[str, str, str, str]] = set()
+    seen_del_keys: set[tuple[str, str, str]] = set()
     seen_services: set[str] = set()
     seen_tasks: set[str] = set()
     seen_features: set[str] = set()
@@ -685,14 +685,14 @@ def _collect_pre_apply_snapshots(
         for raw_spec in tweak.registry_specs:
             for reg_spec in expand_registry_spec(raw_spec, registry):
                 if reg_spec.action == ACTION_DELETE_KEY:
-                    del_id = (reg_spec.hive, reg_spec.key_path)
+                    del_id = (reg_spec.hive, reg_spec.key_path, str(reg_spec.view))
                     if del_id not in seen_del_keys:
                         reg_key_snapshots.append(
                             registry.snapshot_key(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)
                         )
                         seen_del_keys.add(del_id)
                 else:
-                    reg_id = (reg_spec.hive, reg_spec.key_path, reg_spec.value_name)
+                    reg_id = (reg_spec.hive, reg_spec.key_path, reg_spec.value_name, str(reg_spec.view))
                     if reg_id not in seen_reg_keys:
                         reg_snapshots.append(
                             registry.snapshot_value(
@@ -1470,6 +1470,7 @@ def _apply_profile_locked(
                             wslconfig_path=wslconfig_path,
                             distros=distros,
                             create_host_backup=True,
+                            backup_dir=backup_dir,
                         )
                         wsl_backup_path = (
                             str(prepared_wsl.backup_path) if prepared_wsl.backup_path is not None else None
