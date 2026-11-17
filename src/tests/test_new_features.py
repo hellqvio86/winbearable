@@ -1159,3 +1159,38 @@ def test_wsl_write_ahead_journal_before_mutation_and_probe_error_refusal(
             plan_or_apply_wsl(
                 WslConfigSpec(enabled=True), sys_b, wslconfig_path=wslconfig, distro="PermDenied", dry_run=False
             )
+
+
+def test_wsl_permission_error_with_zero_drifted_tweaks_does_not_strand_applying(
+    state_store: StateStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-06: PermissionError in WSL step with zero drifted tweaks transitions to ROLLED_BACK, not stranded APPLYING."""
+    from winbearable.models import TransactionState, WslConfigSpec
+
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True, wsl_installed=True, wsl_distros=())
+    env = sys_b.detect_environment(reg)
+    prof = ProfileSpec(name="wsl-only", description="wsl-only", tweaks={}, wsl=WslConfigSpec(enabled=True))
+
+    with (
+        patch("winbearable.wsl.get_default_wslconfig_path", return_value=tmp_path / ".wslconfig"),
+        patch("winbearable.engine.apply_wslconfig_target", side_effect=PermissionError("read-only .wslconfig")),
+    ):
+        summary = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+
+    assert summary.wsl_result is not None
+    assert summary.wsl_result.get("skipped") is True
+    assert state_store.get_incomplete_runs() == []
+    runs = state_store.load_runs()
+    assert runs and runs[-1].state == TransactionState.ROLLED_BACK
+
+    # Subsequent apply succeeds without IncompleteJournalError
+    with (
+        patch("winbearable.wsl.get_default_wslconfig_path", return_value=tmp_path / ".wslconfig"),
+        patch("winbearable.engine.apply_wslconfig_target"),
+    ):
+        summary2 = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert summary2.failed_ids == ()

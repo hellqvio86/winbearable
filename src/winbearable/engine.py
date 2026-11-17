@@ -1369,6 +1369,7 @@ def apply_profile(
                 state_store.upsert_run(_make_record(TransactionState.APPLYING))
             else:
                 if profile.wsl.enabled and env.wsl_installed:
+                    wsl_changed = False
                     try:
                         distros = tuple(env.wsl_distros)
                         prepared_wsl = prepare_wsl_plan(
@@ -1438,6 +1439,14 @@ def apply_profile(
                         wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
                         if drifted_indices:
                             state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                            run_id = run_id_candidate
+                        elif wsl_changed:
+                            state_store.upsert_run(
+                                _make_record(
+                                    TransactionState.ROLLED_BACK,
+                                    error=f"WSL skipped due to PermissionError: {exc}",
+                                )
+                            )
                             run_id = run_id_candidate
                     except (WslOperationError, OSError) as exc:
                         err_msg = str(exc)

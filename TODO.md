@@ -63,7 +63,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** acquire `transaction_lock()` before the incomplete-journal check and re-run `evaluate_profile` inside it.
 - **Done when:** a two-thread/two-process test applies the same profile concurrently and ends with exactly one committed run containing the real pre-state.
 
-### R-06 · P1 · `CODE` — `PermissionError` in the WSL step can strand an `APPLYING` journal
+### [x] R-06 · P1 · `CODE` — `PermissionError` in the WSL step can strand an `APPLYING` journal
 - **Where:** `engine.py:1381-1426`.
 - **Problem:** when no registry tweak drifted but WSL changed, the run is upserted `APPLYING` (`engine.py:1382`) before `apply_wslconfig_target` (`:1384`). A `PermissionError` (read-only `.wslconfig`, AV lock) hits the `except PermissionError` branch, which commits only `if drifted_indices:`. With no drifted tweaks the record stays `APPLYING`, and every later `apply` is blocked until `wb recover --apply`.
 - **Fix:** on that branch, transition the run to `ROLLED_BACK` (nothing was mutated) or `COMMITTED` consistently; write a test per branch of the WSL `try/except`.
