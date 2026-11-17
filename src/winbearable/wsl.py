@@ -477,6 +477,13 @@ def _audit_credential_hygiene(
         if dir_mode & 0o077:
             issues.append(f"{target_ssh} permissions are {ssh_dir_mode} (expected 0o700)")
         for entry in sorted(target_ssh.iterdir()):
+            if entry.is_symlink():
+                try:
+                    resolved = str(entry.resolve()).lower()
+                except OSError:
+                    resolved = ""
+                if "/mnt/c/users" in resolved:
+                    issues.append(f"SSH entry {entry} symlinks into Windows /mnt/c/Users ({resolved})")
             if not entry.is_file():
                 continue
             name = entry.name

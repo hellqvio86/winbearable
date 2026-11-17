@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.9] - 2026-11-17
+
+### Improved & Verified
+
+- **P1.6 (State rotation):** Added tests in `test_new_features.py` verifying `StateStore` prunes old runs/backup dirs to `DEFAULT_MAX_RUN_HISTORY`/`DEFAULT_MAX_BACKUP_DIRS` while preserving incomplete runs.
+- **P1-L.3 (Credential hygiene):** Extended `_audit_credential_hygiene` in `wsl.py` to flag `~/.ssh` symlinks pointing into `/mnt/c/Users` and added clean/dirty tests.
+- **P1-L.2:** Verified `wb plan` and `wb apply` baseline reminder messaging.
+
 ## [0.9.8] - 2026-11-17
 
 ### Fixed & Improved
