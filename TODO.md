@@ -69,7 +69,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** on that branch, transition the run to `ROLLED_BACK` (nothing was mutated) or `COMMITTED` consistently; write a test per branch of the WSL `try/except`.
 - **Done when:** test with a read-only `.wslconfig` and zero drifted tweaks: no incomplete run remains and apply can be re-run.
 
-### R-07 · P1 · `NEEDS-WINDOWS` — `/etc/wsl.conf` written via `tee` gets CRLF; verification cannot see it
+### [x] R-07 · P1 · `NEEDS-WINDOWS` — `/etc/wsl.conf` written via `tee` gets CRLF; verification cannot see it
 - **Where:** `wsl.py:502` (apply), `engine.py:903` (restore), `wsl.py:1157` (sysctl), `backends/system.py:1097-1107` (`Popen(text=True, encoding="utf-8")`).
 - **Evidence:** CPython builds the child's stdin as `io.TextIOWrapper(..., write_through=True, line_buffering=..., encoding=..., errors=...)` with no `newline=` argument (`subprocess.Popen.__init__`). On Windows that translates `\n` → `\r\n` on write. Linux files written through `wsl ... tee` therefore likely get CRLF. `wsl.py:507` verifies by `cat` and comparing, but stdout is read in universal-newline mode, so CRLF is normalised back to LF and the check passes anyway.
 - **Why it matters:** CRLF in `/etc/wsl.conf` is a known source of silently ignored keys (`systemd=true\r`). Restore on rollback has the same defect, so byte-fidelity is lost.

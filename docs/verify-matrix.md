@@ -33,3 +33,4 @@ Host verified: **Windows 11 Build `26300` (`Professional`, `Python 3.15.2`, `wsl
 | **P1.1–P1.2, P1.4, P1.6–P1.8** Reliability hardening | Yes | Yes (`test_state_ini_file_and_timeout_hardening`) | Covered via unit tests + HKCU integration (`7 passed`) |
 | **P1.3 & P1.5** `restore_from_backup()` & byte-exact `FileSnapshot` | Yes | Yes (`test_state_ini_file_and_timeout_hardening`) | Verified on Windows 11 (`test_windows_state_restore_and_byte_exact_file_snapshot`) |
 | **P1.9** Non-registry evidence metadata | Yes | Yes (`test_catalog_non_registry_evidence_metadata`) | `sc.exe` & `auditpol.exe` snapshot capture (`test_readonly_identifier_snapshot_capture`) |
+| **R-07** WSL `/etc/wsl.conf` LF-only stdin & CRLF lint | Yes | Yes (`test_wsl_conf_lf_bytes_sha256_verify_and_crlf_lint`) | Live `Ubuntu` `od -c` pipe (`0000000   [   b   o   o   t   ]  \n   s   y   s   t   e   m   d   =   t\n0000020   r   u   e  \n`, zero `\r`) & `lint_wsl_conf_lf` clean |
