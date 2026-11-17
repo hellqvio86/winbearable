@@ -228,8 +228,8 @@ Sets `HKLM\...\Internet Settings\Wpad[WpadOverride]=1`. The Microsoft-documented
 - **Fix:** add a read-only `windows-latest` job (no mutation) that runs the integration tests with `WINBEARABLE_BUILD_OVERRIDE`, captures real command outputs as fixtures, and fails on parser drift. Keep mutation tests local/VM only. Amend AGENTS.md rule 4 accordingly.
 - **Done when:** PR CI runs a Windows read-only suite and uploads captured outputs.
 
-### CI-05 · P2 · `CODE` — Two dependency bots
-Both `.github/dependabot.yml` and `renovate.json` (+ `bin/renovate/run.sh`) exist. Pick one to avoid duplicate/conflicting PRs.
+### [x] CI-05 · P2 · `CODE` — Two dependency bots
+- *By design (documented in `docs/dependency-management.md`): Dependabot handles automated CI/CD updates, Renovate (`bin/renovate/run.sh`) handles ad-hoc runs.*
 
 ### CI-06 · P2 · `CODE` — Coverage gate hides weak modules
 Global floor 80 % passes at 90.6 %, but `audit.py` is 56 % (most `_check_*` functions, lines 204-340, 406-511) and `profiles.py` 82 %. Add per-module floors (`audit.py`, `engine.py`, `operations.py`, `state.py`, `uac.py` ≥ 90 %) and mutation testing on `engine.py`/`state.py`/`operations.py` (e.g. `mutmut`); the in-memory fakes make line coverage a poor proxy here (R-01…R-06 all sit on "covered" lines).
