@@ -18,3 +18,43 @@
 - **Policy Honesty (`BLOCKED_BY_POLICY`):** `winbearable` never bypasses Group Policy (GPO), Microsoft Intune / MDM (`PolicyManager`), Defender Tamper Protection, AppLocker, or Windows Defender Application Control (WDAC). Conflicting policies are reported as `blocked_by_policy` and skipped.
 - **Managed Device Guard (`--allow-managed`):** When a host is detected as Domain-joined, Microsoft Entra-joined, or MDM-enrolled, machine-scope (`requires_admin`) tweaks are skipped by default with reason `managed_device` unless `--allow-managed` is explicitly passed.
 - **Supported OS Scope:** Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT (`IoTEnterprise`, `IoTEnterpriseS`), Windows LTSC (`EnterpriseS`), Windows Server, and older builds (`< 26300`) are strictly unsupported.
+
+## 4. Mirrored Networking & WSL2 Threat Clarity (`P1-L.4`)
+
+- **Host Firewall Is the Primary Boundary:** Under `networkingMode=mirrored`, the WSL2 VM shares the Windows host's network interfaces and IP addresses. Inbound/outbound traffic filtering relies on the Windows Host Firewall (and optional `wb wsl firewall` Hyper-V VM default-deny rules via `DEC-01`), **not** an isolated NAT subnet.
+- **WSL2 Is Not a Sandbox:** Even with `strict` mode or Hyper-V firewall rules, WSL2 is a developer VM, not a hardened security sandbox.
+- **`/mnt/c` Follows Windows DAC/NTFS ACLs:** Any Linux process with `[automount] enabled=true` accesses `/mnt/c` under your Windows user's discretionary access control (DAC) token; restrict sensitive keys (`~/.ssh`, Windows credentials) accordingly.
+
+## 5. Compensation & Rollback Matrix (`P1.1`)
+
+| Operation Type | Reversibility | Rollback / Compensation Behavior |
+| --- | --- | --- |
+| **Registry value / key** (`RegistrySpec`) | `reversible` | Restores prior value/type or deletes newly created value/key; admin runs also export `.reg` backups. |
+| **Windows service** (`ServiceSpec`) | `reversible` | Restores prior `Start` type (`sc.exe config` / registry). |
+| **Scheduled task** (`ScheduledTaskSpec`) | `reversible` | Re-enables/disables task via `schtasks.exe /Change`. |
+| **Optional feature** (`OptionalFeatureSpec`) | `reversible` | Restores prior feature state via `dism.exe` (reboot may be required). |
+| **Auditpol subcategory** (`AuditpolSpec`) | `reversible` | Restores CSV backup via `auditpol.exe /restore` or per-GUID `/set`. |
+| **Event log config** (`WevtutilSpec`) | `reversible` | Restores prior enabled state and `maxSize` via `wevtutil.exe sl`. |
+| **Firewall rule group** (`FirewallGroupSpec`) | `reversible` | Restores `.wfw` policy export via `netsh advfirewall import` or group `enable=yes/no`. |
+| **NTFS case sensitivity** (`FsutilCaseSensitiveSpec`) | `best-effort` | Restores prior attribute via `fsutil.exe`; Windows refuses disabling on non-empty directories. |
+| **Hibernation** (`PowercfgHibernateSpec`) | `reversible` | Restores prior hibernation state via `powercfg.exe /hibernate`. |
+| **Git global config** (`GitConfigSpec`) | `reversible` | Restores prior value or unsets key via `git.exe config --global`. |
+| **File config merge** (`FileSpec`) | `reversible` | Restores exact prior content atomically (or deletes newly created file); refuses JSONC with comments or SHA-256 drift. |
+| **Winget install / VS Code ext** (`WingetSpec`) | `reversible` | Uninstalls newly installed package/extension on rollback. |
+| **Winget uninstall / Appx removal** (`bloat.*`, `ai.remove_copilot_app`) | `irreversible` | Cannot be reinstalled automatically; requires `--allow-irreversible`. |
+| **OneDrive client uninstall** (`onedrive.uninstall`) | `irreversible` | Deletes client binaries; requires manual reinstall and `--allow-irreversible`. |
+| **Process stop** (`stop_processes`) | `best-effort` | Stopped processes (`OneDrive.exe`) are not restarted on rollback. |
+| **SSH ACL restriction** (`IcaclsUserOnlySpec`) | `best-effort` | Tightens `%USERPROFILE%\.ssh` to current user only; prior permissive ACEs are not restored. |
+| **WSL host `.wslconfig`** | `reversible` | Restores `.wslconfig.bak` on failure or rollback. |
+| **WSL distro `/etc/wsl.conf`** | `reversible` | Restores `WslDistroSnapshot` (`tee /etc/wsl.conf` or `rm -f /etc/wsl.conf`) per modified distro. |
+| **Hyper-V WSL firewall** (`DEC-01`) | `reversible` | Configurable via `wb wsl firewall --disable --apply` (not auto-reverted by profile rollback). |
+
+## 6. Stable CLI Exit Code Taxonomy (`P2-Q.1`)
+
+| Code | Constant | Meaning |
+| --- | --- | --- |
+| `0` | `EXIT_SUCCESS` | Command succeeded (or dry-run with no pending changes). |
+| `1` | `EXIT_ERROR` | Hard error (invalid profile/args, incomplete journal, I/O or execution failure). |
+| `2` | `EXIT_PENDING_CHANGES` | Dry-run (`plan` / `apply` / `status` / `rollback`) found pending changes or drift. |
+| `3` | `EXIT_BLOCKED` | Blocked by policy, missing Admin (`REQUIRES_ADMIN`), high-risk/irreversible confirmation missing, or `audit` high-severity findings. |
+| `4` | `EXIT_UNSUPPORTED_PLATFORM` | Non-Windows host on `--apply`, unsupported Windows build (`< 26300`), or unsupported IoT/LTSC edition. |

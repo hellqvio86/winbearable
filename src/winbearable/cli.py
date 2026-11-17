@@ -240,7 +240,10 @@ def build_parser() -> argparse.ArgumentParser:
     """Construct the CLI argument parser for `wb`."""
     parser = argparse.ArgumentParser(
         prog="wb",
-        description="Make Windows + WSL2 bearable (and locked down) for Linux people — native Python, zero PowerShell.",
+        description=(
+            "Make Windows + WSL2 bearable (and locked down) for Linux people — "
+            "native Python, zero PowerShell for core tweaks (optional DEC-01 Hyper-V firewall only)."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"winbearable {__version__}")
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks on unexpected errors")
@@ -602,11 +605,16 @@ def _run_cli_body(
                     "wsl_performance_note": "Windows host registry unavailable.",
                 }
             )
+            clm_finding = next((f for f in security_findings if f.check_id == "chk.powershell_clm"), None)
+            hyperv_fw_available = not (
+                clm_finding is not None and clm_finding.observation.state == ObservationState.ENABLED
+            )
             refugee_summary = {
                 "windows_build_supported": env.windows_build >= MIN_SUPPORTED_BUILD if env.windows_build else False,
                 "secure_boot_enabled": env.secure_boot_enabled,
                 "domain_or_mdm_leftovers": bool(env.domain_joined or env.entra_joined or env.mdm_enrolled),
                 "wsl_installed": env.wsl_installed,
+                "wsl_version": env.wsl_version,
                 "wsl_distros": list(env.wsl_distros),
                 "default_wsl_distro": wsl_info.get("default_wsl_distro") if isinstance(wsl_info, dict) else None,
                 "default_distro_is_fedora": (
@@ -621,6 +629,7 @@ def _run_cli_body(
                     if mirrored
                     else "Default NAT networking."
                 ),
+                "hyperv_firewall_available": hyperv_fw_available,
                 "sysctl_baseline_compliant": bool(linux_info.get("sysctl_baseline_applied")),
                 "credential_hygiene": linux_info.get("credential_hygiene", {}),
                 "incomplete_runs_count": len(incomplete_runs),
@@ -720,7 +729,8 @@ def _run_cli_body(
                         f"build_supported={refugee_summary['windows_build_supported']} "
                         f"| enterprise_leftovers={refugee_summary['domain_or_mdm_leftovers']} "
                         f"| policy_blocked={len(policy_blocked)} "
-                        f"| mirrored={mirrored}\n"
+                        f"| mirrored={mirrored} "
+                        f"| hyperv_fw_avail={hyperv_fw_available}\n"
                         f"  Firewall Note: {refugee_summary['mirrored_firewall_note']}\n"
                     )
                 if incomplete_runs:

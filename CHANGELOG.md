@@ -2,6 +2,15 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.8] - 2026-11-17
+
+### Fixed & Improved
+
+- **P0.1 (PowerShell/CLM honesty):** Reconciled `README.md`, `cli.py`, and `audit.py` (`chk.powershell_clm`, `chk.hyperv_firewall`) with the narrow `DEC-01` Hyper-V firewall exception; CLM hosts clearly report `wb wsl firewall` as unavailable.
+- **P0.2 (Multi-distro WSL journal):** Added `WslDistroSnapshot` on `RunRecord` and `transaction_lock()` / compensation for WSL-only applies; failures restore `.wslconfig` and all already-modified per-distro `/etc/wsl.conf` files.
+- **P0.3 / P1.7 (Outcomes & Hyper-V runner):** Added adapter failure-outcome tests (`TIMEOUT`, `ACCESS_DENIED`, `TOOL_MISSING`), `Popen` + `taskkill /T /F` timeout discipline, and `PARSE_ERROR` reporting in `hyperv_firewall.py`.
+- **P0.4 / P0.5:** Added `docs/verify-matrix.md` + read-only host snapshot capture in `test_windows_integration.py`, and made `hypothesis` optional via `pytest.importorskip` in `test_property_invariants.py`.
+
 ## [0.9.7] - 2026-11-17
 
 ### Added

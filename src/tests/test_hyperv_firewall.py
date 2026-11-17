@@ -164,6 +164,38 @@ def test_check_hyperv_firewall_audit_states() -> None:
         f_unk = _check_hyperv_firewall()
         assert f_unk.observation.state == ObservationState.UNKNOWN
 
+    f_clm = _check_hyperv_firewall(powershell_clm_active=True)
+    assert f_clm.observation.state == ObservationState.UNKNOWN
+    assert "Constrained Language Mode" in f_clm.observation.evidence
+
+    def _blocked_ps(_cmd: list[str]) -> Any:
+        raise PermissionError("powershell.exe blocked by AppLocker")
+
+    blocked_res = set_wsl_hyperv_firewall_setting(
+        dry_run=False,
+        runner=_blocked_ps,
+        platform_override="win32",
+    )
+    assert blocked_res["returncode"] == 1
+    assert "AppLocker" in str(blocked_res["error"])
+
+    # P1.7: Timeout and invalid JSON parse failures return structured errors, never success
+    import subprocess
+
+    def _timeout_ps(_cmd: list[str]) -> Any:
+        raise subprocess.TimeoutExpired(cmd=_cmd, timeout=15.0)
+
+    to_res = set_wsl_hyperv_firewall_setting(dry_run=False, runner=_timeout_ps, platform_override="win32")
+    assert to_res["returncode"] == 124
+    assert "TIMEOUT" in str(to_res["error"])
+
+    def _bad_json_ps(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, "not-valid-json", "")
+
+    parse_res = set_wsl_hyperv_firewall_setting(dry_run=False, runner=_bad_json_ps, platform_override="win32")
+    assert parse_res["returncode"] == 1
+    assert "PARSE_ERROR" in str(parse_res["error"])
+
     with patch(
         "winbearable.hyperv_firewall.get_wsl_hyperv_firewall_setting",
         return_value={"enabled": True, "default_inbound_action": "Block", "default_outbound_action": "Allow"},

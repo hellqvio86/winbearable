@@ -722,7 +722,10 @@ def _check_powershell_clm(registry: RegistryBackend) -> AuditFinding:
         f"registry:{env_key}\\__PSLockdownPolicy",
         ObservationConfidence.HIGH,
         f"__PSLockdownPolicy={'4' if active else 'unset'}",
-        "PowerShell CLM check (informational: wb never uses PowerShell).",
+        (
+            "PowerShell CLM check (core tweaks/audits never use PowerShell; "
+            "optional Hyper-V firewall via DEC-01 is unavailable under CLM)."
+        ),
     )
     return AuditFinding("chk.powershell_clm", "management", "PowerShell Constrained Language Mode", "info", obs)
 
@@ -763,9 +766,29 @@ def _check_winget_and_store_blocked(registry: RegistryBackend) -> tuple[AuditFin
     return wg_find, st_find
 
 
-def _check_hyperv_firewall() -> AuditFinding:
+def _check_hyperv_firewall(*, powershell_clm_active: bool = False) -> AuditFinding:
     # Per DEC-01 & WSL-08: Hyper-V firewall uses the narrowly scoped hyperv_firewall module.
     from .hyperv_firewall import get_wsl_hyperv_firewall_setting
+
+    if powershell_clm_active:
+        obs = PostureObservation(
+            ObservationState.UNKNOWN,
+            "powershell:Get-NetFirewallHyperVVMSetting",
+            ObservationConfidence.NONE,
+            "Hyper-V firewall feature unavailable under PowerShell Constrained Language Mode (CLM).",
+            "Optional DEC-01 Hyper-V firewall requires unrestricted PowerShell NetSecurity cmdlets.",
+        )
+        return AuditFinding(
+            "chk.hyperv_firewall",
+            "wsl",
+            "Hyper-V Firewall Default Action",
+            "info",
+            obs,
+            (
+                "Hyper-V firewall (`wb wsl firewall`) is unavailable under CLM; "
+                "core tweaks and `[wsl]` firewall=true are unaffected."
+            ),
+        )
 
     setting = get_wsl_hyperv_firewall_setting()
     if setting is None:
@@ -864,6 +887,8 @@ def run_security_audit(
 ) -> list[AuditFinding]:
     """Run all read-only Section G security & posture checks."""
     wg_find, st_find = _check_winget_and_store_blocked(registry)
+    clm_finding = _check_powershell_clm(registry)
+    clm_active = clm_finding.observation.state == ObservationState.ENABLED
     findings: list[AuditFinding] = [
         _check_tpm_ready(env, registry),
         _check_bitlocker_protectors(env, registry),
@@ -880,10 +905,10 @@ def run_security_audit(
         _check_edr_present(env),
         _check_defender_exclusions(registry),
         _check_wdac_present(registry),
-        _check_powershell_clm(registry),
+        clm_finding,
         wg_find,
         st_find,
-        _check_hyperv_firewall(),
+        _check_hyperv_firewall(powershell_clm_active=clm_active),
         _check_legacy_tls(registry),
     ]
     if wsl_audit_data is not None:
@@ -1005,7 +1030,10 @@ def build_doctor_blockers(
                 "code": "POWERSHELL_CLM",
                 "severity": "info",
                 "evidence": "__PSLockdownPolicy=4",
-                "remedy": "No impact on winbearable (100% native Python, zero PowerShell).",
+                "remedy": (
+                    "Core winbearable tweaks/audits are unaffected; optional `wb wsl firewall` (DEC-01) "
+                    "is unavailable under CLM."
+                ),
             }
         )
     if (

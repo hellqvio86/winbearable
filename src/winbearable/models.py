@@ -889,6 +889,30 @@ class FileSnapshot:
 
 
 @dataclass(frozen=True)
+class WslDistroSnapshot:
+    """Recorded pre-apply state of a WSL2 distro's /etc/wsl.conf."""
+
+    distro: str
+    existed: bool
+    previous_content: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "distro": self.distro,
+            "existed": self.existed,
+            "previous_content": self.previous_content,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "WslDistroSnapshot":
+        return cls(
+            distro=str(payload["distro"]),
+            existed=bool(payload.get("existed", False)),
+            previous_content=str(payload.get("previous_content", "")),
+        )
+
+
+@dataclass(frozen=True)
 class RunRecord:
     """A single apply transaction stored in state.json for rollback."""
 
@@ -914,6 +938,7 @@ class RunRecord:
     failure_outcomes: tuple[dict[str, Any], ...] = ()
     wsl_backup_path: str | None = None
     wslconfig_path: str | None = None
+    wsl_distro_snapshots: tuple[WslDistroSnapshot, ...] = ()
     state: TransactionState = TransactionState.COMMITTED
     error: str | None = None
 
@@ -942,6 +967,7 @@ class RunRecord:
             "failure_outcomes": list(self.failure_outcomes),
             "wsl_backup_path": self.wsl_backup_path,
             "wslconfig_path": self.wslconfig_path,
+            "wsl_distro_snapshots": [snap.to_dict() for snap in self.wsl_distro_snapshots],
             "state": str(self.state),
             "error": self.error,
         }
@@ -992,6 +1018,9 @@ class RunRecord:
             failure_outcomes=failure_outcomes,
             wsl_backup_path=str(raw_wsl_backup) if raw_wsl_backup is not None else None,
             wslconfig_path=str(raw_wslconfig) if raw_wslconfig is not None else None,
+            wsl_distro_snapshots=tuple(
+                WslDistroSnapshot.from_dict(item) for item in payload.get("wsl_distro_snapshots", [])
+            ),
             state=TransactionState(str(raw_state)),
             error=str(raw_error) if raw_error is not None else None,
         )

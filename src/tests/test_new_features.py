@@ -881,3 +881,125 @@ def test_defender_asr_mode_selection_block_and_invalid_param(state_store: StateS
         )
         is None
     )
+
+
+def test_multidistro_wsl_failure_compensates_first_distro_and_wslconfig(
+    state_store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """P0.2: Failure on second WSL distro restores .wslconfig and first distro's /etc/wsl.conf."""
+    from winbearable.backends.system import CommandResult
+    from winbearable.models import TransactionState, WslConfigSpec
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True, wsl_installed=True, wsl_distros=("Ubuntu", "Debian"))
+    env = sys_b.detect_environment(reg)
+    wslconfig = tmp_path / ".wslconfig"
+    wslconfig.write_text("[wsl2]\nmemory=4GB\n", encoding="utf-8")
+
+    distro_confs: dict[str, str] = {"Ubuntu": "[user]\ndefault=alice\n"}
+
+    def _fake_wsl(args: list[str], input_text: str | None = None) -> CommandResult:
+        distro = args[1] if len(args) > 1 and args[0] == "-d" else ""
+        cmd = args[5] if len(args) > 5 else ""
+        if cmd == "cat":
+            if distro in distro_confs:
+                return CommandResult(tuple(args), 0, distro_confs[distro], "")
+            return CommandResult(tuple(args), 1, "", "No such file")
+        if cmd == "tee":
+            if distro == "Debian":
+                return CommandResult(tuple(args), 1, "", "disk full")
+            distro_confs[distro] = input_text or ""
+            return CommandResult(tuple(args), 0, "", "")
+        if cmd == "rm":
+            distro_confs.pop(distro, None)
+            return CommandResult(tuple(args), 0, "", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    prof = ProfileSpec(name="wsl-multi", description="wsl-multi", tweaks={}, wsl=WslConfigSpec(enabled=True))
+    with patch.object(sys_b, "run_wsl_command", side_effect=_fake_wsl):
+        summary = apply_profile(
+            prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True, wslconfig_path=wslconfig
+        )
+
+    assert "wsl" in summary.failed_ids
+    assert wslconfig.read_text(encoding="utf-8") == "[wsl2]\nmemory=4GB\n"
+    assert distro_confs["Ubuntu"] == "[user]\ndefault=alice\n"
+    runs = state_store.load_runs()
+    assert runs[-1].state == TransactionState.FAILED
+    assert len(runs[-1].wsl_distro_snapshots) == 1
+    assert runs[-1].wsl_distro_snapshots[0].distro == "Ubuntu"
+
+
+def test_operation_adapters_surface_structured_outcomes_on_failure(
+    state_store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """P0.3: Adapter failures (TIMEOUT, ACCESS_DENIED, TOOL_MISSING) surface into failure_outcomes and FAILED run."""
+    from winbearable.models import OperationOutcome, OperationStatus, TransactionState
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+
+    cases = [
+        ("services.disable_diagtrack", "set_service_start_type", OperationStatus.TIMEOUT, 124),
+        ("hardening.audit_core_subcategories", "set_auditpol_subcategory", OperationStatus.ACCESS_DENIED, 5),
+        ("dev.git_sane_defaults", "set_git_global_config", OperationStatus.TOOL_MISSING, 127),
+    ]
+    for tid, method_name, expected_status, rc in cases:
+        prof = ProfileSpec(name=f"fail-{tid}", description="fail", tweaks={tid: True})
+        sys_b.last_outcome = OperationOutcome(
+            status=expected_status,
+            message=f"{expected_status} simulated",
+            returncode=rc,
+            command=(tid,),
+        )
+        with patch.object(sys_b, method_name, return_value=False):
+            summary = apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+        assert tid in summary.failed_ids
+        runs = state_store.load_runs()
+        assert runs[-1].state == TransactionState.FAILED
+        assert runs[-1].failure_outcomes[-1]["status"] == str(expected_status)
+        assert runs[-1].failure_outcomes[-1]["returncode"] == rc
+        # Clear failed run so next iteration can proceed
+        state_store.save_runs([])
+
+
+def test_file_config_sha256_drift_refusal_and_managed_device_guard(
+    state_store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """Cover FileSpec SHA-256 drift refusal (P1.3) and MDM/corp-safe managed guards (P1.2)."""
+    from winbearable.models import FileSpec
+    from winbearable.operations import apply_file_spec, snapshot_file_spec
+    from winbearable.profiles import load_profile
+
+    cfg = tmp_path / "settings.json"
+    cfg.write_text('{"a": 1}\n', encoding="utf-8")
+    spec = FileSpec(path_template=str(cfg), file_format="json", desired_keys={"b": 2})
+    snap = snapshot_file_spec(spec)
+    cfg.write_text('{"a": 99}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="file hash changed"):
+        apply_file_spec(spec, expected_sha256=snap.sha256)
+
+    from dataclasses import replace
+
+    # Managed device (MDM) skips machine-scope tweaks unless --allow-managed
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = replace(sys_b.detect_environment(reg), mdm_enrolled=True)
+    owner_prof = load_profile("owner")
+    plan_default = apply_profile(owner_prof, env, reg, sys_b, state_store, dry_run=True, allow_managed=False)
+    assert "hardening.disable_smbv1" in plan_default.skipped_managed_ids
+
+    plan_override = apply_profile(owner_prof, env, reg, sys_b, state_store, dry_run=True, allow_managed=True)
+    assert "hardening.disable_smbv1" not in plan_override.skipped_managed_ids
+
+    # corp-safe never writes HKLM or Policies keys
+    corp_prof = load_profile("corp-safe")
+    for tid, enabled in corp_prof.tweaks.items():
+        if enabled:
+            tw = get_tweak(tid)
+            assert not tw.requires_admin
+            assert all("\\Policies\\" not in r.key_path for r in tw.registry_specs)

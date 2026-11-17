@@ -351,23 +351,31 @@ def plan_or_apply_wsl(
 
     distro_sections = build_distro_wsl_conf_sections(spec)
     distro_changed = False
+    distro_existed = False
+    existing_distro_conf = ""
     merged_distro_conf = merge_ini_preserving_comments("", distro_sections)
 
     if distro is not None:
         cat_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-        existing_distro_conf = cat_res.stdout if cat_res.returncode == 0 else ""
+        distro_existed = cat_res.returncode == 0
+        existing_distro_conf = cat_res.stdout if distro_existed else ""
         merged_distro_conf = merge_ini_preserving_comments(existing_distro_conf, distro_sections)
         distro_changed = merged_distro_conf != existing_distro_conf
         if not dry_run and distro_changed:
-            write_res = system.run_wsl_command(
-                ["-d", distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
-                input_text=merged_distro_conf,
-            )
-            if write_res.returncode != 0:
-                raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro}': {write_res.stderr}")
-            verify_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-            if verify_res.returncode != 0 or verify_res.stdout != merged_distro_conf:
-                raise WslOperationError(f"Verification failed after writing /etc/wsl.conf in '{distro}'.")
+            try:
+                write_res = system.run_wsl_command(
+                    ["-d", distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
+                    input_text=merged_distro_conf,
+                )
+                if write_res.returncode != 0:
+                    raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro}': {write_res.stderr}")
+                verify_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
+                if verify_res.returncode != 0 or verify_res.stdout != merged_distro_conf:
+                    raise WslOperationError(f"Verification failed after writing /etc/wsl.conf in '{distro}'.")
+            except Exception:
+                if backup_path is not None and backup_path.is_file():
+                    shutil.copy2(backup_path, target_wslconfig)
+                raise
 
     return {
         "dry_run": dry_run,
@@ -378,6 +386,8 @@ def plan_or_apply_wsl(
         "wslconfig_path": str(target_wslconfig),
         "wslconfig_backup_path": str(backup_path) if backup_path is not None else None,
         "wslconfig_changed": wslconfig_changed,
+        "distro_existed": distro_existed,
+        "distro_previous_content": existing_distro_conf,
         "wslconfig_content": merged_wslconfig,
         "distro": distro,
         "distro_changed": distro_changed,

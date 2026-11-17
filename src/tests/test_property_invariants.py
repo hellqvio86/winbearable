@@ -7,8 +7,15 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from hypothesis import HealthCheck, given, settings
-from hypothesis import strategies as st
+import pytest
+
+pytest.importorskip(
+    "hypothesis",
+    reason="hypothesis not installed; install dev dependencies with 'uv sync --group dev'",
+)
+
+from hypothesis import HealthCheck, given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
 
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import InMemorySystemBackend
