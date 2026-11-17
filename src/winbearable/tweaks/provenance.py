@@ -312,9 +312,9 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "registry_value",
         "Verified Windows Defender PUAProtection=1 and SpynetReporting/SubmitSamplesConsent policies.",
     ),
-    "hardening.disable_guest_and_blank_passwords": _p(
-        "Enforces LimitBlankPasswordUse=1 and ensures Guest account policy is disabled.",
-        "CIS Microsoft Windows 11 Enterprise Benchmark v3.0.0 §2.3.1.1",
+    "hardening.restrict_blank_passwords": _p(
+        "Enforces LimitBlankPasswordUse=1 to restrict blank-password accounts to console logon.",
+        "Microsoft Security Policy: Limit local account use of blank passwords to console logon only",
         "Medium risk: restricts network logon for local accounts with blank passwords.",
         "Blank-password local accounts cannot log on over the network.",
         "registry_value",
@@ -836,7 +836,10 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "Medium risk: blocks File & Printer Sharing, Network Discovery, RDP, Remote Assistance, mDNS, Cast.",
         "Disables legacy/inbound LAN discovery and remote-access firewall groups.",
         "firewall_group",
-        "Verified @FirewallAPI.dll resource IDs against live FirewallRules registry on build 26300.",
+        "Verified @FirewallAPI.dll resource IDs via SHLoadIndirectString on Windows 11 build 26300: "
+        "-28502 (File and Printer Sharing), -28672 (File and Printer Sharing (Restrictive)), "
+        "-32752 (Network Discovery), -28752 (Remote Desktop), -33002 (Remote Assistance), "
+        "-37302 (mDNS), -36001 (Cast to Device functionality).",
     ),
     "hardening.defender_network_protection_audit": _p(
         "Enables Microsoft Defender Network Protection in Audit mode (2) while honoring Tamper Protection.",

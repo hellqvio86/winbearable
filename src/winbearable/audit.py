@@ -352,7 +352,7 @@ def _check_guest_account(env: EnvironmentInfo, registry: RegistryBackend) -> Aud
         "Guest Account State",
         "info",
         obs,
-        "hardening.disable_guest_and_blank_passwords",
+        "hardening.restrict_blank_passwords",
     )
 
 
@@ -731,7 +731,7 @@ def _check_powershell_clm(registry: RegistryBackend) -> AuditFinding:
         f"__PSLockdownPolicy={'4' if active else 'unset'}",
         (
             "PowerShell CLM check (core tweaks/audits never use PowerShell; "
-            "optional Hyper-V firewall via DEC-01 is unavailable under CLM)."
+            "optional Hyper-V firewall is unavailable under CLM)."
         ),
     )
     return AuditFinding("chk.powershell_clm", "management", "PowerShell Constrained Language Mode", "info", obs)
@@ -774,7 +774,7 @@ def _check_winget_and_store_blocked(registry: RegistryBackend) -> tuple[AuditFin
 
 
 def _check_hyperv_firewall(*, powershell_clm_active: bool = False) -> AuditFinding:
-    # Per DEC-01 & WSL-08: Hyper-V firewall uses the narrowly scoped hyperv_firewall module.
+    # Hyper-V firewall uses the narrowly scoped hyperv_firewall module.
     from .hyperv_firewall import get_wsl_hyperv_firewall_setting
 
     if powershell_clm_active:
@@ -783,7 +783,7 @@ def _check_hyperv_firewall(*, powershell_clm_active: bool = False) -> AuditFindi
             "powershell:Get-NetFirewallHyperVVMSetting",
             ObservationConfidence.NONE,
             "Hyper-V firewall feature unavailable under PowerShell Constrained Language Mode (CLM).",
-            "Optional DEC-01 Hyper-V firewall requires unrestricted PowerShell NetSecurity cmdlets.",
+            "Optional Hyper-V firewall requires unrestricted PowerShell NetSecurity cmdlets.",
         )
         return AuditFinding(
             "chk.hyperv_firewall",
@@ -1038,7 +1038,7 @@ def build_doctor_blockers(
                 "severity": "info",
                 "evidence": "__PSLockdownPolicy=4",
                 "remedy": (
-                    "Core winbearable tweaks/audits are unaffected; optional `wb wsl firewall` (DEC-01) "
+                    "Core winbearable tweaks/audits are unaffected; optional `wb wsl firewall` "
                     "is unavailable under CLM."
                 ),
             }

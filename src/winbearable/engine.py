@@ -1797,7 +1797,7 @@ def calculate_hardening_score(
     all_results = [detect_tweak(tweak, env, registry, system) for tweak in get_all_tweaks()]
     applicable = [res for res in all_results if res.status != TweakStatus.UNSUPPORTED_BUILD]
     passed = [res for res in applicable if res.status == TweakStatus.APPLIED]
-    cis_results = [res for res in applicable if res.cis_mapping is not None]
+    cis_results = [res for res in applicable if res.cis_mapping is not None and res.cis_mapping.verified_on is not None]
     cis_passed = [res for res in cis_results if res.status == TweakStatus.APPLIED]
 
     dimensions = {
@@ -1823,7 +1823,7 @@ def calculate_hardening_score(
             **res.cis_mapping.to_dict(),
         }
         for res in all_results
-        if res.cis_mapping is not None
+        if res.cis_mapping is not None and res.cis_mapping.verified_on is not None
     ]
 
     return {

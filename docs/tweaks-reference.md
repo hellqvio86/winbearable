@@ -36,7 +36,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `explorer.show_file_extensions` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Always Show File Extensions in File Explorer |
 | `explorer.show_hidden_files` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Show All Hidden Files and Dotfiles in File Explorer |
 | `hardening.audit_core_subcategories` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Security Audit Policy Subcategories (GUID-based) |
-| `hardening.browser_privacy_baseline` | `hardening` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enforce Edge & Chrome Browser Privacy Baseline (No Password Sync, Strict Tracking) |
+| `hardening.browser_privacy_baseline` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enforce Edge & Chrome Browser Privacy Baseline (No Password Sync, Strict Tracking) |
 | `hardening.cmdline_process_audit` | `hardening` | Yes | `low` | `18.8.3.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Include Command Line in Process Creation Events (4688) |
 | `hardening.credential_guard` | `hardening` | Yes | `high` | — | *opt-in* | Enable Credential Guard Without UEFI Lock (LsaCfgFlags=2) |
 | `hardening.defender_asr_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Defender ASR Rules (Audit or Block Mode) |
@@ -44,7 +44,6 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.defender_controlled_folder_access_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Controlled Folder Access (Audit Mode) |
 | `hardening.defender_network_protection_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Network Protection (Audit Mode) |
 | `hardening.disable_autorun` | `hardening` | Yes | `low` | `18.9.8.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable AutoRun and AutoPlay on All Drives |
-| `hardening.disable_guest_and_blank_passwords` | `hardening` | Yes | `medium` | `2.3.1.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Restrict Blank Passwords & Disable Remote Assistance Solicited Help |
 | `hardening.disable_llmnr` | `hardening` | Yes | `medium` | `18.5.4.2` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Link-Local Multicast Name Resolution (LLMNR) |
 | `hardening.disable_mdns` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Multicast DNS (mDNS) |
 | `hardening.disable_netbios_broadcast` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable NetBIOS Broadcast Name Resolution (NodeType=2 / P-node) |
@@ -55,7 +54,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.disable_wpad_service` | `hardening` | Yes | `medium` | — | *opt-in* | Disable WinHTTP Web Proxy Auto-Discovery Service (Opt-In) |
 | `hardening.disable_wsh_user` | `hardening` | No | `medium` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Windows Script Host (WSH) for Current User |
 | `hardening.enable_firewall_all_profiles` | `hardening` | Yes | `medium` | `9.1.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enforce Windows Firewall Across Domain, Private, and Public Profiles |
-| `hardening.enable_lsa_protection` | `hardening` | Yes | `medium` | `18.4.4` | `paranoid` | Enable LSA Protection (RunAsPPL) |
+| `hardening.enable_lsa_protection` | `hardening` | Yes | `medium` | `18.4.4` | `paranoid` | Enable LSA Protection (RunAsPPL=2, Reversible) |
 | `hardening.enable_operational_logs` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable TaskScheduler, DNS-Client & WMI-Activity Operational Logs |
 | `hardening.enable_vbs_hvci` | `hardening` | Yes | `high` | `18.9.5.2` | `paranoid` | Enable Virtualization-Based Security (VBS) & Memory Integrity (HVCI) |
 | `hardening.enforce_smartscreen` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enforce Windows SmartScreen Policy |
@@ -68,6 +67,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.office_macro_ole` | `hardening` | No | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Block Office Internet Macros & Disable OLE Packager Shortcuts |
 | `hardening.powershell_module_logging` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable PowerShell Module Logging (*) |
 | `hardening.powershell_scriptblock_logging` | `hardening` | Yes | `low` | `18.9.97.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enable PowerShell Script Block Logging |
+| `hardening.restrict_blank_passwords` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Restrict Blank Passwords to Console Logon Only |
 | `hardening.smb_block_insecure_guest` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Block Insecure Guest SMB Logons |
 | `hardening.smb_require_signing` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Require SMB Signing on Client & Server |
 | `hardening.uac_secure_desktop` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enforce UAC Admin Approval Mode on Secure Desktop |

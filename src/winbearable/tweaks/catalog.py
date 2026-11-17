@@ -171,7 +171,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.56.1",
-        cis_mapping=_cis("18.9.56.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -694,7 +693,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.16.1",
-        cis_mapping=_cis("18.9.16.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -767,7 +765,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.5.4.2",
-        cis_mapping=_cis("18.5.4.2", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -809,7 +806,10 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         tweak_id="hardening.disable_wpad",
         category="hardening",
         title="Disable Web Proxy Auto-Discovery (WPAD)",
-        description="Prevents automatic proxy discovery spoofing by setting WpadOverride=1.",
+        description=(
+            "Prevents automatic proxy discovery spoofing by setting WpadOverride=1 and "
+            "WinHttp\\DisableWpad=1 (MS16-077)."
+        ),
         source_url="https://learn.microsoft.com/en-us/security-updates/SecurityBulletins/2016/ms16-077",
         risk=RiskLevel.MEDIUM,
         requires_admin=True,
@@ -821,6 +821,14 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
                 hive=HIVE_HKLM,
                 key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Wpad",
                 value_name="WpadOverride",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\WinHttp",
+                value_name="DisableWpad",
                 value_data=1,
                 value_type=REG_DWORD,
                 action=ACTION_SET,
@@ -839,7 +847,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.8.1",
-        cis_mapping=_cis("18.9.8.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -863,7 +870,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.97.1",
-        cis_mapping=_cis("18.9.97.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -887,7 +893,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.8.3.1",
-        cis_mapping=_cis("18.8.3.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -902,8 +907,11 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
     "hardening.enable_lsa_protection": TweakDefinition(
         tweak_id="hardening.enable_lsa_protection",
         category="hardening",
-        title="Enable LSA Protection (RunAsPPL)",
-        description="Configures lsass.exe to run as a Protected Process Light (PPL) to block credential dumping.",
+        title="Enable LSA Protection (RunAsPPL=2, Reversible)",
+        description=(
+            "Configures lsass.exe to run as a Protected Process Light (PPL) using RunAsPPL=2 "
+            "(without UEFI variable lock, so registry rollback remains effective after reboot)."
+        ),
         source_url="https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection",
         risk=RiskLevel.MEDIUM,
         requires_admin=True,
@@ -911,14 +919,13 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.4.4",
-        cis_mapping=_cis("18.4.4", level="L1"),
         requires_reboot=True,
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
                 key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
                 value_name="RunAsPPL",
-                value_data=1,
+                value_data=2,
                 value_type=REG_DWORD,
                 action=ACTION_SET,
             ),
@@ -936,7 +943,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.9.5.2",
-        cis_mapping=_cis("18.9.5.2", level="L1"),
         requires_reboot=True,
         registry_specs=(
             RegistrySpec(
@@ -969,7 +975,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.10.12.1",
-        cis_mapping=_cis("18.10.12.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -1023,7 +1028,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.4.8",
-        cis_mapping=_cis("18.4.8", level="L1", verification_method="registry_and_dism", partial_registry_only=False),
         requires_reboot=True,
         registry_specs=(
             RegistrySpec(
@@ -1076,7 +1080,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="9.1.1",
-        cis_mapping=_cis("9.1.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -1108,7 +1111,10 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         tweak_id="hardening.defender_cloud_and_pua",
         category="hardening",
         title="Enable Microsoft Defender PUA Block & Cloud Protection",
-        description="Enables Defender Potentially Unwanted Application (PUA) blocking and MAPS cloud protection.",
+        description=(
+            "Enables Defender PUA blocking and MAPS Advanced cloud reporting (SpynetReporting=2 sends "
+            "cloud telemetry/metadata to Microsoft and marks Defender policy as 'managed by your organization')."
+        ),
         source_url="https://learn.microsoft.com/en-us/defender-endpoint/detect-block-potentially-unwanted-apps-microsoft-defender-antivirus",
         risk=RiskLevel.MEDIUM,
         requires_admin=True,
@@ -1116,7 +1122,6 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         cis_id="18.10.43",
-        cis_mapping=_cis("18.10.43", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
@@ -1136,35 +1141,23 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             ),
         ),
     ),
-    "hardening.disable_guest_and_blank_passwords": TweakDefinition(
-        tweak_id="hardening.disable_guest_and_blank_passwords",
+    "hardening.restrict_blank_passwords": TweakDefinition(
+        tweak_id="hardening.restrict_blank_passwords",
         category="hardening",
-        title="Restrict Blank Passwords & Disable Remote Assistance Solicited Help",
-        description=(
-            "Restricts local accounts with blank passwords to console logon only and disables Remote Assistance."
-        ),
+        title="Restrict Blank Passwords to Console Logon Only",
+        description="Restricts local accounts with blank passwords to console logon only (LimitBlankPasswordUse=1).",
         source_url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/accounts-limit-local-account-use-of-blank-passwords-to-console-logon-only",
         risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
-        cis_id="2.3.1.1",
-        cis_mapping=_cis("2.3.1.1", level="L1"),
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKLM,
                 key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
                 value_name="LimitBlankPasswordUse",
                 value_data=1,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-            RegistrySpec(
-                hive=HIVE_HKLM,
-                key_path=r"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services",
-                value_name="fAllowToGetHelp",
-                value_data=0,
                 value_type=REG_DWORD,
                 action=ACTION_SET,
             ),
@@ -1175,10 +1168,11 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         category="hardening",
         title="Enforce Edge & Chrome Browser Privacy Baseline (No Password Sync, Strict Tracking)",
         description=(
-            "Disables built-in browser password manager & cloud sync and enforces strict tracking prevention in Edge."
+            "Disables built-in Edge & Chrome password managers and enforces strict tracking prevention in Edge "
+            "via HKLM\\SOFTWARE\\Policies (causes browsers to display 'managed by your organization')."
         ),
         source_url="https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies",
-        risk=RiskLevel.LOW,
+        risk=RiskLevel.MEDIUM,
         requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
@@ -2205,7 +2199,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         ),
     ),
     # -------------------------------------------------------------------------
-    # TWK-D: Edge Quieting (Opt-In Preset, DEC-03)
+    # TWK-D: Edge Quieting (Opt-In Preset)
     # -------------------------------------------------------------------------
     "edge.quieting_baseline": TweakDefinition(
         tweak_id="edge.quieting_baseline",
@@ -2541,8 +2535,8 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         category="hardening",
         title="Disable NetBIOS Over TCP/IP Per Interface (NetbiosOptions=2)",
         description=(
-            "Sets NetbiosOptions=2 on every NetBT\\Parameters\\Interfaces\\Tcpip_* subkey "
-            "(stronger per-interface complement to hardening.disable_netbios_broadcast)."
+            "Sets NetbiosOptions=2 on every existing NetBT\\Parameters\\Interfaces\\Tcpip_* subkey "
+            "(newly added VPN/Wi-Fi adapters default to DHCP-controlled NetBIOS until re-applied)."
         ),
         source_url="https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/netbios-over-tcp-ip-node-types",
         risk=RiskLevel.MEDIUM,
@@ -3426,11 +3420,22 @@ TWEAK_CATALOG = {
 }
 
 
+TWEAK_ID_ALIASES: dict[str, str] = {
+    "hardening.disable_guest_and_blank_passwords": "hardening.restrict_blank_passwords",
+}
+
+
+def resolve_tweak_id(tweak_id: str) -> str:
+    """Resolve deprecated tweak ID aliases to their canonical catalog ID."""
+    return TWEAK_ID_ALIASES.get(tweak_id, tweak_id)
+
+
 def get_tweak(tweak_id: str) -> TweakDefinition:
-    """Return a TweakDefinition by ID or raise KeyError."""
-    if tweak_id not in TWEAK_CATALOG:
+    """Return a TweakDefinition by ID (or alias) or raise KeyError."""
+    resolved = resolve_tweak_id(tweak_id)
+    if resolved not in TWEAK_CATALOG:
         raise KeyError(f"Unknown tweak ID '{tweak_id}'. Valid IDs: {', '.join(sorted(TWEAK_CATALOG))}")
-    return TWEAK_CATALOG[tweak_id]
+    return TWEAK_CATALOG[resolved]
 
 
 def get_all_tweaks() -> list[TweakDefinition]:

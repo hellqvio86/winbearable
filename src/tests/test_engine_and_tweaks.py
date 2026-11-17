@@ -522,7 +522,7 @@ def test_separated_audit_dimensions_and_cis_provenance(state_store: StateStore) 
     assert after_ui["security_score_percent"] == 0.0
 
     cis_controls = after_ui["cis_controls"]["controls"]
-    assert len(cis_controls) > 0
+    assert cis_controls == []
     for ctrl in cis_controls:
         assert "benchmark" in ctrl
         assert "version" in ctrl

@@ -1,5 +1,6 @@
 """Native Windows UAC elevation helper via ctypes ShellExecuteExW (zero PowerShell)."""
 
+import contextlib
 import ctypes
 import os
 import subprocess
@@ -11,6 +12,7 @@ from typing import Any
 from .const import (
     DEFAULT_UAC_TERMINATE_GRACE_MS,
     DEFAULT_UAC_TIMEOUT_MS,
+    ENV_UAC_TIMEOUT_MS,
     MAX_UAC_OUTPUT_BYTES,
     SEE_MASK_NOCLOSEPROCESS,
     SW_HIDE,
@@ -176,15 +178,55 @@ def set_console_title(title: str = "winbearable", windll_override: Any = None) -
         return False
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    """Return True if *path* is a symlink or Windows reparse point."""
+    if path.is_symlink():
+        return True
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    attrs = getattr(st, "st_file_attributes", 0)
+    return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def write_uac_output_safe(out_path: Path, text: str) -> None:
+    """Safely create and write elevated child output using O_EXCL and reparse-point checks."""
+    if not out_path.parent.name.startswith("wb-uac-") or out_path.name != "uac-output.txt":
+        raise UacElevationError(f"Refusing untrusted UAC output path: {out_path}")
+    if _is_reparse_or_symlink(out_path.parent) or _is_reparse_or_symlink(out_path):
+        raise UacElevationError(f"Refusing symlink/reparse-point UAC output path: {out_path}")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(out_path), flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+    except Exception:
+        with contextlib.suppress(OSError):
+            out_path.unlink()
+        raise
+
+
 def run_elevated_wb(
     argv: list[str],
     executable: str | None = None,
     cwd: str | None = None,
     windll_override: Any = None,
-    timeout_ms: int = DEFAULT_UAC_TIMEOUT_MS,
+    timeout_ms: int | None = None,
 ) -> tuple[int, str]:
     """Re-launch `wb` elevated via ShellExecuteExW('runas'), wait up to *timeout_ms*, and return (exit_code, output)."""
-    if timeout_ms <= 0:
+    if timeout_ms is None:
+        raw_env_timeout = os.environ.get(ENV_UAC_TIMEOUT_MS, "").strip()
+        effective_timeout_ms = (
+            int(raw_env_timeout) if raw_env_timeout.isdigit() and int(raw_env_timeout) > 0 else DEFAULT_UAC_TIMEOUT_MS
+        )
+    else:
+        effective_timeout_ms = timeout_ms
+    if effective_timeout_ms <= 0:
         raise ValueError("timeout_ms must be a positive integer.")
 
     shell32, kernel32 = _get_win32_dlls(windll_override)
@@ -219,13 +261,20 @@ def run_elevated_wb(
 
         exit_code = ctypes.c_ulong(1)
         try:
-            wait_res = int(kernel32.WaitForSingleObject(sei.hProcess, timeout_ms))
+            wait_res = int(kernel32.WaitForSingleObject(sei.hProcess, effective_timeout_ms))
             if wait_res == WAIT_TIMEOUT:
-                kernel32.TerminateProcess(sei.hProcess, 1)
-                kernel32.WaitForSingleObject(sei.hProcess, DEFAULT_UAC_TERMINATE_GRACE_MS)
+                term_ok = bool(kernel32.TerminateProcess(sei.hProcess, 1))
+                if term_ok:
+                    kernel32.WaitForSingleObject(sei.hProcess, DEFAULT_UAC_TERMINATE_GRACE_MS)
+                    raise UacTimeoutError(
+                        f"Elevated winbearable process timed out after {effective_timeout_ms} ms and was terminated; "
+                        "host state may have been partially modified. Run `wb doctor` and `wb recover` before retrying."
+                    )
+                term_err = _last_win32_error(kernel32)
                 raise UacTimeoutError(
-                    f"Elevated winbearable process timed out after {timeout_ms} ms and was terminated; "
-                    "host state may have been partially modified. Run `wb doctor` and `wb recover` before retrying."
+                    f"Elevated winbearable process timed out after {effective_timeout_ms} ms and could not be "
+                    f"terminated (Win32 error {term_err}); it may still be running and holding the transaction lock. "
+                    "Wait for completion or inspect Task Manager before running `wb recover`."
                 )
             if wait_res != WAIT_OBJECT_0:
                 err_code = _last_win32_error(kernel32) if wait_res == WAIT_FAILED else 0

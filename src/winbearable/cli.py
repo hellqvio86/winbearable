@@ -68,7 +68,7 @@ from .profiles import (
 from .state import StateStore, StateStoreError
 from .tui import launch_tui
 from .tweaks import TWEAK_CATALOG, get_all_tweaks, get_tweak
-from .uac import UacCancelledError, UacElevationError, run_elevated_wb, set_console_title
+from .uac import UacCancelledError, UacElevationError, run_elevated_wb, set_console_title, write_uac_output_safe
 from .wsl import (
     WslOperationError,
     apply_wsl_linux_baseline,
@@ -253,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="wb",
         description=(
             "Make Windows + WSL2 bearable (and locked down) for Linux people — "
-            "native Python, zero PowerShell for core tweaks (optional DEC-01 Hyper-V firewall only)."
+            "native Python, zero PowerShell for core tweaks (optional Hyper-V firewall only)."
         ),
     )
     parser.add_argument("--version", action="version", version=f"winbearable {__version__}")
@@ -490,7 +490,7 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_sp_p.add_argument("--apply", action="store_true", help="Execute wsl.exe --manage --set-sparse")
     wsl_sp_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
-    wsl_fw_p = wsl_sub.add_parser("firewall", help="Inspect or configure WSL2 Hyper-V firewall defaults (DEC-01)")
+    wsl_fw_p = wsl_sub.add_parser("firewall", help="Inspect or configure WSL2 Hyper-V firewall defaults")
     wsl_fw_p.add_argument("--inbound", choices=("Block", "Allow"), default="Block", help="Default inbound action")
     wsl_fw_p.add_argument("--outbound", choices=("Block", "Allow"), default="Allow", help="Default outbound action")
     wsl_fw_p.add_argument("--disable", action="store_true", help="Disable Hyper-V firewall for WSL2 VM")
@@ -538,7 +538,7 @@ def run_cli(
             return _run_cli_body(args, raw_argv, registry, system, state_store)
         finally:
             if uac_out_path is not None and uac_buf is not None:
-                uac_out_path.write_text(uac_buf.getvalue(), encoding="utf-8")
+                write_uac_output_safe(uac_out_path, uac_buf.getvalue())
 
 
 def _run_cli_body(

@@ -169,6 +169,7 @@ class CisControlMapping:
     control_id: str
     verification_method: str
     partial_registry_only: bool = True
+    verified_on: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize CIS mapping to a JSON-compatible dictionary."""
@@ -180,6 +181,7 @@ class CisControlMapping:
             "control_id": self.control_id,
             "verification_method": self.verification_method,
             "partial_registry_only": self.partial_registry_only,
+            "verified_on": self.verified_on,
         }
 
 
