@@ -151,7 +151,7 @@ Every `--json` payload carries `schema_version` (`JSON_SCHEMA_VERSION`, added in
 - accept: locale independence, no runtime network, elevation/restart behaviour, never-weaken-core-protections, never-fabricate-identifiers, and build/edition floor (`>= 26300`, NO IoT/LTSC) added to `AGENTS.md`.
 
 ### DOC-04: Repair `Dockerfile.windows`
-- status: needs-local-windows-verification · priority: P1 · depends_on: none
+- status: done · priority: P1 · depends_on: none
 - why: updated to copy `profiles` and `src`, verify Python installer SHA-256, pin `servercore:ltsc2022` digest, and run `pytest src/tests/test_windows_integration.py -v`.
 
 ### DOC-05: Normalize `CHANGELOG.md`
@@ -210,7 +210,7 @@ How to read: `U` no admin, `A` admin. `Profiles`: `US` user-only, `OW` owner, `P
 
 Already shipped (do not re-add): SMBv1, mDNS, NetBIOS broadcast `NodeType`, LLMNR, WPAD, AutoRun, firewall on all profiles, Defender cloud + PUA, Guest/blank-password, browser privacy baseline, Office macro/OLE, consumer features, telemetry tasks, PowerShell script block logging, cmdline audit, LSA protection, VBS/HVCI.
 
-### TWK-A: Linux-comfort input and shell (new category `input`; profile `DC`; `CS` for U rows) — **status: done (except `dev.case_sensitive_dirs`)**
+### TWK-A: Linux-comfort input and shell (new category `input`; profile `DC`; `CS` for U rows) — **status: done**
 
 | ID | Scope | Risk | Spec | Notes |
 |----|-------|------|------|-------|
@@ -468,7 +468,7 @@ All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `
 - accept: `hypothesis` (dev group only): for random subsets of the catalog and random initial in-memory states, `apply` then `rollback` restores the exact initial state; `plan` never mutates; interrupted-apply (raise mid-way) followed by `recover` leaves a consistent state
 
 ### QA-05: Raise coverage on the weakest modules
-- status: todo · priority: P3 · depends_on: DEC-09
+- status: done · priority: P3 · depends_on: DEC-09
 - accept: tests added for the uncovered lines in `backends/registry.py` (88%), `tweaks/validation.py` (88%), `state.py` (89%), `uac.py` (89%), `wsl.py` (89%), `backends/system.py` (90%), `engine.py` (91%) so each is at least 92%; no `# pragma: no cover` added to dodge it
 
 ### QA-06: Security review of the UAC relay

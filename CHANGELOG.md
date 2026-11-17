@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.9.6] - 2026-11-17
+
+### Added
+
+- Added `dev.vscode_settings_defaults`, `dev.terminal_settings_defaults` (enabled in `dev-comfort`), `dev.case_sensitive_dirs`, `hardening.update_active_hours` (parameterized via `[params]`), and `dev.install_nerd_font_user` (`DEVCOM.JetBrainsMonoNerdFont`).
+- Wired `profile.params` resolution into `engine.py` (`resolve_tweak_params`) and added `TweakDefinition.parameterized` validation.
+- Repaired `Dockerfile.windows` (`DOC-04`) and raised weakest-module unit test coverage (`QA-05`).
+
 ## [0.9.5] - 2026-11-17
 
 ### Added

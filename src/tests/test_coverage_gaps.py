@@ -740,3 +740,336 @@ def test_engine_compensate_run_record_all_snapshot_types_and_errors(tmp_path: Pa
     ):
         errs = _compensate_run_record(rec, reg, sys_b)
     assert len(errs) >= 12
+
+
+def test_wsl_interop_registry_backend_types_and_readonly_errors() -> None:
+    """Cover WslInteropRegistryBackend REG_MULTI_SZ, REG_BINARY, snapshots, policy check, and write errors."""
+    import subprocess
+
+    from winbearable.backends.registry import WslInteropRegistryBackend
+    from winbearable.const import REG_BINARY, REG_MULTI_SZ
+    from winbearable.models import PolicyConflictPath, RegistryKeySnapshot, RegistryValueSnapshot
+
+    backend = WslInteropRegistryBackend(reg_exe_path="reg.exe")
+
+    def _fake_run(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if "MultiVal" in args:
+            return subprocess.CompletedProcess(args, 0, "    MultiVal    REG_MULTI_SZ    a\\0b\\0\n", "")
+        if "BinVal" in args:
+            return subprocess.CompletedProcess(args, 0, "    BinVal    REG_BINARY    0a0b\n", "")
+        if "UnknownType" in args:
+            return subprocess.CompletedProcess(args, 0, "    UnknownType    REG_NONE    foo\n", "")
+        if "EmptyOut" in args:
+            return subprocess.CompletedProcess(args, 0, "HKEY_CURRENT_USER\\Software\\Test\n", "")
+        if "PolVal" in args:
+            return subprocess.CompletedProcess(args, 0, "    PolVal    REG_DWORD    0x1\n", "")
+        return subprocess.CompletedProcess(
+            args, 1, "", "ERROR: The system was unable to find the specified registry key."
+        )
+
+    with patch.object(backend, "_run_reg_query", side_effect=_fake_run):
+        assert backend.get_value(HIVE_HKCU, r"Software\Test", "MultiVal") == (["a", "b"], REG_MULTI_SZ)
+        assert backend.get_value(HIVE_HKCU, r"Software\Test", "BinVal") == (b"\x0a\x0b", REG_BINARY)
+        assert backend.get_value(HIVE_HKCU, r"Software\Test", "UnknownType") is None
+        assert backend.get_value(HIVE_HKCU, r"Software\Test", "EmptyOut") is None
+
+        missing_snap = backend.snapshot_value(HIVE_HKCU, r"Software\Test", "Missing")
+        assert missing_snap.value_existed is False
+        assert missing_snap.previous_data is None
+
+        key_snap = backend.snapshot_key(HIVE_HKCU, r"Software\Test")
+        assert key_snap.existed is False
+
+        conflict = backend.check_policy_conflict(
+            (
+                PolicyConflictPath(HIVE_HKCU, r"Software\Test", "Missing", enforced_value=1),
+                PolicyConflictPath(HIVE_HKCU, r"Software\Test", "PolVal", enforced_value=1),
+            )
+        )
+        assert conflict is not None and "PolVal=1" in conflict
+        assert (
+            backend.check_policy_conflict(
+                (PolicyConflictPath(HIVE_HKCU, r"Software\Test", "PolVal", enforced_value=0),)
+            )
+            is None
+        )
+
+    with pytest.raises(RuntimeError, match="read-only"):
+        backend.delete_key(HIVE_HKCU, r"Software\Test")
+    with pytest.raises(RuntimeError, match="read-only"):
+        backend.restore_key_snapshot(RegistryKeySnapshot(HIVE_HKCU, r"Software\Test", existed=False))
+    with pytest.raises(RuntimeError, match="read-only"):
+        backend.restore_snapshot(RegistryValueSnapshot(HIVE_HKCU, r"Software\Test", "V", False, False, None, None))
+
+
+def test_winreg_backend_error_and_type_branches() -> None:
+    """Cover WinregRegistryBackend unsupported types, list/None data, permission errors, and delete_key."""
+    from winbearable.backends.registry import WinregBackend
+
+    fake_winreg = MagicMock()
+    fake_winreg.HKEY_CURRENT_USER = 1
+    fake_winreg.KEY_READ = 1
+    fake_winreg.KEY_WRITE = 2
+    fake_winreg.KEY_SET_VALUE = 4
+    fake_winreg.KEY_WOW64_64KEY = 256
+    fake_winreg.KEY_WOW64_32KEY = 512
+    fake_winreg.REG_SZ = 1
+    fake_winreg.REG_EXPAND_SZ = 2
+    fake_winreg.REG_BINARY = 3
+    fake_winreg.REG_DWORD = 4
+    fake_winreg.REG_MULTI_SZ = 7
+    fake_winreg.REG_QWORD = 11
+
+    backend = WinregBackend(winreg_module=fake_winreg)
+
+    # list and None data types
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value="h")
+    cm.__exit__ = MagicMock(return_value=False)
+    fake_winreg.OpenKey.return_value = cm
+
+    fake_winreg.QueryValueEx.return_value = ([1, 2], 7)
+    assert backend.get_value(HIVE_HKCU, r"Software\X", "L") == (["1", "2"], "REG_MULTI_SZ")
+
+    fake_winreg.QueryValueEx.return_value = (None, 1)
+    assert backend.get_value(HIVE_HKCU, r"Software\X", "N") == (None, "REG_SZ")
+
+    fake_winreg.QueryValueEx.return_value = (object(), 1)
+    with pytest.raises(ValueError, match="Unsupported registry value data type"):
+        backend.get_value(HIVE_HKCU, r"Software\X", "BadData")
+
+    fake_winreg.QueryValueEx.return_value = ("x", 999)
+    with pytest.raises(ValueError, match="Unsupported registry value type id"):
+        backend.get_value(HIVE_HKCU, r"Software\X", "BadTypeId")
+
+    class _WinErr5(OSError):
+        winerror = 5
+
+    err5 = _WinErr5("denied")
+    fake_winreg.OpenKey.side_effect = err5
+    with pytest.raises(PermissionError, match="Access denied reading"):
+        backend.get_value(HIVE_HKCU, r"Software\X", "Denied")
+    with pytest.raises(PermissionError, match="Access denied deleting"):
+        backend.delete_value(HIVE_HKCU, r"Software\X", "Denied")
+
+    fake_winreg.OpenKey.side_effect = PermissionError("denied")
+    with pytest.raises(PermissionError):
+        backend.get_value(HIVE_HKCU, r"Software\X", "Perm")
+    with pytest.raises(PermissionError):
+        backend.delete_value(HIVE_HKCU, r"Software\X", "Perm")
+
+    with pytest.raises(ValueError, match="Unsupported registry value type"):
+        backend.set_value(HIVE_HKCU, r"Software\X", "V", 1, value_type="REG_BOGUS")
+
+    # delete_key when key_exists is False or DeleteKeyEx absent
+    fake_winreg.OpenKey.side_effect = OSError("not found")
+    assert backend.delete_key(HIVE_HKCU, r"Software\Missing") is False
+
+    del fake_winreg.DeleteKeyEx
+    fake_winreg.OpenKey.side_effect = None
+    with patch.object(backend, "key_exists", return_value=True), patch.object(backend, "list_subkeys", return_value=[]):
+        assert backend.delete_key(HIVE_HKCU, r"Software\Present") is True
+        fake_winreg.DeleteKey.side_effect = OSError("boom")
+        assert backend.delete_key(HIVE_HKCU, r"Software\Present") is False
+
+
+def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cover WindowsSystemBackend wrappers for vscode, git, firewall, fsutil, powercfg, and icacls."""
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import CommandResult, NativeSystemBackend
+
+    sys_win = NativeSystemBackend(platform_override="win32")
+    sys_lin = NativeSystemBackend(platform_override="linux")
+    reg = InMemoryRegistryBackend()
+
+    # Non-win32 early returns
+    assert sys_lin.is_vscode_extension_installed("ms-python.python") is False
+    assert sys_lin.uninstall_vscode_extension("ms-python.python") is False
+    assert sys_lin.set_firewall_group_enabled("@FirewallAPI.dll,-1", True) is False
+    assert sys_lin.export_firewall_policy(tmp_path / "fw.wfw") is False
+    assert sys_lin.import_firewall_policy(tmp_path / "fw.wfw") is False
+    assert sys_lin.is_dir_case_sensitive(str(tmp_path)) is None
+    assert sys_lin.set_dir_case_sensitive(str(tmp_path), True) is False
+    assert sys_lin.set_hibernate_enabled(reg, False) is False
+    assert sys_lin.restrict_acl_to_current_user(str(tmp_path)) is False
+
+    # win32 mocked _run_native_cmd
+    with patch.object(
+        sys_win,
+        "_run_native_cmd",
+        side_effect=[
+            CommandResult((), 0, "ms-python.python\n", ""),
+            CommandResult((), 1, "", ""),
+            CommandResult((), 0, "", ""),
+            CommandResult((), 0, "", ""),
+            CommandResult((), 0, "", ""),
+            CommandResult((), 0, "", ""),
+            CommandResult((), 0, "Case sensitive attribute on directory is enabled.\n", ""),
+            CommandResult((), 0, "Case sensitive attribute on directory is disabled.\n", ""),
+            CommandResult((), 1, "", ""),
+            CommandResult((), 0, "", ""),
+            CommandResult((), 0, "", ""),
+            CommandResult((), 0, "C:\\dir BUILTIN\\Users:(F)\nSuccessfully processed 1 files\n", ""),
+            CommandResult((), 0, "", ""),
+        ],
+    ):
+        assert sys_win.is_vscode_extension_installed("ms-python.python") is True
+        assert sys_win.is_vscode_extension_installed("ms-python.python") is False
+        assert sys_win.uninstall_vscode_extension("ms-python.python") is True
+        assert sys_win.set_firewall_group_enabled("@FirewallAPI.dll,-1", True) is True
+
+        wfw = tmp_path / "fw.wfw"
+        wfw.write_text("old", encoding="utf-8")
+        assert sys_win.export_firewall_policy(wfw) is True
+        wfw.write_text("saved", encoding="utf-8")
+        assert sys_win.import_firewall_policy(wfw) is True
+
+        assert sys_win.is_dir_case_sensitive(str(tmp_path)) is True
+        assert sys_win.is_dir_case_sensitive(str(tmp_path)) is False
+        assert sys_win.is_dir_case_sensitive(str(tmp_path)) is None
+
+        non_empty = tmp_path / "nonempty"
+        non_empty.mkdir()
+        (non_empty / "f.txt").write_text("x", encoding="utf-8")
+        assert sys_win.set_dir_case_sensitive(str(non_empty), False) is False
+        assert sys_win.set_dir_case_sensitive(str(tmp_path / "newdir"), True) is True
+        assert sys_win.set_hibernate_enabled(reg, False) is True
+
+        ssh_dir = tmp_path / "ssh"
+        ssh_dir.mkdir()
+        assert sys_win.is_ssh_acl_restricted(str(ssh_dir)) is True
+        monkeypatch.setenv("USERNAME", "alice")
+        assert sys_win.restrict_acl_to_current_user(str(ssh_dir)) is True
+
+    assert sys_win.is_hibernate_enabled(reg) is None
+    reg.set_value("HKLM", r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled", 1)
+    assert sys_win.is_hibernate_enabled(reg) is True
+
+    # git wrappers
+    with patch.object(sys_win, "_resolve_git_exe", return_value=None):
+        assert sys_win.get_git_global_config("core.eol") is None
+        assert sys_win.set_git_global_config("core.eol", "lf") is False
+
+    # _resolve_git_exe and is_onedrive_installed
+    fake_git = tmp_path / "Git" / "cmd" / "git.exe"
+    fake_git.parent.mkdir(parents=True)
+    fake_git.write_text("exe", encoding="utf-8")
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    assert sys_win._resolve_git_exe() == str(fake_git)
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "x86"))
+    assert sys_lin.is_onedrive_installed() is False
+    with patch.object(sys_win, "is_process_running", return_value=True):
+        assert sys_win.is_onedrive_installed() is True
+    od_exe = tmp_path / "Microsoft" / "OneDrive" / "OneDrive.exe"
+    od_exe.parent.mkdir(parents=True)
+    od_exe.write_text("exe", encoding="utf-8")
+    assert sys_win.is_onedrive_installed() is True
+
+    # InMemorySystemBackend restore_auditpol, import_firewall_policy, dir case sensitivity
+    from winbearable.backends.system import InMemorySystemBackend
+
+    mem_sys = InMemorySystemBackend()
+    assert mem_sys.restore_auditpol(tmp_path / "missing.csv") is False
+    mem_sys.auditpol_subcategories["{G}"] = "Success"
+    assert mem_sys.backup_auditpol(tmp_path / "ap.csv") is True
+    mem_sys.auditpol_subcategories["{G}"] = "No Auditing"
+    assert mem_sys.restore_auditpol(tmp_path / "ap.csv") is True
+    assert mem_sys.auditpol_subcategories["{G}"] == "Success"
+
+    assert mem_sys.import_firewall_policy(tmp_path / "missing.wfw") is False
+    mem_sys.firewall_groups["@F,-1"] = False
+    assert mem_sys.export_firewall_policy(tmp_path / "fw.wfw") is True
+    mem_sys.firewall_groups["@F,-1"] = True
+    assert mem_sys.import_firewall_policy(tmp_path / "fw.wfw") is True
+    assert mem_sys.firewall_groups["@F,-1"] is False
+
+    assert mem_sys.is_dir_case_sensitive(str(tmp_path)) is False
+    non_empty_mem = tmp_path / "mem_nonempty"
+    non_empty_mem.mkdir()
+    (non_empty_mem / "a.txt").write_text("x", encoding="utf-8")
+    assert mem_sys.set_dir_case_sensitive(str(non_empty_mem), False) is False
+    assert mem_sys.set_dir_case_sensitive(str(tmp_path / "empty_mem"), True) is True
+    with (
+        patch.object(sys_win, "_resolve_git_exe", return_value="git.exe"),
+        patch.object(
+            sys_win,
+            "_run_native_cmd",
+            side_effect=[
+                CommandResult((), 0, "lf\n", ""),
+                CommandResult((), 1, "", ""),
+                CommandResult((), 0, "", ""),
+                CommandResult((), 0, "", ""),
+            ],
+        ),
+    ):
+        assert sys_win.get_git_global_config("core.eol") == "lf"
+        assert sys_win.get_git_global_config("core.eol") is None
+        assert sys_win.set_git_global_config("core.eol", None) is True
+        assert sys_win.set_git_global_config("core.eol", "lf") is True
+
+
+def test_engine_posture_inspection_variants_and_apply_failures(tmp_path: Path) -> None:
+    """Cover defender/smartscreen/vbs posture variants and engine apply failure branches."""
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import InMemorySystemBackend
+    from winbearable.const import HIVE_HKLM
+    from winbearable.engine import (
+        _execute_tweak_mutations,
+        _TweakMutationError,
+        inspect_defender_smartscreen_posture,
+        inspect_vbs_credential_guard_posture,
+    )
+    from winbearable.models import FsutilCaseSensitiveSpec, GitConfigSpec, PowercfgHibernateSpec
+
+    reg = InMemoryRegistryBackend()
+    assert inspect_defender_smartscreen_posture(reg)["smartscreen"]["state"] == "unset"
+
+    reg.set_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows Defender", "PUAProtection", 99)
+    reg.set_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows\System", "EnableSmartScreen", 99)
+    res_unknown = inspect_defender_smartscreen_posture(reg)
+    assert "unknown" in res_unknown["defender_pua"]["state"]
+    assert "unknown" in res_unknown["smartscreen"]["state"]
+
+    reg2 = InMemoryRegistryBackend()
+    reg2.set_value(HIVE_HKLM, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer", "SmartScreenEnabled", "Off")
+    assert inspect_defender_smartscreen_posture(reg2)["smartscreen"]["state"] == "disabled"
+    reg2.set_value(HIVE_HKLM, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer", "SmartScreenEnabled", "Warn")
+    assert inspect_defender_smartscreen_posture(reg2)["smartscreen"]["state"] == "enabled"
+    reg2.set_value(HIVE_HKLM, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer", "SmartScreenEnabled", "Weird")
+    assert "unknown" in inspect_defender_smartscreen_posture(reg2)["smartscreen"]["state"]
+
+    reg2.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\DeviceGuard", "EnableVirtualizationBasedSecurity", 0)
+    reg2.set_value(
+        HIVE_HKLM,
+        r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+        "Enabled",
+        2,
+    )
+    for flag, expected in [
+        (1, "enabled_with_uefi_lock"),
+        (2, "enabled_without_lock"),
+        (0, "disabled"),
+        (9, "unknown(9)"),
+    ]:
+        reg2.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LsaCfgFlags", flag)
+        cg = inspect_vbs_credential_guard_posture(reg2)
+        assert cg["vbs"]["state"] == "disabled"
+        assert "unknown" in cg["hvci"]["state"]
+        assert cg["credential_guard"]["state"] == expected
+
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg2)
+
+    t_fs = _sample_tweak("test.fs", service_specs=(), fsutil_specs=(FsutilCaseSensitiveSpec(str(tmp_path), True),))
+    with patch.object(sys_b, "set_dir_case_sensitive", return_value=False), pytest.raises(_TweakMutationError):
+        _execute_tweak_mutations(t_fs, env, reg2, sys_b, tmp_path, set(), [], [])
+
+    t_pwr = _sample_tweak("test.pwr", service_specs=(), powercfg_specs=(PowercfgHibernateSpec(False),))
+    with patch.object(sys_b, "set_hibernate_enabled", return_value=False), pytest.raises(_TweakMutationError):
+        _execute_tweak_mutations(t_pwr, env, reg2, sys_b, tmp_path, set(), [], [])
+
+    t_git = _sample_tweak("test.git", service_specs=(), git_config_specs=(GitConfigSpec("core.eol", "lf"),))
+    with patch.object(sys_b, "set_git_global_config", return_value=False), pytest.raises(_TweakMutationError):
+        _execute_tweak_mutations(t_git, env, reg2, sys_b, tmp_path, set(), [], [])

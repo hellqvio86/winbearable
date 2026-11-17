@@ -429,6 +429,7 @@ class TweakDefinition:
     requires_explorer_restart: bool = False
     irreversible: bool = False
     requires_tamper_protection_off: bool = False
+    parameterized: bool = False
 
 
 @dataclass(frozen=True)

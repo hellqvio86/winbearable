@@ -13,11 +13,15 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `bloat.remove_bing_weather` | `bloat` | No | `low` | — | *opt-in* | Remove MSN Weather |
 | `bloat.remove_clipchamp` | `bloat` | No | `low` | — | *opt-in* | Remove Microsoft Clipchamp |
 | `bloat.remove_feedback_hub` | `bloat` | No | `low` | — | *opt-in* | Remove Feedback Hub |
+| `dev.case_sensitive_dirs` | `dev` | No | `medium` | — | *opt-in* | Enable NTFS Case-Sensitive Directories |
 | `dev.developer_mode` | `dev` | Yes | `medium` | — | *opt-in* | Enable Windows Developer Mode (Unprivileged Symlinks) |
 | `dev.enable_windows_containers` | `dev` | Yes | `medium` | — | *opt-in* | Enable Windows Containers Optional Feature |
 | `dev.fix_ssh_key_permissions` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Restrict %USERPROFILE%\.ssh ACLs to Current User Only |
 | `dev.git_sane_defaults` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Configure Sane Global Git Defaults (LF, Symlinks, LongPaths, main) |
+| `dev.install_nerd_font_user` | `dev` | No | `low` | — | *opt-in* | Install JetBrainsMono Nerd Font (Per-User) |
 | `dev.long_paths` | `dev` | Yes | `low` | — | `dev-comfort` | Enable Win32 Long Paths (> 260 chars) |
+| `dev.terminal_settings_defaults` | `dev` | No | `low` | — | `dev-comfort` | Configure Windows Terminal Developer Defaults |
+| `dev.vscode_settings_defaults` | `dev` | No | `low` | — | `dev-comfort` | Configure VS Code Developer & WSL Defaults |
 | `edge.quieting_baseline` | `edge` | No | `low` | — | `edge-quiet` | Quiet Microsoft Edge Nags, Boost, Shopping & Sidebar |
 | `explorer.alt_tab_windows_only` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Alt+Tab Shows Open Windows Only (No Edge Tabs) |
 | `explorer.classic_context_menu` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Restore Classic Full Right-Click Context Menu (Windows 11) |
@@ -63,6 +67,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.smb_block_insecure_guest` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Block Insecure Guest SMB Logons |
 | `hardening.smb_require_signing` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Require SMB Signing on Client & Server |
 | `hardening.uac_secure_desktop` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enforce UAC Admin Approval Mode on Secure Desktop |
+| `hardening.update_active_hours` | `hardening` | Yes | `low` | — | *opt-in* | Configure Windows Update Active Hours |
 | `hardening.update_no_autoreboot_with_users` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Prevent Auto-Reboot While Users Are Signed In |
 | `hardening.wdigest_off` | `hardening` | Yes | `low` | — | `hardened-baseline` | Disable WDigest Plaintext Credential Caching |
 | `input.caps_to_ctrl` | `input` | Yes | `medium` | — | `dev-comfort` | Remap Caps Lock to Left Ctrl (Scancode Map) |

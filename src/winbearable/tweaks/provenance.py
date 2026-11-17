@@ -923,6 +923,49 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "icacls",
         "Verified icacls.exe /inheritance:r /grant:r syntax.",
     ),
+    "dev.vscode_settings_defaults": _p(
+        (
+            "Configures VS Code per-user defaults: telemetry.telemetryLevel='off', "
+            "files.eol='\\n', and terminal.integrated.defaultProfile.windows='Ubuntu (WSL)'."
+        ),
+        "Visual Studio Code Documentation: Terminal Profiles & Settings",
+        "Low risk: per-user JSON merge with SHA-256 drift guard; refuses to overwrite JSONC with comments.",
+        "Disables VS Code telemetry, defaults to LF line endings, and opens WSL in the integrated terminal.",
+        "file_config",
+        "Verified merge, comment-refusal, and snapshot/rollback via FileConfigOperationAdapter.",
+    ),
+    "dev.case_sensitive_dirs": _p(
+        "Enables per-directory NTFS case sensitivity via fsutil.exe for paths in [params].",
+        "Microsoft Learn: Case sensitivity in WSL",
+        "Medium risk: revert refuses if directory is non-empty.",
+        "Selected directories preserve case-sensitive filenames like Linux filesystems.",
+        "fsutil_case_sensitive",
+        "Verified fsutil.exe file setCaseSensitiveInfo / queryCaseSensitiveInfo syntax.",
+    ),
+    "hardening.update_active_hours": _p(
+        "Configures Windows Update ActiveHoursStart and ActiveHoursEnd from [params].",
+        "Microsoft Learn: Manage device restarts after updates",
+        "Low risk: only adjusts restart-avoidance window; requires explicit hours in [params].",
+        "Windows Update avoids automatic restarts during configured active hours.",
+        "registry_value",
+        "Verified ActiveHoursStart/ActiveHoursEnd DWORDs under WindowsUpdate\\UX\\Settings.",
+    ),
+    "dev.terminal_settings_defaults": _p(
+        "Configures Windows Terminal copyOnSelect=true (and optional defaultProfile / font_face from [params]).",
+        "Microsoft Learn: Windows Terminal interaction settings",
+        "Low risk: per-user JSON merge with SHA-256 drift guard and full rollback.",
+        "Copies selected text automatically in Windows Terminal.",
+        "file_config",
+        "Verified merge and snapshot/rollback via FileConfigOperationAdapter.",
+    ),
+    "dev.install_nerd_font_user": _p(
+        "Installs JetBrainsMono Nerd Font per-user via winget.",
+        "Winget Community Repository: DEVCOM.JetBrainsMonoNerdFont",
+        "Low risk: per-user winget package install; uninstallable via rollback or winget.",
+        "Provides Nerd Font glyphs for terminal prompts and editors.",
+        "winget_package",
+        "Verified package ID DEVCOM.JetBrainsMonoNerdFont via winget search.",
+    ),
     "bloat.remove_bing_news": _p(
         "Uninstalls the preinstalled Microsoft News (Bing News) consumer app.",
         "Microsoft Learn: winget uninstall",
