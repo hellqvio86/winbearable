@@ -98,7 +98,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 
 ## 2. P0 — Privilege boundary (the tool elevates itself)
 
-### S-01 · P0 · `NEEDS-WINDOWS` — Elevated child launches executables by bare name and inherits the user's cwd
+### [x] S-01 · P0 · `NEEDS-WINDOWS` — Elevated child launches executables by bare name and inherits the user's cwd
 - **Where:** bare names at `backends/system.py:1217, 1224, 1264, 1271, 1284, 1291 (dism.exe), 1315, 1353, 1360, 1365, 1455, 1480, 1489, 1495` (`wsl.exe`, `sc.exe`, `schtasks.exe`, `dism.exe`, `reg.exe`, `tasklist.exe`, `taskkill.exe`, `code.cmd`) and `hyperv_firewall.py:187, 220` (`powershell.exe`); `uac.py:205` sets the elevated process's `lpDirectory` to the caller's cwd.
 - **Problem:** only 14 calls use `_sys32_exe()` (`system.py:1516`, added precisely to stop PATH substitution). The rest rely on `CreateProcess` search order, which includes the current directory unless `NoDefaultCurrentDirectoryInExePath` is set. Run `wb apply --elevate` from a directory containing a planted `sc.exe` (e.g. Downloads) and UAC approval runs it as admin. This undercuts the project's own security positioning.
 - **Fix:** resolve **every** external binary to an absolute path (System32 for OS tools; documented trusted locations for `winget`, `code.cmd`, `git`); set elevated `lpDirectory` to `%SystemRoot%\System32`; set `NoDefaultCurrentDirectoryInExePath=1` in the child env.
@@ -121,7 +121,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** document it; optionally refuse `--elevate` when the launcher path is writable by non-admin principals, or print the resolved path in the pre-elevation prompt.
 - **Done when:** threat-model has a "Self-elevation" section covering S-01…S-03 and this item.
 
-### S-05 · P2 · `CODE` — GitHub token passed on a command line
+### [x] S-05 · P2 · `CODE` — GitHub token passed on a command line
 - `bin/publish_winget.py:71` passes `-t <token>` to `wingetcreate`. Use `WINGET_CREATE_GITHUB_TOKEN` in the child env instead; never place secrets in argv.
 - **Done when:** the argv list in a test contains no token; env var carries it.
 
@@ -210,12 +210,13 @@ Sets `HKLM\...\Internet Settings\Wpad[WpadOverride]=1`. The Microsoft-documented
 
 ## 5. P2 — CI / release / supply chain
 
-### CI-01 · P1 · `CODE` — `workflow_dispatch` with `job=publish` publishes to PyPI without lint or tests
+### [x] CI-01 · P1 · `CODE` — `workflow_dispatch` with `job=publish` publishes to PyPI without lint or tests
 `ci.yml:116-135`: `all-checks` treats `skipped` as success, and `publish` (`ci.yml:242-257`) runs on `workflow_dispatch && inputs.job == 'publish'` where `lint`/`test` are skipped by their own `if`. A manual publish therefore bypasses every quality gate.
 - **Fix:** make `all-checks` require `success` for lint and test whenever `publish`/`draft-release` is requested; or make `publish` `needs` real results, not `skipped`.
 - **Done when:** a dispatch with `job=publish` runs lint+test first (or fails).
 
 ### CI-02 · P1 · `CODE` — Release binary is built with an unpinned tool and is unsigned/unattested
+- *PyInstaller pinned in `pyproject.toml` `[dependency-groups].release` + `uv.lock`; build provenance attestation / Authenticode signing still open.*
 - `ci.yml:324` and `bin/publish_winget.py:36`: `uv run --with pyinstaller` resolves the latest PyInstaller at build time, outside `uv.lock`, Dependabot, and the 3-day cooldown, on a runner with `contents: write` that uploads the artifact users install via winget. Pin PyInstaller in a dependency group in `uv.lock`.
 - The `wb.exe` requests UAC elevation but is unsigned and has no build provenance. Add `actions/attest-build-provenance`, publish SHA-256 for the zip, and plan Authenticode signing (or document why not).
 - **Done when:** PyInstaller is locked; release has an attestation; `docs/winget-releasing.md` describes verification.

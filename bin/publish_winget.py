@@ -31,7 +31,7 @@ def main() -> int:
         return 1
 
     build_res = subprocess.run(
-        ["uv", "run", "--with", "pyinstaller", "python", str(ROOT / "bin" / "build_winget.py")],
+        ["uv", "run", "--group", "release", "--frozen", "python", str(ROOT / "bin" / "build_winget.py")],
         shell=False,
         check=False,
     )
@@ -57,6 +57,8 @@ def main() -> int:
 
     asset_url = f"https://github.com/hellqvio86/winbearable/releases/download/{tag}/{zip_path.name}"
     wingetcreate = _find_wingetcreate()
+    wc_env = dict(os.environ)
+    wc_env["WINGET_CREATE_GITHUB_TOKEN"] = token_res.stdout.strip()
     wc_res = subprocess.run(
         [
             wingetcreate,
@@ -68,9 +70,8 @@ def main() -> int:
             asset_url,
             "-s",
             "-n",
-            "-t",
-            token_res.stdout.strip(),
         ],
+        env=wc_env,
         shell=False,
         check=False,
     )

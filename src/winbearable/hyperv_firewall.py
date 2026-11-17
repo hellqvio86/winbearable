@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -21,7 +22,21 @@ _ACTION_MAP = {"block": "Block", "allow": "Allow"}
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 
+def _sys32_path(*parts: str) -> str:
+    sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+    if sys_root.endswith("\\") or sys_root.endswith("/"):
+        sys_root = sys_root[:-1]
+    sep = "\\" if "\\" in sys_root or (len(sys_root) >= 2 and sys_root[1] == ":") else "/"
+    return sep.join([sys_root, "System32", *parts])
+
+
+def _powershell_exe() -> str:
+    return _sys32_path("WindowsPowerShell", "v1.0", "powershell.exe")
+
+
 def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+    child_env = dict(os.environ)
+    child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
     proc = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -30,6 +45,7 @@ def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         shell=False,
+        env=child_env,
     )
     try:
         stdout, stderr = proc.communicate(timeout=15.0)
@@ -38,7 +54,7 @@ def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
         if sys.platform == "win32" and proc.pid:
             with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                 subprocess.run(
-                    ["taskkill.exe", "/T", "/F", "/PID", str(proc.pid)],
+                    [_sys32_path("taskkill.exe"), "/T", "/F", "/PID", str(proc.pid)],
                     capture_output=True,
                     shell=False,
                     check=False,
@@ -184,7 +200,7 @@ def get_wsl_hyperv_firewall_setting(
     )
     exec_fn = runner or _default_ps_runner
     try:
-        res = exec_fn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script])
+        res = exec_fn([_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", ps_script])
     except OSError, subprocess.SubprocessError:
         return None
     if res.returncode != 0:
@@ -217,7 +233,7 @@ def set_wsl_hyperv_firewall_setting(
         "| ConvertTo-Json -Compress "
         "} catch { @{ error = $_.Exception.Message } | ConvertTo-Json -Compress; exit 1 }"
     )
-    cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script]
+    cmd = [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", ps_script]
     previous = get_wsl_hyperv_firewall_setting(runner=runner, platform_override=platform_override)
     verified: dict[str, Any] | None = None
     verified_ok = False

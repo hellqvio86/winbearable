@@ -202,7 +202,9 @@ def run_elevated_wb(
         sei.lpVerb = "runas"
         sei.lpFile = resolved_exe
         sei.lpParameters = params
-        sei.lpDirectory = cwd or os.getcwd()
+        sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+        default_dir = f"{sys_root.rstrip('/\\')}\\System32"
+        sei.lpDirectory = cwd or default_dir
         sei.nShow = SW_HIDE
 
         ok = shell32.ShellExecuteExW(ctypes.byref(sei))

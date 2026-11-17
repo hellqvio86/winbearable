@@ -1614,7 +1614,8 @@ def test_structured_outcomes_process_tree_locale_and_wsl_tx() -> None:
         res = win_sys._run_native_cmd(["wsl.exe", "--status"], timeout=3.0)
     assert res.returncode == 124
     mock_taskkill.assert_called_once()
-    assert mock_taskkill.call_args[0][0][:4] == ["taskkill.exe", "/T", "/F", "/PID"]
+    assert mock_taskkill.call_args[0][0][0].endswith("taskkill.exe")
+    assert mock_taskkill.call_args[0][0][1:4] == ["/T", "/F", "/PID"]
 
     # P0.1: Engine propagates TIMEOUT, ACCESS_DENIED, TOOL_MISSING into TweakCheckResult & RunRecord
     reg = InMemoryRegistryBackend()
