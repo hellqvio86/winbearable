@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.10.0] - 2026-11-17
+
+### Changed & Hardened
+
+- **Python 3.14+ / 3.15 Only:** Dropped Python `< 3.14` (`requires-python = ">=3.14"`), updated CI matrix to `["3.14", "3.15"]`, and updated Ruff/Mypy targets to `3.14`.
+- **P0 Recovery & Safety:** Added bounded UAC wait + Win32 `ctypes` contracts (`uac.py`), WSL write-ahead journal + per-distro checkpoints (`engine.py`, `wsl.py`), explicit `/etc/wsl.conf` missing-vs-error read probes (`wsl.py`), and Hyper-V firewall semantic verification (`hyperv_firewall.py`).
+- **P1 Reliability:** Preserved `state.json.bak` during `restore_from_backup()`, added symlink-safe backup pruning (`state.py`), case-insensitive INI merging (`wsl.py`), bounded `taskkill.exe` / command output (`hyperv_firewall.py`, `system.py`), byte-exact `FileSnapshot` + absent-file race protection (`operations.py`), table-aware TOML merging, non-registry evidence metadata, and expanded Windows 11 Build `26300` integration tests.
+
 ## [0.9.10] - 2026-11-17
 
 ### Fixed & Improved
