@@ -715,7 +715,7 @@ class InMemorySystemBackend:
         self,
         is_windows: bool = True,
         windows_build: int = MIN_SUPPORTED_BUILD,
-        display_version: str = "24H2",
+        display_version: str = "26H2",
         edition: str = "Professional",
         is_admin: bool = False,
         running_processes: set[str] | None = None,

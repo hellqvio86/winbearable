@@ -31,8 +31,8 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
 
 ## Core Architectural Invariants
 
-1. **100% Native Python — Zero PowerShell Wrappers (with sole `DEC-01` Hyper-V firewall exception):**
-   - Never invoke `powershell.exe` or `pwsh.exe` anywhere in `src/winbearable/` except the sole, narrowly scoped `DEC-01` Hyper-V firewall module (`src/winbearable/hyperv_firewall.py`, which uses `ConvertTo-Json -Compress` and `shell=False`).
+1. **100% Native Python — Zero PowerShell Wrappers (with sole Hyper-V firewall exception):**
+   - Never invoke `powershell.exe` or `pwsh.exe` anywhere in `src/winbearable/` except the sole, narrowly scoped Hyper-V firewall module (`src/winbearable/hyperv_firewall.py`, which uses `ConvertTo-Json -Compress` and `shell=False`).
    - Everywhere else, use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, and direct native executables (`wsl.exe`, `sc.exe`, `schtasks.exe`, `dism.exe`, `reg.exe`, `taskkill.exe`) with `shell=False` argument lists.
 2. **Dry-Run by Default:**
    - `wb plan`, `wb apply` (without `--apply`), `wb rollback` (without `--apply`), and `wb wsl apply/install/export/import/baseline` (without `--apply`) must never mutate registry keys, files, processes, or services.
@@ -96,7 +96,8 @@ make release-check # lint + test + TruffleHog + Trivy
 ## Catalog Governance (`tweaks/catalog.py` & `tweaks/provenance.py`)
 
 - Every tweak must remain small, composable, and declare full metadata (risk, admin, irreversible, reboot/explorer-restart, policy conflict paths, tested builds, verification method, and provenance).
-- **Catalog Freeze (`P2.1`):** Do not add new tweaks unless fixing a verification failure or a maintainer-assigned gap; prefer extending existing tweaks over adding new IDs.
+- **Catalog Freeze:** Do not add new tweaks unless fixing a verification failure or a maintainer-assigned gap; prefer extending existing tweaks over adding new IDs.
+- **No Transient TODO/Ticket IDs in Source or Docs:** Never reference internal TODO, review, or decision IDs (e.g., `DEC-01`, `WSL-08`, `R-01`, `B-01`, `P2.1`) in source code comments, docstrings, CLI text, or user-facing documentation; describe the architectural rule or behavior directly.
 - **Why `winbearable` vs Group Policy / Intune:** `winbearable` targets personal/unmanaged Windows machines where users lack Intune/ADMX infrastructure and want reversible, audited local baselines; enterprise fleets should use Group Policy or Intune directly (and `winbearable` yields via `BLOCKED_BY_POLICY` when policy keys conflict).
 
 ## Pythonic Style (Write Python as a Pythonista)

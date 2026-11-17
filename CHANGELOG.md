@@ -2,6 +2,15 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.11.0] - 2026-11-17
+
+### Security, Reliability & Catalog Accuracy
+
+- **Transaction & Rollback Safety:** Clean compensation transitions to `ROLLED_BACK` with `applied_ids == ()`; rollback retains `ROLLED_BACK` history and stops on first error; service handling skips absent services and guards `delete_value`; per-item firewall/auditpol rollback avoids overwriting unrelated rules (`restore_full_policy=True` opt-in); transaction lock wraps journal check + evaluation; `.wslconfig` is deleted on rollback when absent before apply; backup retention matches retained runs and prunes after commit.
+- **Privilege Boundary & UAC Hardening:** All native OS executables resolve to absolute `System32` / trusted paths, elevated `lpDirectory` uses `%SystemRoot%\System32` with `NoDefaultCurrentDirectoryInExePath=1`, `write_uac_output_safe` enforces `O_CREAT | O_EXCL` + symlink/reparse-point checks, `DEFAULT_UAC_TIMEOUT_MS` raised to 30 min (`WINBEARABLE_UAC_TIMEOUT_MS` overridable), `TerminateProcess` failures are reported honestly, and `bin/publish_winget.py` passes GitHub tokens via `WINGET_CREATE_GITHUB_TOKEN`.
+- **Windows Locale & Parsing:** UTF-16LE `wsl.exe` / OEM console decoding (`_decode_cmd_bytes`), `ElementTree` XML `Task/Settings/Enabled` parsing, SDDL/SID-based ICACLS checks + reversible ACL backups (`IcaclsSnapshot`), LF-only `/etc/wsl.conf` stdin + `sha256sum` verification + `lint_wsl_conf_lf`, Hyper-V firewall `NotConfigured` enum mapping + journaling, and accurate `ImagePath` tokenization.
+- **Catalog & Docs:** Dropped unverified CIS mappings (requiring `verified_on`), split `hardening.restrict_blank_passwords` (with deprecated alias resolution), switched `hardening.enable_lsa_protection` to reversible `RunAsPPL=2`, added `WinHttp\DisableWpad=1` to `hardening.disable_wpad`, documented policy/telemetry/adapter side-effects, and aligned `SECURITY.md`, `packaging/winget/`, and `docs/threat-model.md`.
+
 ## [0.10.0] - 2026-11-17
 
 ### Changed & Hardened

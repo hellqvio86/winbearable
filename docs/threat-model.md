@@ -19,13 +19,13 @@
 - **Managed Device Guard (`--allow-managed`):** When a host is detected as Domain-joined, Microsoft Entra-joined, or MDM-enrolled, machine-scope (`requires_admin`) tweaks are skipped by default with reason `managed_device` unless `--allow-managed` is explicitly passed.
 - **Supported OS Scope:** Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT (`IoTEnterprise`, `IoTEnterpriseS`), Windows LTSC (`EnterpriseS`), Windows Server, and older builds (`< 26300`) are strictly unsupported.
 
-## 4. Mirrored Networking & WSL2 Threat Clarity (`P1-L.4`)
+## 4. Mirrored Networking & WSL2 Threat Clarity
 
-- **Host Firewall Is the Primary Boundary:** Under `networkingMode=mirrored`, the WSL2 VM shares the Windows host's network interfaces and IP addresses. Inbound/outbound traffic filtering relies on the Windows Host Firewall (and optional `wb wsl firewall` Hyper-V VM default-deny rules via `DEC-01`), **not** an isolated NAT subnet.
+- **Host Firewall Is the Primary Boundary:** Under `networkingMode=mirrored`, the WSL2 VM shares the Windows host's network interfaces and IP addresses. Inbound/outbound traffic filtering relies on the Windows Host Firewall (and optional `wb wsl firewall` Hyper-V VM default-deny rules), **not** an isolated NAT subnet.
 - **WSL2 Is Not a Sandbox:** Even with `strict` mode or Hyper-V firewall rules, WSL2 is a developer VM, not a hardened security sandbox.
 - **`/mnt/c` Follows Windows DAC/NTFS ACLs:** Any Linux process with `[automount] enabled=true` accesses `/mnt/c` under your Windows user's discretionary access control (DAC) token; restrict sensitive keys (`~/.ssh`, Windows credentials) accordingly.
 
-## 5. Compensation & Rollback Matrix (`P1.1`)
+## 5. Compensation & Rollback Matrix
 
 | Operation Type | Reversibility | Rollback / Compensation Behavior |
 | --- | --- | --- |
@@ -47,7 +47,7 @@
 | **SSH ACL restriction** (`IcaclsUserOnlySpec`) | `best-effort` | Tightens `%USERPROFILE%\.ssh` to current user only; prior permissive ACEs are not restored. |
 | **WSL host `.wslconfig`** | `reversible` | Restores `.wslconfig.bak` on failure or rollback. |
 | **WSL distro `/etc/wsl.conf`** | `reversible` | Restores `WslDistroSnapshot` (`tee /etc/wsl.conf` or `rm -f /etc/wsl.conf`) per modified distro. |
-| **Hyper-V WSL firewall** (`DEC-01`) | `reversible` | Configurable via `wb wsl firewall --disable --apply` (not auto-reverted by profile rollback). |
+| **Hyper-V WSL firewall** | `reversible` | Configurable via `wb wsl firewall --disable --apply` and journaled for rollback. |
 
 ## 6. Stable CLI Exit Code Taxonomy (`P2-Q.1`)
 
@@ -65,3 +65,10 @@
 - **Write-ahead journal:** `apply_profile()` persists `TransactionState.PLANNED` and `TransactionState.APPLYING` (with registry/file/WSL backups and per-distro `/etc/wsl.conf` snapshots) **before** mutating target resources, and checkpoints after `.wslconfig` and each WSL distro.
 - **Backup preservation during recovery:** `StateStore.restore_from_backup()` copies any existing corrupt `state.json` to `state.json.corrupt` and writes the validated backup atomically without overwriting `state.json.bak`.
 - **Disk-full, permission-loss, and AV/file-lock failures:** Temp-file writes fail before `os.replace()`, unlinking the partial temp file so the prior `state.json` or target config file remains intact; `wb recover` compensates any incomplete `PLANNED`/`APPLYING`/`ROLLING_BACK`/`FAILED` run.
+
+## Self-Elevation & UAC Trust Boundaries
+- **User-writable launcher paths (`--elevate`):** If `wb.exe` or the active Python environment lives in a user-writable directory (such as `%USERPROFILE%\.local\bin`, a local `.venv`, or a user-scope Winget portable directory), any code executing as that user that can modify those binaries before a UAC prompt is approved can execute with Administrator privileges upon elevation. Users should treat `%LOCALAPPDATA%` / `%USERPROFILE%` tool directories as part of their UAC trust boundary.
+- **Child launch hygiene:** Elevated launches set `lpDirectory` to `%SystemRoot%\System32` and `NoDefaultCurrentDirectoryInExePath=1`, and all native OS executables are resolved to absolute `System32` / trusted paths.
+- **UAC output file safety:** The elevated child validates `--uac-output` (`wb-uac-*\uac-output.txt`), rejects symlinks and Windows reparse points, and creates the output file exclusively (`O_CREAT | O_EXCL`).
+- **Elevation timeout & rollback:** Default elevation timeout is 30 minutes (`WINBEARABLE_UAC_TIMEOUT_MS` configurable). If `TerminateProcess` fails across the UIPI/integrity boundary from a medium-integrity parent, `winbearable` reports the failure honestly and warns that the elevated child may still hold the transaction lock.
+- **Rollback fidelity:** Firewall/auditpol rollback restores per-item (`restore_full_policy=False` default), `hardening.enable_lsa_protection` uses reversible `RunAsPPL=2`, `file_config` preserves BOM/order/non-ASCII on apply and exact bytes on rollback, and `.wslconfig` is deleted on rollback if it did not exist prior to apply.

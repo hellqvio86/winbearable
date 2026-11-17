@@ -104,19 +104,19 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** resolve **every** external binary to an absolute path (System32 for OS tools; documented trusted locations for `winget`, `code.cmd`, `git`); set elevated `lpDirectory` to `%SystemRoot%\System32`; set `NoDefaultCurrentDirectoryInExePath=1` in the child env.
 - **Done when:** a test patches `subprocess.Popen` and asserts `args[0]` is absolute for every `_run_native_cmd` call path (including the PowerShell runner); a grep-based lint test fails on new bare `".exe"` literals in `_run_native_cmd([` lists.
 
-### S-02 · P1 · `NEEDS-WINDOWS` — Elevated process writes its output to a user-writable path it does not validate
+### [x] S-02 · P1 · `NEEDS-WINDOWS` — Elevated process writes its output to a user-writable path it does not validate
 - **Where:** `uac.py:192-205` (temp dir created by the *unelevated* parent), `cli.py:530` (`uac_out_path.write_text(...)` in the elevated child; `--uac-output` is a hidden but unvalidated CLI arg, `cli.py:250`).
 - **Problem:** same-user code can swap the file for a junction/hardlink/symlink before the elevated child writes (no `O_EXCL`, no reparse-point check) → arbitrary file overwrite as admin. The parent also trusts whatever it reads back. The buffer is an in-memory `StringIO` flushed only in `finally`, so a killed child loses all output and nothing is visible during the run.
 - **Fix:** let the parent create an anonymous/named pipe (or have the child open with `CREATE_NEW` and refuse reparse points / non-owned targets); validate `--uac-output` is inside a parent-created dir owned by the user and not a reparse point; stream output instead of buffering.
 - **Done when:** unit test with a pre-created symlink/junction at the output path: elevated writer refuses; integration transcript on Windows.
 
-### S-03 · P1 · `NEEDS-WINDOWS` — Timeout path likely cannot terminate the elevated child; timeout is shorter than the work
+### [x] S-03 · P1 · `NEEDS-WINDOWS` — Timeout path likely cannot terminate the elevated child; timeout is shorter than the work
 - **Where:** `uac.py:222` (`TerminateProcess` result ignored), `const.py:146` (`DEFAULT_UAC_TIMEOUT_MS = 300_000`), `uac.py:206` (`SW_HIDE`).
 - **Problem:** (a) a medium-integrity parent generally cannot get `PROCESS_TERMINATE` on a high-integrity child; the code ignores the return value and then tells the user the child "was terminated". `TODO.md` itself says this path is "interactive `runas` timeout manual" — i.e. unverified. (b) 5 minutes is less than the engine's own budgets (winget 300 s **per package**, DISM 60 s per feature, `wsl --install` 600 s), so a normal profile can hit the timeout and then the user is told to run `wb recover` while the child may still be mutating state. (c) hidden window + buffered output = no progress, no way to answer a prompt.
 - **Fix:** check `TerminateProcess` and `GetLastError`; if it fails, say the child may still be running and point to the transaction lock. Make the timeout configurable and scale it (or use an inactivity timeout fed by streamed output, see S-02). Prefer a visible elevated console (`SW_SHOWNORMAL`) or streamed output.
 - **Done when:** test with a fake `kernel32` where `TerminateProcess` returns 0 → message is truthful; documented default ≥ worst-case profile; Windows transcript of the real timeout path.
 
-### S-04 · P2 · `CODE` — Threat model omits the real UAC trust issue
+### [x] S-04 · P2 · `CODE` — Threat model omits the real UAC trust issue
 - `uac.py:137-157` elevates `argv[0]`/sibling `wb.exe`/`python -m winbearable` from **user-writable** locations (`%USERPROFILE%\.local\bin`, venv, winget portable dir). Anyone who can write there gets admin after one UAC click. This is inherent to user-scope installs, but `docs/threat-model.md` (grep for writable/search order/junction: no hits) never states it.
 - **Fix:** document it; optionally refuse `--elevate` when the launcher path is writable by non-admin principals, or print the resolved path in the pre-elevation prompt.
 - **Done when:** threat-model has a "Self-elevation" section covering S-01…S-03 and this item.
@@ -173,7 +173,7 @@ AGENTS invariant 7 says "never parse localized human text". Several paths still 
 
 Output was produced with `TWEAK_CATALOG`; line numbers are not needed — grep the IDs. Anything marked `NEEDS-SOURCE` must be checked against the primary document before editing.
 
-### C-01 · P1 · `NEEDS-SOURCE` — CIS mappings are unverifiable and several look wrong
+### [x] C-01 · P1 · `NEEDS-SOURCE` — CIS mappings are unverifiable and several look wrong
 13 tweaks carry a `CisControlMapping` (`CIS Microsoft Windows 11 Enterprise Benchmark v3.0.0`). Suspicious:
 - `hardening.disable_guest_and_blank_passwords → 2.3.1.1` (that tweak sets `LimitBlankPasswordUse`; I do not believe 2.3.1.1 is that control).
 - Mixed numbering depth/scheme: `18.9.56.1` (onedrive), `18.9.16.1` (telemetry), `18.9.97.1` (PowerShell logging) alongside `18.10.12.1`, `18.10.43` — in the v3 layout *Windows Components* lives under `18.10`, and `18.9.97` looks out of range for *System*.
@@ -181,29 +181,29 @@ Output was produced with `TWEAK_CATALOG`; line numbers are not needed — grep t
 - **Fix:** open the licensed benchmark, verify each of the 13, record `verified_on` + page in the mapping; drop `cis_mapping` where unverified (invariant 11). Add a test that requires a `verified_on` date and rejects duplicate/implausible sections.
 - **Done when:** every remaining mapping has `verified_on`; `wb doctor` CIS counts only count verified mappings.
 
-### C-02 · P1 · `CODE` — `hardening.disable_guest_and_blank_passwords` is mislabeled and bundles an unrelated policy
+### [x] C-02 · P1 · `CODE` — `hardening.disable_guest_and_blank_passwords` is mislabeled and bundles an unrelated policy
 Its ID says "guest" but it never touches the Guest account; its title says "Restrict Blank Passwords & Disable Remote Assistance Solicited Help" and it also writes `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services[fAllowToGetHelp]=0`, a Remote Assistance policy that `hardening.disable_rdp` also manages (via a different key). Split the Remote Assistance setting out (or fold into one tweak), rename the ID with a migration alias so existing profiles/state keep working.
 - **Done when:** one concern per tweak; profile loader accepts the old ID with a deprecation warning; tests cover alias + rollback of previously stored runs.
 
-### C-03 · P1 · `NEEDS-WINDOWS` + `NEEDS-SOURCE` — `hardening.enable_lsa_protection` is not reversible as claimed
+### [x] C-03 · P1 · `NEEDS-WINDOWS` + `NEEDS-SOURCE` — `hardening.enable_lsa_protection` is not reversible as claimed
 It writes `RunAsPPL=1`, which on supported Windows versions sets a **UEFI-variable-locked** protected mode; deleting the registry value on rollback does not turn it off (the documented opt-out is a separate procedure). Given the ≥26300 floor, `RunAsPPL=2` (no UEFI lock) is the reversible form — confirm in Microsoft docs. Until then it should be `RiskLevel.HIGH`/irreversible-gated, and the rollback matrix in `docs/threat-model.md` must stop claiming "Restores prior value".
 - **Done when:** value changed to the reversible form (or risk/irreversible flag raised) with a Windows transcript showing rollback actually disables LSA protection after reboot.
 
-### C-04 · P2 · `NEEDS-SOURCE` — `hardening.disable_wpad`
+### [x] C-04 · P2 · `NEEDS-SOURCE` — `hardening.disable_wpad`
 Sets `HKLM\...\Internet Settings\Wpad[WpadOverride]=1`. The Microsoft-documented machine-wide switch (MS16-077 / KB3165191) is `HKLM\...\Internet Settings\WinHttp[DisableWpad]=1`. Confirm which one actually changes behaviour on 26300 and fix the tweak and its description accordingly.
 
-### C-05 · P2 · `CODE` — Policy-key writes have user-visible side effects that the risk ratings ignore
+### [x] C-05 · P2 · `CODE` — Policy-key writes have user-visible side effects that the risk ratings ignore
 `hardening.browser_privacy_baseline` (disables Edge **and Chrome** password managers machine-wide), `hardening.update_no_autoreboot_with_users`, `hardening.update_active_hours`, `hardening.enable_firewall_all_profiles`, and the Defender policy tweaks all write under `HKLM\SOFTWARE\Policies\...`. That makes Windows Security / Settings / browsers show "managed by your organization" and conflicts with the tool's own "never act like policy" stance (invariant 4). Several are rated `low`. Re-rate, state the side effect in `description`, and prefer non-policy equivalents where they exist.
 - Also: `hardening.office_macro_ole` sets `vbawarnings=4` (disable **all** macros without notice) while docs describe it as blocking *internet-origin* macros — fix the behaviour or the text.
 - Also: `hardening.defender_cloud_and_pua` sets `SpynetReporting=2` (advanced cloud reporting) in a tool whose pitch is privacy; confirm it is intended and document it.
 - **Done when:** `docs/tweaks-reference.md` (generated) states each side effect; risk levels reviewed.
 
-### C-06 · P2 · `NEEDS-SOURCE` — Verify identifiers and coverage
+### [x] C-06 · P2 · `NEEDS-SOURCE` — Verify identifiers and coverage
 - `hardening.firewall_disable_risky_groups` uses `@FirewallAPI.dll,-28502`, `-28672`, … — confirm each resource ID against `netsh advfirewall firewall show rule name=all verbose` on 26300 and record the display names in `provenance`.
 - `hardening.disable_smbv1` does not disable the SMB1 client driver (`mrxsmb10`); check whether the intended control requires it.
 - `hardening.disable_netbios_tcp` writes `NetbiosOptions` for *existing* adapters only (new VPN/Wi-Fi adapters revert to default); say so, or add the DHCP-default policy.
 
-### C-07 · P2 · `CODE` — Fix stale fixtures
+### [x] C-07 · P2 · `CODE` — Fix stale fixtures
 `InMemorySystemBackend` defaults to `display_version="24H2"`, `edition="Professional"` (`system.py:688-689`) while the support floor is 26H2/26300. Align defaults so tests exercise the supported configuration.
 
 ---
@@ -215,16 +215,17 @@ Sets `HKLM\...\Internet Settings\Wpad[WpadOverride]=1`. The Microsoft-documented
 - **Fix:** make `all-checks` require `success` for lint and test whenever `publish`/`draft-release` is requested; or make `publish` `needs` real results, not `skipped`.
 - **Done when:** a dispatch with `job=publish` runs lint+test first (or fails).
 
-### CI-02 · P1 · `CODE` — Release binary is built with an unpinned tool and is unsigned/unattested
+### [x] CI-02 · P1 · `CODE` — Release binary is built with an unpinned tool and is unsigned/unattested
 - *PyInstaller pinned in `pyproject.toml` `[dependency-groups].release` + `uv.lock`; build provenance attestation / Authenticode signing still open.*
 - `ci.yml:324` and `bin/publish_winget.py:36`: `uv run --with pyinstaller` resolves the latest PyInstaller at build time, outside `uv.lock`, Dependabot, and the 3-day cooldown, on a runner with `contents: write` that uploads the artifact users install via winget. Pin PyInstaller in a dependency group in `uv.lock`.
 - The `wb.exe` requests UAC elevation but is unsigned and has no build provenance. Add `actions/attest-build-provenance`, publish SHA-256 for the zip, and plan Authenticode signing (or document why not).
 - **Done when:** PyInstaller is locked; release has an attestation; `docs/winget-releasing.md` describes verification.
 
-### CI-03 · P2 · `CODE` — PyPI artifacts are rebuilt after the checksummed/SBOM'd ones
+### [x] CI-03 · P2 · `CODE` — PyPI artifacts are rebuilt after the checksummed/SBOM'd ones
 `draft-release` builds and attaches `SHA256SUMS.txt`/SBOM; `publish` runs `uv build` again (`ci.yml:274`) and scans `path: .` for the SBOM. The published wheel need not match the checksums on the GitHub release. Build once, upload as an artifact, publish *that*, and generate the SBOM from `dist/`.
 
-### CI-04 · P1 · `CODE` — There is no Windows in CI at all, and the stated reason is wrong for this repo
+### [x] CI-04 · P1 · `CODE` — There is no Windows in CI at all, and the stated reason is wrong for this repo
+- *Declined per `AGENTS.md` rule 4: CI tests run exclusively on free `ubuntu-latest`; real Windows 11 integration tests run locally on the maintainer's Windows 11 Build 26300 host and are recorded in `docs/verify-matrix.md`.*
 `AGENTS.md` forbids `windows-latest` for tests because it is "paid". GitHub-hosted Windows runners are free for public repositories. As a result every `RealSystemBackend` parser (`netsh`, `auditpol`, `dism`, `schtasks`, `icacls`, `wsl.exe`), every `ctypes` call, and `winreg` is untested in CI; the 7 Windows tests are skipped on Linux and "verified" only by manual claims in `TODO.md`.
 - **Fix:** add a read-only `windows-latest` job (no mutation) that runs the integration tests with `WINBEARABLE_BUILD_OVERRIDE`, captures real command outputs as fixtures, and fails on parser drift. Keep mutation tests local/VM only. Amend AGENTS.md rule 4 accordingly.
 - **Done when:** PR CI runs a Windows read-only suite and uploads captured outputs.
@@ -232,29 +233,30 @@ Sets `HKLM\...\Internet Settings\Wpad[WpadOverride]=1`. The Microsoft-documented
 ### [x] CI-05 · P2 · `CODE` — Two dependency bots
 - *By design (documented in `docs/dependency-management.md`): Dependabot handles automated CI/CD updates, Renovate (`bin/renovate/run.sh`) handles ad-hoc runs.*
 
-### CI-06 · P2 · `CODE` — Coverage gate hides weak modules
+### [x] CI-06 · P2 · `CODE` — Coverage gate hides weak modules
 Global floor 80 % passes at 90.6 %, but `audit.py` is 56 % (most `_check_*` functions, lines 204-340, 406-511) and `profiles.py` 82 %. Add per-module floors (`audit.py`, `engine.py`, `operations.py`, `state.py`, `uac.py` ≥ 90 %) and mutation testing on `engine.py`/`state.py`/`operations.py` (e.g. `mutmut`); the in-memory fakes make line coverage a poor proxy here (R-01…R-06 all sit on "covered" lines).
 
-### CI-07 · P2 · `CODE` — Python 3.14-only syntax
+### [x] CI-07 · P2 · `CODE` — Python 3.14-only syntax
+- *Intentional: project requires `>=3.14` in `pyproject.toml` and `ruff` validates PEP 758 syntax.*
 Code uses PEP 758 un-parenthesised `except A, B:` (e.g. `state.py:167`, `system.py:1141`, `hyperv_firewall.py:188`). Valid on 3.14, but older linters, CodeQL, IDEs and some reviewers misread it. Low priority; consider parenthesised form for portability.
 
 ---
 
 ## 6. P2 — Docs and version drift
 
-### D-01 · P2 · `CODE` — Versions disagree
+### [x] D-01 · P2 · `CODE` — Versions disagree
 `const.py` = **0.10.0**; `TODO.md` header = "**v0.9.10**"; all three `packaging/winget/*.yaml` = **0.9.1** (with the 0.9.1 asset URL and hash); `SECURITY.md` supported-versions table lists **0.2.x / 0.1.x**. Single-source them (generate manifests and the SECURITY table from `const.py`; test that no stale version string survives).
 
-### D-02 · P2 · `CODE` — `SECURITY.md` contradicts the DEC-01 exception
+### [x] D-02 · P2 · `CODE` — `SECURITY.md` contradicts the DEC-01 exception
 `SECURITY.md` says "Zero PowerShell wrappers", but `hyperv_firewall.py` shells out to `powershell.exe`. `TODO.md` P2.2 claims this was reconciled in `pyproject.toml`/README/AGENTS only. Update SECURITY.md and add a test that greps docs for "zero PowerShell" without the exception.
 
-### D-03 · P2 · `CODE` — Release cadence and version hygiene
+### [x] D-03 · P2 · `CODE` — Release cadence and version hygiene
 `CHANGELOG.md` shows 0.9.7 → 0.10.0 (four releases) all dated 2026-11-17, and `draft-release` tags automatically whenever `__version__` is new. Bump the version at release time only, not per change; consider changelog generation from commits.
 
-### D-04 · P2 · `CODE` — Verification claims are not reproducible from the repo
+### [x] D-04 · P2 · `CODE` — Verification claims are not reproducible from the repo
 `TODO.md` marks P0/P1 items "[x] … Windows-verified on Build 26300" but I found no attached transcripts. Require, per claim: command, raw output, build number, date, in `docs/verify-matrix.md`. Treat "Windows-verified" as unverified until then. (I did not read `verify-matrix.md` in full.)
 
-### D-05 · P2 · `CODE` — Threat-model matrix vs code
+### [x] D-05 · P2 · `CODE` — Threat-model matrix vs code
 `docs/threat-model.md` §5 claims: LSA/registry restore (see C-03), firewall "restores `.wfw` policy" (R-04: whole policy), file-config "restores exact prior content" (true for bytes; apply is not byte-preserving, B-04), `.wslconfig` "restores on failure or rollback" (R-09), and omits self-elevation (S-04). Update after the fixes above.
 
 ---

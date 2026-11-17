@@ -2,6 +2,7 @@
 
 import os
 import tomllib
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from .const import (
 )
 from .models import EnvironmentInfo, ProfileSpec, WslConfigSpec
 from .packages import PACKAGE_CATALOG, PACKAGE_PRESETS
-from .tweaks import TWEAK_CATALOG
+from .tweaks import TWEAK_CATALOG, TWEAK_ID_ALIASES, resolve_tweak_id
 
 
 class ProfileValidationError(ValueError):
@@ -231,7 +232,14 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
         raise ProfileValidationError(f"Profile '{source_label}' [tweaks] section must be a table.")
 
     for tweak_id, enabled in raw_tweaks.items():
-        if tweak_id not in TWEAK_CATALOG:
+        canonical_id = resolve_tweak_id(tweak_id)
+        if tweak_id in TWEAK_ID_ALIASES:
+            warnings.warn(
+                f"Profile '{source_label}' uses deprecated tweak ID '{tweak_id}'; use '{canonical_id}' instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        if canonical_id not in TWEAK_CATALOG:
             ln = _find_key_line(content, tweak_id)
             ln_hint = f" (line {ln})" if ln else ""
             raise ProfileValidationError(f"Profile '{source_label}' references unknown tweak ID '{tweak_id}'{ln_hint}.")
@@ -268,7 +276,7 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
     if not isinstance(raw_params, dict):
         raise ProfileValidationError(f"Profile '{source_label}' [params] section must be a table.")
     for tid, param_map in raw_params.items():
-        if tid not in TWEAK_CATALOG:
+        if resolve_tweak_id(tid) not in TWEAK_CATALOG:
             raise ProfileValidationError(f"Profile '{source_label}' [params] references unknown tweak ID '{tid}'.")
         if not isinstance(param_map, dict):
             raise ProfileValidationError(f"Profile '{source_label}' [params.\"{tid}\"] must be a table.")
@@ -315,7 +323,7 @@ def load_profile(name_or_path: str, _visited: set[Path] | None = None) -> Profil
         resolved_includes.append(inc_ref)
 
     for tweak_id, enabled in raw_data.get("tweaks", {}).items():
-        merged_tweaks[str(tweak_id)] = bool(enabled)
+        merged_tweaks[resolve_tweak_id(str(tweak_id))] = bool(enabled)
 
     raw_wsl = raw_data.get("wsl", {})
     if not isinstance(raw_wsl, dict):

@@ -1,6 +1,6 @@
-"""Hyper-V firewall management for the WSL2 VM (WSL-08 / DEC-01 narrow PowerShell exception).
+"""Hyper-V firewall management for the WSL2 VM (narrow PowerShell exception).
 
-Per DEC-01 in TODO.md, Windows exposes Hyper-V VM firewall settings exclusively via the
+Windows exposes Hyper-V VM firewall settings exclusively via the
 `NetSecurity` PowerShell cmdlets (`Get-NetFirewallHyperVVMSetting` / `Set-NetFirewallHyperVVMSetting`).
 This module is the sole permitted PowerShell boundary in `winbearable`.
 """

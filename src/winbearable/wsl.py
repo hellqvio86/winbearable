@@ -847,7 +847,7 @@ _DISTRO_EOL_VERSIONS: dict[str, set[str]] = {
 
 
 def deep_audit_wsl_distro(system: SystemBackend, distro: str) -> dict[str, Any]:
-    """Run read-only deep exposure checks inside a WSL2 distro via fixed-argv commands (WSL-04)."""
+    """Run read-only deep exposure checks inside a WSL2 distro via fixed-argv commands."""
     issues: list[str] = []
     uid_res = system.run_wsl_command(["-d", distro, "--", "id", "-u"])
     default_uid = uid_res.stdout.strip() if uid_res.returncode == 0 else None

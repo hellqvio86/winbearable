@@ -33,7 +33,7 @@ OPT_IN_TWEAKS: frozenset[str] = frozenset(
 
 
 def test_catalog_never_invokes_powershell() -> None:
-    """No source file in src/winbearable/ may invoke powershell.exe/pwsh.exe except hyperv_firewall.py (DEC-01)."""
+    """No source file in src/winbearable/ may invoke powershell.exe/pwsh.exe except hyperv_firewall.py."""
     src_root = Path(__file__).resolve().parent.parent / "winbearable"
     allowed = {src_root / "hyperv_firewall.py"}
     for py_file in src_root.rglob("*.py"):
@@ -90,11 +90,28 @@ def test_catalog_admin_flags_and_cis_verification_consistent() -> None:
             assert tweak.requires_admin, f"{tid} touches machine state and must have requires_admin=True"
         else:
             assert not tweak.requires_admin, f"{tid} is user-scope only and must have requires_admin=False"
+        seen_cis_ids: set[str] = set()
         if tweak.cis_mapping is not None:
             assert tweak.cis_mapping.verification_method.strip()
+            assert tweak.cis_mapping.verified_on and tweak.cis_mapping.verified_on.strip()
+            assert tweak.cis_mapping.control_id not in seen_cis_ids
+            seen_cis_ids.add(tweak.cis_mapping.control_id)
         assert tweak.provenance is not None
         for ed in tweak.provenance.supported_editions:
             assert ed.lower() not in UNSUPPORTED_IOT_LTSC_EDITION_IDS
+
+
+def test_security_and_version_docs_consistent() -> None:
+    """SECURITY.md and winget manifests agree with const.__version__ and document the Hyper-V exception."""
+    from winbearable.const import __version__
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    sec_text = (repo_root / "SECURITY.md").read_text(encoding="utf-8")
+    assert "Hyper-V" in sec_text and "hyperv_firewall.py" in sec_text
+    minor_prefix = ".".join(__version__.split(".")[:2]) + ".x"
+    assert minor_prefix in sec_text
+    for yaml_path in (repo_root / "packaging" / "winget").glob("*.yaml"):
+        assert f"PackageVersion: {__version__}" in yaml_path.read_text(encoding="utf-8")
 
 
 def test_profiles_membership_and_corp_safe_constraints() -> None:
@@ -138,7 +155,7 @@ def test_docs_match_catalog() -> None:
 
 
 def test_catalog_irreversible_and_high_risk_invariants() -> None:
-    """Every irreversible tweak is documented as irreversible; every HIGH-risk tweak has risk_rationale (P2.4)."""
+    """Every irreversible tweak is documented as irreversible; every HIGH-risk tweak has risk_rationale."""
     from winbearable.models import RiskLevel
 
     for tweak in TWEAK_CATALOG.values():

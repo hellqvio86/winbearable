@@ -1695,3 +1695,75 @@ def test_per_item_policy_rollback_wslconfig_absent_and_journal_hygiene(tmp_path:
         rolled = rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
     assert len(rolled) == 1 and rolled[0].state == TransactionState.ROLLED_BACK
     assert not wsl_cfg.exists()
+
+
+def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path) -> None:
+    """S-02, S-03, C-02, C-07: UAC O_EXCL/reparse guard, TerminateProcess failure message, alias, 26H2 fixture."""
+    import ctypes
+    from unittest.mock import patch
+
+    from winbearable.backends.system import InMemorySystemBackend
+    from winbearable.const import WAIT_TIMEOUT
+    from winbearable.profiles import load_profile
+    from winbearable.tweaks import get_tweak
+    from winbearable.uac import UacElevationError, UacTimeoutError, run_elevated_wb, write_uac_output_safe
+
+    # S-02: write_uac_output_safe creates new wb-uac-*/uac-output.txt and rejects existing/untrusted/symlink targets
+    uac_dir = tmp_path / "wb-uac-123"
+    uac_dir.mkdir()
+    out_file = uac_dir / "uac-output.txt"
+    write_uac_output_safe(out_file, "ok")
+    assert out_file.read_text(encoding="utf-8") == "ok"
+    with pytest.raises(FileExistsError):
+        write_uac_output_safe(out_file, "overwrite")
+    with pytest.raises(UacElevationError, match="untrusted"):
+        write_uac_output_safe(tmp_path / "evil.txt", "x")
+    sym_dir = tmp_path / "wb-uac-sym"
+    sym_dir.symlink_to(uac_dir)
+    with pytest.raises(UacElevationError, match="symlink"):
+        write_uac_output_safe(sym_dir / "uac-output.txt", "x")
+
+    # S-03: TerminateProcess returning 0 reports truthful non-terminated message
+    class _FakeKernel32:
+        def ShellExecuteExW(self, *_a: object) -> int:
+            return 1
+
+        def WaitForSingleObject(self, *_a: object) -> int:
+            return WAIT_TIMEOUT
+
+        def TerminateProcess(self, *_a: object) -> int:
+            return 0
+
+        def GetLastError(self) -> int:
+            return 5
+
+        def CloseHandle(self, *_a: object) -> int:
+            return 1
+
+    class _FakeShell32:
+        def ShellExecuteExW(self, ptr: object) -> int:
+            # ctypes.byref(_ShellExecuteInfoW) -> set hProcess non-zero
+            sei = ptr._obj  # type: ignore[attr-defined]
+            sei.hProcess = ctypes.c_void_p(42)
+            return 1
+
+    class _FakeWindll:
+        shell32 = _FakeShell32()
+        kernel32 = _FakeKernel32()
+
+    with pytest.raises(UacTimeoutError, match="could not be terminated"), patch("sys.platform", "win32"):
+        run_elevated_wb(["apply"], executable="wb.exe", windll_override=_FakeWindll(), timeout_ms=100)
+
+    # C-02: deprecated alias resolves with DeprecationWarning
+    assert get_tweak("hardening.disable_guest_and_blank_passwords").tweak_id == "hardening.restrict_blank_passwords"
+    alias_toml = tmp_path / "alias.toml"
+    alias_toml.write_text(
+        'name = "alias"\ndescription = "test"\n[tweaks]\n"hardening.disable_guest_and_blank_passwords" = true\n',
+        encoding="utf-8",
+    )
+    with pytest.warns(DeprecationWarning, match="deprecated tweak ID"):
+        loaded = load_profile(str(alias_toml))
+    assert loaded.tweaks.get("hardening.restrict_blank_passwords") is True
+
+    # C-07: InMemorySystemBackend defaults to 26H2
+    assert InMemorySystemBackend().display_version == "26H2"
