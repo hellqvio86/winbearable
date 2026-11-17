@@ -1090,7 +1090,7 @@ class NativeSystemBackend:
         if self._platform == "win32":
             with contextlib.suppress(OSError, subprocess.SubprocessError):
                 subprocess.run(
-                    ["taskkill.exe", "/T", "/F", "/PID", str(pid)],
+                    [self._sys32_exe("taskkill.exe"), "/T", "/F", "/PID", str(pid)],
                     capture_output=True,
                     shell=False,
                     check=False,
@@ -1113,6 +1113,8 @@ class NativeSystemBackend:
         effective_timeout = self._resolve_timeout(timeout)
         proc: subprocess.Popen[bytes] | None = None
         try:
+            child_env = dict(os.environ)
+            child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
             proc = subprocess.Popen(
                 args,
                 stdin=subprocess.PIPE if input_text is not None else None,
@@ -1120,6 +1122,7 @@ class NativeSystemBackend:
                 stderr=subprocess.PIPE,
                 text=False,
                 shell=False,
+                env=child_env,
             )
             input_bytes = input_text.encode("utf-8") if input_text is not None else None
             stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=effective_timeout)
@@ -1238,14 +1241,14 @@ class NativeSystemBackend:
                 wsl_distros = [distro_name]
 
         if is_win:
-            ver_res = self._run_native_cmd(["wsl.exe", "--version"])
+            ver_res = self._run_native_cmd([self._sys32_exe("wsl.exe"), "--version"])
             if ver_res.returncode == 0:
                 wsl_installed = True
                 for line in ver_res.stdout.splitlines():
                     if ":" in line:
                         wsl_version = line.split(":", 1)[1].strip()
                         break
-            list_res = self._run_native_cmd(["wsl.exe", "--list", "--quiet"])
+            list_res = self._run_native_cmd([self._sys32_exe("wsl.exe"), "--list", "--quiet"])
             if list_res.returncode == 0:
                 wsl_distros = [line.strip() for line in list_res.stdout.splitlines() if line.strip()]
 
@@ -1286,7 +1289,7 @@ class NativeSystemBackend:
         if self._platform == "win32":
             start_map = {2: "auto", 3: "demand", 4: "disabled"}
             sc_mode = start_map.get(start_type, "demand")
-            res = self._run_native_cmd(["sc.exe", "config", service_name, f"start={sc_mode}"])
+            res = self._run_native_cmd([self._sys32_exe("sc.exe"), "config", service_name, f"start={sc_mode}"])
             if res.returncode != 0:
                 return False
         registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
@@ -1295,7 +1298,7 @@ class NativeSystemBackend:
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd(["schtasks.exe", "/Query", "/TN", task_path, "/XML"], timeout=30.0)
+        res = self._run_native_cmd([self._sys32_exe("schtasks.exe"), "/Query", "/TN", task_path, "/XML"], timeout=30.0)
         if res.returncode != 0:
             return None
         lower_out = res.stdout.lower()
@@ -1308,14 +1311,14 @@ class NativeSystemBackend:
         if self._platform != "win32":
             return False
         flag = "/ENABLE" if enabled else "/DISABLE"
-        res = self._run_native_cmd(["schtasks.exe", "/Change", "/TN", task_path, flag], timeout=30.0)
+        res = self._run_native_cmd([self._sys32_exe("schtasks.exe"), "/Change", "/TN", task_path, flag], timeout=30.0)
         return res.returncode == 0
 
     def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
         if self._platform != "win32":
             return False
         res = self._run_native_cmd(
-            ["dism.exe", "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}", "/English"],
+            [self._sys32_exe("dism.exe"), "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}", "/English"],
             timeout=60.0,
         )
         if res.returncode != 0:
@@ -1330,7 +1333,7 @@ class NativeSystemBackend:
             return False
         action = "/Enable-Feature" if enabled else "/Disable-Feature"
         res = self._run_native_cmd(
-            ["dism.exe", "/Online", action, f"/FeatureName:{feature_name}", "/NoRestart", "/Quiet"],
+            [self._sys32_exe("dism.exe"), "/Online", action, f"/FeatureName:{feature_name}", "/NoRestart", "/Quiet"],
             timeout=300.0,
         )
         return res.returncode == 0
@@ -1339,7 +1342,9 @@ class NativeSystemBackend:
         if self._platform != "win32":
             return False
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        res = self._run_native_cmd(["reg.exe", "export", f"{hive}\\{key_path}", str(output_path), "/y"])
+        res = self._run_native_cmd(
+            [self._sys32_exe("reg.exe"), "export", f"{hive}\\{key_path}", str(output_path), "/y"]
+        )
         return res.returncode == 0
 
     def _is_process_running_win32(self, process_name: str) -> bool | None:
@@ -1377,19 +1382,19 @@ class NativeSystemBackend:
         native_result = self._is_process_running_win32(process_name)
         if native_result is not None:
             return native_result
-        res = self._run_native_cmd(["tasklist.exe", "/FI", f"IMAGENAME eq {process_name}", "/NH"])
+        res = self._run_native_cmd([self._sys32_exe("tasklist.exe"), "/FI", f"IMAGENAME eq {process_name}", "/NH"])
         return process_name.lower() in res.stdout.lower()
 
     def stop_process(self, process_name: str, force: bool = False) -> bool:
         if self._platform != "win32":
             return False
         # Try graceful close first without /F
-        res = self._run_native_cmd(["taskkill.exe", "/IM", process_name], timeout=30.0)
+        res = self._run_native_cmd([self._sys32_exe("taskkill.exe"), "/IM", process_name], timeout=30.0)
         if res.returncode == 0 and not self.is_process_running(process_name):
             return True
         if not force:
             return False
-        force_res = self._run_native_cmd(["taskkill.exe", "/F", "/IM", process_name], timeout=30.0)
+        force_res = self._run_native_cmd([self._sys32_exe("taskkill.exe"), "/F", "/IM", process_name], timeout=30.0)
         return force_res.returncode == 0 and not self.is_process_running(process_name)
 
     def is_onedrive_installed(self) -> bool:
@@ -1426,7 +1431,7 @@ class NativeSystemBackend:
             return self._winget_installed_cache[cache_key]
         res = self._run_native_cmd(
             [
-                "winget.exe",
+                self._resolve_winget_exe(),
                 "list",
                 "--id",
                 package_id,
@@ -1452,7 +1457,7 @@ class NativeSystemBackend:
         self._winget_installed_cache.pop(package_id.lower(), None)
         res = self._run_native_cmd(
             [
-                "winget.exe",
+                self._resolve_winget_exe(),
                 "install",
                 "--id",
                 package_id,
@@ -1479,7 +1484,9 @@ class NativeSystemBackend:
     def install_vscode_extension(self, extension_id: str) -> bool:
         if self._platform != "win32":
             return False
-        ext_res = self._run_native_cmd(["code.cmd", "--install-extension", extension_id, "--force"], timeout=120.0)
+        ext_res = self._run_native_cmd(
+            [self._resolve_code_cmd(), "--install-extension", extension_id, "--force"], timeout=120.0
+        )
         return ext_res.returncode == 0
 
     def uninstall_winget_package(self, package_id: str) -> bool:
@@ -1488,7 +1495,7 @@ class NativeSystemBackend:
         self._winget_installed_cache.pop(package_id.lower(), None)
         res = self._run_native_cmd(
             [
-                "winget.exe",
+                self._resolve_winget_exe(),
                 "uninstall",
                 "--id",
                 package_id,
@@ -1504,7 +1511,7 @@ class NativeSystemBackend:
     def is_vscode_extension_installed(self, extension_id: str) -> bool:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd(["code.cmd", "--list-extensions"], timeout=30.0)
+        res = self._run_native_cmd([self._resolve_code_cmd(), "--list-extensions"], timeout=30.0)
         if res.returncode != 0:
             return False
         target = extension_id.lower()
@@ -1513,13 +1520,13 @@ class NativeSystemBackend:
     def uninstall_vscode_extension(self, extension_id: str) -> bool:
         if self._platform != "win32":
             return False
-        res = self._run_native_cmd(["code.cmd", "--uninstall-extension", extension_id], timeout=60.0)
+        res = self._run_native_cmd([self._resolve_code_cmd(), "--uninstall-extension", extension_id], timeout=60.0)
         return res.returncode == 0
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
         long_ops = {"--install", "--export", "--import"}
         timeout = 600.0 if any(arg in long_ops for arg in args) else 60.0
-        return self._run_native_cmd(["wsl.exe", *args], input_text=input_text, timeout=timeout)
+        return self._run_native_cmd([self._sys32_exe("wsl.exe"), *args], input_text=input_text, timeout=timeout)
 
     def get_total_memory_bytes(self) -> int:
         if self._platform == "win32" and self._windll is not None:
@@ -1543,8 +1550,44 @@ class NativeSystemBackend:
     def _sys32_exe(exe_name: str) -> str:
         """Resolve a system binary from %SystemRoot%\\System32 so a hostile PATH cannot substitute it."""
         sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
-        cand = Path(sys_root) / "System32" / exe_name
-        return str(cand) if cand.is_file() else exe_name
+        if sys_root.endswith("\\") or sys_root.endswith("/"):
+            sys_root = sys_root[:-1]
+        sep = "\\" if "\\" in sys_root or (len(sys_root) >= 2 and sys_root[1] == ":") else "/"
+        return f"{sys_root}{sep}System32{sep}{exe_name}"
+
+    @staticmethod
+    def _resolve_winget_exe() -> str:
+        """Resolve winget.exe from %LOCALAPPDATA%\\Microsoft\\WindowsApps first, then PATH."""
+        import shutil
+
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            cand = Path(local_app) / "Microsoft" / "WindowsApps" / "winget.exe"
+            if cand.is_file():
+                return str(cand)
+        return shutil.which("winget.exe") or (
+            f"{local_app}\\Microsoft\\WindowsApps\\winget.exe" if local_app else r"C:\Windows\System32\winget.exe"
+        )
+
+    @staticmethod
+    def _resolve_code_cmd() -> str:
+        """Resolve VS Code CLI (code.cmd) from trusted install directories first, then PATH."""
+        import shutil
+
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        candidates = [
+            Path(local_app) / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd" if local_app else None,
+            Path(prog) / "Microsoft VS Code" / "bin" / "code.cmd",
+        ]
+        for cand in candidates:
+            if cand is not None and cand.is_file():
+                return str(cand)
+        return shutil.which("code.cmd") or (
+            f"{local_app}\\Programs\\Microsoft VS Code\\bin\\code.cmd"
+            if local_app
+            else rf"{prog}\Microsoft VS Code\bin\code.cmd"
+        )
 
     @staticmethod
     def _resolve_git_exe() -> str | None:

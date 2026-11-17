@@ -1321,3 +1321,111 @@ def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytes
     toml_src = '[other]\nmode = "keep"\n'
     merged_toml = merge_file_content(toml_src, "toml", {"mode": "strict"})
     assert merged_toml.startswith('mode = "strict"\n[other]\nmode = "keep"')
+
+
+def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-01 & S-05: Native binaries resolve to absolute paths and tokens stay out of argv."""
+    import ntpath
+    import os
+    import re
+    import subprocess
+    from unittest.mock import patch
+
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import NativeSystemBackend
+    from winbearable.hyperv_firewall import _powershell_exe
+    from winbearable.uac import run_elevated_wb
+
+    # 1. Source-level lint: no bare ".exe" / ".cmd" literals in _run_native_cmd([ or hyperv_firewall
+    repo_root = Path(__file__).resolve().parents[2]
+    sys_src = (repo_root / "src" / "winbearable" / "backends" / "system.py").read_text(encoding="utf-8")
+    assert not re.findall(r'_run_native_cmd\(\s*\[\s*"[^"]*\.(?:exe|cmd)"', sys_src)
+    fw_src = (repo_root / "src" / "winbearable" / "hyperv_firewall.py").read_text(encoding="utf-8")
+    assert not re.findall(r'\[\s*"powershell\.exe"', fw_src)
+
+    # 2. Every NativeSystemBackend win32 command passes absolute args[0] + NoDefaultCurrentDirectoryInExePath=1
+    class _FakeProc:
+        returncode = 0
+
+        def communicate(self, input: object = None, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return (b"", b"")
+
+    native = NativeSystemBackend(platform_override="win32")
+    reg = InMemoryRegistryBackend()
+    reg.set_value("HKLM", r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, "REG_DWORD")
+    seen_calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def _capture_popen(args: list[str], **kwargs: object) -> _FakeProc:
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        seen_calls.append((list(args), env))
+        return _FakeProc()
+
+    with patch("winbearable.backends.system.subprocess.Popen", side_effect=_capture_popen):
+        native.set_service_start_type(reg, "DiagTrack", 4)
+        native.is_scheduled_task_enabled(r"\Microsoft\Windows\Test")
+        native.is_optional_feature_enabled("SMB1Protocol")
+        native.is_winget_package_installed("Microsoft.VisualStudioCode")
+        native.install_vscode_extension("ms-vscode-remote.remote-wsl")
+        native.run_wsl_command(["--status"])
+
+    assert seen_calls
+    for argv, env in seen_calls:
+        assert ntpath.isabs(argv[0]) or os.path.isabs(argv[0]), f"Bare executable in {argv}"
+        assert env.get("NoDefaultCurrentDirectoryInExePath") == "1"
+    assert ntpath.isabs(_powershell_exe()) or os.path.isabs(_powershell_exe())
+
+    # 3. UAC elevation defaults lpDirectory to System32, not caller cwd
+    captured_dirs: list[str] = []
+
+    class _FakeShell32:
+        def ShellExecuteExW(self, sei_ptr: object) -> int:
+            sei = sei_ptr._obj  # type: ignore[attr-defined]
+            captured_dirs.append(str(sei.lpDirectory))
+            sei.hProcess = 111
+            return 1
+
+    class _FakeKernel32:
+        def WaitForSingleObject(self, h: int, ms: int) -> int:
+            return 0
+
+        def GetExitCodeProcess(self, h: int, ptr: object) -> int:
+            ptr._obj.value = 0  # type: ignore[attr-defined]
+            return 1
+
+        def CloseHandle(self, h: int) -> int:
+            return 1
+
+    fake_dll = type("FakeDLL", (), {"shell32": _FakeShell32(), "kernel32": _FakeKernel32()})()
+    run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_dll)
+    assert captured_dirs and captured_dirs[0].lower().endswith("\\system32")
+
+    # 4. S-05: bin/publish_winget.py passes token in WINGET_CREATE_GITHUB_TOKEN env var, not argv
+    import importlib.util
+
+    pub_spec = importlib.util.spec_from_file_location("publish_winget", repo_root / "bin" / "publish_winget.py")
+    assert pub_spec is not None and pub_spec.loader is not None
+    pub_mod = importlib.util.module_from_spec(pub_spec)
+    pub_spec.loader.exec_module(pub_mod)
+
+    wc_calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def _fake_subproc_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[:3] == ["gh", "auth", "token"]:
+            return subprocess.CompletedProcess(args, 0, stdout="secret-tok\n", stderr="")
+        if "wingetcreate" in args[0].lower():
+            wc_calls.append((list(args), kwargs.get("env")))  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("sys.platform", "win32")
+    with (
+        patch.object(pub_mod, "_find_wingetcreate", return_value=r"C:\Tools\wingetcreate.exe"),
+        patch.object(pub_mod.subprocess, "run", side_effect=_fake_subproc_run),
+    ):
+        assert pub_mod.main() == 0
+    assert wc_calls
+    wc_argv, wc_env = wc_calls[0]
+    assert "-t" not in wc_argv and "secret-tok" not in wc_argv
+    assert wc_env is not None and wc_env.get("WINGET_CREATE_GITHUB_TOKEN") == "secret-tok"

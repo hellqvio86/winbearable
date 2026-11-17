@@ -57,6 +57,9 @@ dev = [
   "mypy>=1.11.0",
   "hypothesis>=6.100.0",
 ]
+release = [
+  "pyinstaller>=6.10.0",
+]
 
 [tool.mypy]
 strict = true

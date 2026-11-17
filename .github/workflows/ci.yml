@@ -126,7 +126,17 @@ jobs:
         run: |
           LINT_RESULT="${{ needs.lint.result }}"
           TEST_RESULT="${{ needs.test.result }}"
-          if [[ "$LINT_RESULT" == "success" || "$LINT_RESULT" == "skipped" ]] && \
+          REQUIRE_BOTH="${{ (github.event_name == 'workflow_dispatch' && (inputs.job == 'publish' || inputs.job == 'draft-release')) && 'true' || 'false' }}"
+          if [[ "$REQUIRE_BOTH" == "true" ]]; then
+            if [[ "$LINT_RESULT" == "success" ]] && [[ "$TEST_RESULT" == "success" ]]; then
+              echo "success=true" >> $GITHUB_OUTPUT
+              echo "All required release checks passed!"
+            else
+              echo "success=false" >> $GITHUB_OUTPUT
+              echo "Release/publish requires lint and test to succeed (not skipped)."
+              exit 1
+            fi
+          elif [[ "$LINT_RESULT" == "success" || "$LINT_RESULT" == "skipped" ]] && \
              [[ "$TEST_RESULT" == "success" || "$TEST_RESULT" == "skipped" ]]; then
             echo "success=true" >> $GITHUB_OUTPUT
             echo "All executed checks passed!"
@@ -321,7 +331,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Build Winget portable zip
-        run: uv run --with pyinstaller python bin/build_winget.py
+        run: uv run --group release --frozen python bin/build_winget.py
 
       - name: Upload Winget zip to release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
