@@ -47,6 +47,7 @@ class StateStore:
     def __init__(self, state_path: Path | None = None) -> None:
         self.state_path = state_path or resolve_state_path()
         self._tx_rlock = threading.RLock()
+        self.last_cleanup_warnings: list[str] = []
 
     @contextmanager
     def _file_lock(self, suffix: str) -> Iterator[None]:
@@ -138,10 +139,14 @@ class StateStore:
         self,
         runs: list[RunRecord],
         max_backup_dirs: int = DEFAULT_MAX_BACKUP_DIRS,
-    ) -> None:
+    ) -> list[str]:
+        warnings: list[str] = []
         backups_root = self.state_path.parent / "backups"
-        if not backups_root.is_dir():
-            return
+        if backups_root.is_symlink() or not backups_root.is_dir():
+            if backups_root.is_symlink():
+                warnings.append(f"Skipped backup pruning: {backups_root} is a symlink/reparse point.")
+            return warnings
+        resolved_root = backups_root.resolve()
         incomplete_states = {
             TransactionState.PLANNED,
             TransactionState.APPLYING,
@@ -149,23 +154,33 @@ class StateStore:
             TransactionState.FAILED,
         }
         protected_ids = {run.run_id for run in runs if run.state in incomplete_states}
-        subdirs = sorted(
-            (p for p in backups_root.iterdir() if p.is_dir() and p.name not in protected_ids),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        for stale_dir in subdirs[max_backup_dirs:]:
-            shutil.rmtree(stale_dir, ignore_errors=True)
+        candidates: list[Path] = []
+        for entry in backups_root.iterdir():
+            if entry.is_symlink():
+                warnings.append(f"Skipped symlink/reparse point in backups: {entry.name}")
+                continue
+            if not entry.is_dir() or entry.name in protected_ids:
+                continue
+            try:
+                resolved_entry = entry.resolve()
+                resolved_entry.relative_to(resolved_root)
+            except (OSError, ValueError):
+                warnings.append(f"Skipped backup directory outside root: {entry.name}")
+                continue
+            candidates.append(entry)
 
-    def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
-        runs = self._prune_old_runs(runs)
-        self._prune_old_backups_unlocked(runs)
+        subdirs = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale_dir in subdirs[max_backup_dirs:]:
+            try:
+                shutil.rmtree(stale_dir)
+            except OSError as exc:
+                warnings.append(f"Failed to prune backup {stale_dir.name}: {exc}")
+        return warnings
+
+    def _write_runs_atomic_unlocked(self, runs: list[RunRecord]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.state_path.parent, 0o700)
-        if self.state_path.is_file():
-            shutil.copy2(self.state_path, self.state_path.with_suffix(".json.bak"))
-
         payload = {
             "version": STATE_SCHEMA_VERSION,
             "runs": [run.to_dict() for run in runs],
@@ -189,8 +204,15 @@ class StateStore:
                 os.unlink(temp_path_str)
             raise
 
+    def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
+        runs = self._prune_old_runs(runs)
+        self.last_cleanup_warnings = self._prune_old_backups_unlocked(runs)
+        if self.state_path.is_file():
+            shutil.copy2(self.state_path, self.state_path.with_suffix(".json.bak"))
+        self._write_runs_atomic_unlocked(runs)
+
     def restore_from_backup(self) -> bool:
-        """Validate and restore state.json from state.json.bak if available."""
+        """Validate and restore state.json from state.json.bak without overwriting the backup."""
         bak_path = self.state_path.with_suffix(".json.bak")
         if not bak_path.is_file():
             return False
@@ -203,7 +225,12 @@ class StateStore:
             if not isinstance(runs_raw, list):
                 raise StateStoreError(f"Backup file at {bak_path} has invalid 'runs' list.")
             runs = [RunRecord.from_dict(item) for item in runs_raw]
-            self._save_runs_unlocked(runs)
+            if self.state_path.is_file():
+                corrupt_copy = self.state_path.with_suffix(".json.corrupt")
+                shutil.copy2(self.state_path, corrupt_copy)
+            self._write_runs_atomic_unlocked(runs)
+            # Re-open and validate restored state.json
+            self._load_runs_unlocked()
             return True
 
     def load_runs(self) -> list[RunRecord]:

@@ -23,6 +23,8 @@ from ..const import (
     ENV_CMD_TIMEOUT,
     HIVE_HKLM,
     KNOWN_EDR_SERVICES,
+    MAX_CMD_OUTPUT_CHARS,
+    MAX_DIAGNOSTIC_CHARS,
     MDM_ENROLLMENTS_KEY,
     MIN_SUPPORTED_BUILD,
     NT_CURRENT_VERSION_KEY,
@@ -1076,6 +1078,12 @@ class NativeSystemBackend:
                     timeout=5.0,
                 )
 
+    @staticmethod
+    def _truncate_text(text: str, limit: int, label: str = "output") -> str:
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}\n...[{label} truncated at {limit} chars]\n"
+
     def _run_native_cmd(
         self,
         args: list[str],
@@ -1097,8 +1105,8 @@ class NativeSystemBackend:
                 shell=False,
             )
             stdout_raw, stderr_raw = proc.communicate(input=input_text, timeout=effective_timeout)
-            cleaned_stdout = (stdout_raw or "").replace("\x00", "")
-            cleaned_stderr = (stderr_raw or "").replace("\x00", "")
+            cleaned_stdout = self._truncate_text((stdout_raw or "").replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
+            cleaned_stderr = self._truncate_text((stderr_raw or "").replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
             if proc.returncode == 0:
                 cat = OperationStatus.OK
                 self.last_outcome = OperationOutcome(
@@ -1108,13 +1116,16 @@ class NativeSystemBackend:
                 )
             else:
                 cat = self._classify_cmd_failure(proc.returncode, cleaned_stdout, cleaned_stderr)
+                diag = self._truncate_text(cleaned_stderr or cleaned_stdout, MAX_DIAGNOSTIC_CHARS, "diagnostic")
                 self.last_outcome = OperationOutcome(
                     status=cat,
-                    message=cleaned_stderr or cleaned_stdout,
+                    message=diag,
                     returncode=proc.returncode,
                     command=tuple(args),
                 )
-            self._record_cmd_history(args, proc.returncode, cat, cleaned_stderr)
+            self._record_cmd_history(
+                args, proc.returncode, cat, self._truncate_text(cleaned_stderr, MAX_DIAGNOSTIC_CHARS, "diagnostic")
+            )
             return CommandResult(
                 args=tuple(args),
                 returncode=proc.returncode,
@@ -1135,7 +1146,9 @@ class NativeSystemBackend:
             raw_err = (
                 exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             )
-            msg = f"Command timed out after {effective_timeout}s: {raw_err.replace(chr(0), '')}".strip()
+            bounded_out = self._truncate_text(raw_out.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
+            bounded_err = self._truncate_text(raw_err.replace("\x00", ""), MAX_DIAGNOSTIC_CHARS, "diagnostic")
+            msg = f"Command timed out after {effective_timeout}s: {bounded_err}".strip()
             self.last_outcome = OperationOutcome(
                 status=OperationStatus.TIMEOUT,
                 message=msg,
@@ -1146,7 +1159,7 @@ class NativeSystemBackend:
             return CommandResult(
                 args=tuple(args),
                 returncode=124,
-                stdout=raw_out.replace("\x00", ""),
+                stdout=bounded_out,
                 stderr=msg,
             )
         except OSError as exc:

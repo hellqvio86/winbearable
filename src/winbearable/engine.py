@@ -924,6 +924,7 @@ def _execute_tweak_mutations(
     force_kill_processes: bool = False,
     checkpoint_cb: Callable[[str], None] | None = None,
     file_hashes: dict[str, str | None] | None = None,
+    file_exists: dict[str, bool] | None = None,
     allow_managed: bool = True,
 ) -> None:
     """Apply all operations for a single tweak, raising RuntimeError on any failure."""
@@ -1104,7 +1105,8 @@ def _execute_tweak_mutations(
     for f_spec in tweak.file_specs:
         target_str = str(expand_file_spec_path(f_spec.path_template))
         expected_sha = file_hashes.get(target_str) if file_hashes is not None else None
-        apply_file_spec(f_spec, expected_sha256=expected_sha)
+        expected_existed = file_exists.get(target_str) if file_exists is not None else None
+        apply_file_spec(f_spec, expected_sha256=expected_sha, expected_existed=expected_existed)
         _ckpt(f"{tweak.tweak_id}:file_config:{target_str}")
 
     if tweak.uninstall_onedrive:
@@ -1248,6 +1250,7 @@ def apply_profile(
                 evaluations, registry, system, backup_dir=backup_dir, profile_params=profile.params
             )
             file_hashes = {fs.path: fs.sha256 for fs in snaps.files}
+            file_exists = {fs.path: fs.existed for fs in snaps.files}
             newly_installed_winget: list[str] = []
             newly_installed_extensions: list[str] = []
             completed_ops: list[str] = []
@@ -1313,6 +1316,7 @@ def apply_profile(
                         force_kill_processes=force_kill_processes,
                         checkpoint_cb=_record_op_checkpoint,
                         file_hashes=file_hashes,
+                        file_exists=file_exists,
                         allow_managed=allow_managed,
                     )
                 except Exception as exc:

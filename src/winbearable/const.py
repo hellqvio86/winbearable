@@ -121,11 +121,13 @@ WSL_MIN_VERSION_BY_OPTION: dict[str, str] = {
     "bestEffortDnsParsing": "2.0.0",
 }
 
-# Subprocess Timeout Defaults (seconds)
+# Subprocess Timeout & Output Bounds
 ENV_CMD_TIMEOUT = "WB_CMD_TIMEOUT"
 DEFAULT_CMD_TIMEOUT = 60.0
 DEFAULT_WINGET_TIMEOUT = 300.0
 DEFAULT_WSL_TIMEOUT = 600.0
+MAX_CMD_OUTPUT_CHARS = 1_048_576
+MAX_DIAGNOSTIC_CHARS = 4_096
 
 # Stable CLI Exit Codes
 EXIT_SUCCESS = 0

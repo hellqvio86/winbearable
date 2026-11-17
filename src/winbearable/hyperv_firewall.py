@@ -7,6 +7,7 @@ This module is the sole permitted PowerShell boundary in `winbearable`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -35,14 +36,24 @@ def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
     except subprocess.TimeoutExpired as exc:
         if sys.platform == "win32" and proc.pid:
-            subprocess.run(
-                ["taskkill.exe", "/T", "/F", "/PID", str(proc.pid)],
-                capture_output=True,
-                shell=False,
-                check=False,
-            )
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                subprocess.run(
+                    ["taskkill.exe", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    shell=False,
+                    check=False,
+                    timeout=5.0,
+                )
         proc.kill()
-        proc.communicate()
+        try:
+            proc.communicate(timeout=5.0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
         raise subprocess.TimeoutExpired(cmd=args, timeout=15.0, output=exc.output, stderr=exc.stderr) from exc
 
 
