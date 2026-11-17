@@ -149,3 +149,26 @@ def test_catalog_irreversible_and_high_risk_invariants() -> None:
             )
         if tweak.risk == RiskLevel.HIGH:
             assert tweak.provenance is not None and tweak.provenance.risk_rationale.strip()
+
+
+def test_catalog_non_registry_evidence_metadata() -> None:
+    """Every non-registry tweak declares review_evidence and a valid evidence_type."""
+    valid_types = {"vendor_docs", "observed_host", "maintainer_assertion"}
+    for tweak in TWEAK_CATALOG.values():
+        has_non_reg = any(
+            (
+                tweak.service_specs,
+                tweak.task_specs,
+                tweak.feature_specs,
+                tweak.winget_specs,
+                tweak.auditpol_specs,
+                tweak.wevtutil_specs,
+                tweak.firewall_group_specs,
+                tweak.fsutil_specs,
+                tweak.powercfg_specs,
+            )
+        )
+        if has_non_reg:
+            assert tweak.provenance is not None
+            assert tweak.provenance.review_evidence.strip()
+            assert tweak.provenance.evidence_type in valid_types

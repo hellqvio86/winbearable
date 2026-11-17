@@ -730,7 +730,6 @@ def test_parameterized_tweaks_and_terminal_error_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cover invalid [params], non-empty directory revert refusal, and malformed Windows Terminal JSON."""
-    from typing import Any
 
     from winbearable.engine import evaluate_profile
 

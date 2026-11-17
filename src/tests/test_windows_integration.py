@@ -7,6 +7,7 @@ import os
 import sys
 import uuid
 from contextlib import redirect_stdout, suppress
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -164,3 +165,55 @@ def test_readonly_identifier_snapshot_capture() -> None:
     auditpol_res = subprocess.run(["auditpol.exe", "/list", "/subcategory:*", "/v"], capture_output=True, text=True)
     assert auditpol_res.returncode == 0
     assert auditpol_res.stdout.strip()
+
+
+def test_windows_state_restore_and_byte_exact_file_snapshot(tmp_path: Path) -> None:
+    """Verify StateStore backup preservation, byte-exact FileSnapshot, and Win32 UAC ctypes contracts on Windows."""
+    import hashlib
+
+    from winbearable.models import FileSpec, RunRecord, TransactionState
+    from winbearable.operations import apply_file_spec, restore_file_snapshot, snapshot_file_spec
+    from winbearable.state import StateStore
+    from winbearable.uac import _get_win32_dlls, set_console_title
+
+    store = StateStore(tmp_path / "state.json")
+    rec = RunRecord(
+        run_id="win-int-good",
+        timestamp="2026-11-17T00:00:00Z",
+        profile_name="owner",
+        applied_tweaks=(),
+        state=TransactionState.COMMITTED,
+    )
+    store.save_runs([rec])
+    store.save_runs([rec])
+    bak_before = store.state_path.with_suffix(".json.bak").read_text(encoding="utf-8")
+    store.state_path.write_text("{corrupt", encoding="utf-8")
+    assert store.restore_from_backup() is True
+    assert store.load_runs()[0].run_id == "win-int-good"
+    assert store.state_path.with_suffix(".json.bak").read_text(encoding="utf-8") == bak_before
+
+    cfg = tmp_path / "win_cfg.json"
+    cfg.write_bytes(b'\xef\xbb\xbf{\r\n  "keep": 1\r\n}\r\n')
+    spec = FileSpec(path_template=str(cfg), file_format="json", desired_keys={"added": True})
+    snap = snapshot_file_spec(spec)
+    apply_file_spec(spec, expected_sha256=snap.sha256, expected_existed=True)
+    restore_file_snapshot(snap)
+    assert hashlib.sha256(cfg.read_bytes()).hexdigest() == snap.sha256
+
+    shell32, kernel32 = _get_win32_dlls()
+    assert shell32.ShellExecuteExW.argtypes is not None
+    assert kernel32.WaitForSingleObject.argtypes is not None
+    assert isinstance(set_console_title("winbearable"), bool)
+
+
+def test_windows_hyperv_firewall_readonly_query() -> None:
+    """Verify read-only Hyper-V firewall query returns structured dict or None cleanly on Windows."""
+    from winbearable.const import WSL_VM_CREATOR_ID
+    from winbearable.hyperv_firewall import get_wsl_hyperv_firewall_setting
+
+    res = get_wsl_hyperv_firewall_setting()
+    if res is not None:
+        assert res["vm_creator_id"].lower() == WSL_VM_CREATOR_ID.lower()
+        assert isinstance(res["enabled"], bool)
+        assert res["default_inbound_action"] in {"Block", "Allow"}
+        assert res["default_outbound_action"] in {"Block", "Allow"}

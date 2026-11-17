@@ -69,7 +69,7 @@ class FakeWinregHandle:
     def __init__(self, key_store: dict[str, tuple[Any, int]]) -> None:
         self.key_store = key_store
 
-    def __enter__(self) -> "FakeWinregHandle":
+    def __enter__(self) -> FakeWinregHandle:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -835,7 +835,7 @@ def test_registry_view_and_permission_preservation() -> None:
     recorded_access: list[int] = []
 
     class FakeHandle:
-        def __enter__(self) -> "FakeHandle":
+        def __enter__(self) -> FakeHandle:
             return self
 
         def __exit__(self, *args: object) -> None:

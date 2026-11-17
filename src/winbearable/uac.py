@@ -172,7 +172,7 @@ def set_console_title(title: str = "winbearable", windll_override: Any = None) -
     try:
         _, kernel32 = _get_win32_dlls(windll_override)
         return bool(kernel32.SetConsoleTitleW(title))
-    except (AttributeError, OSError, UacElevationError):
+    except AttributeError, OSError, UacElevationError:
         return False
 
 

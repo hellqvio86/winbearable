@@ -58,3 +58,10 @@
 | `2` | `EXIT_PENDING_CHANGES` | Dry-run (`plan` / `apply` / `status` / `rollback`) found pending changes or drift. |
 | `3` | `EXIT_BLOCKED` | Blocked by policy, missing Admin (`REQUIRES_ADMIN`), high-risk/irreversible confirmation missing, or `audit` high-severity findings. |
 | `4` | `EXIT_UNSUPPORTED_PLATFORM` | Non-Windows host on `--apply`, unsupported Windows build (`< 26300`), or unsupported IoT/LTSC edition. |
+
+## Backup & State Durability Guarantees
+
+- **Atomic file replacement vs. durable commit:** `StateStore`, `.wslconfig`, and `FileSnapshot` writes use same-directory temp files (`mkstemp`), `flush()`, `os.fsync()`, and `os.replace()`. On POSIX and NTFS, `os.replace()` atomically swaps directory entries, but directory metadata `fsync` is not guaranteed on Windows; abrupt power loss or storage-controller write-back caching can still leave recently replaced files un-flushed at the hardware layer.
+- **Write-ahead journal:** `apply_profile()` persists `TransactionState.PLANNED` and `TransactionState.APPLYING` (with registry/file/WSL backups and per-distro `/etc/wsl.conf` snapshots) **before** mutating target resources, and checkpoints after `.wslconfig` and each WSL distro.
+- **Backup preservation during recovery:** `StateStore.restore_from_backup()` copies any existing corrupt `state.json` to `state.json.corrupt` and writes the validated backup atomically without overwriting `state.json.bak`.
+- **Disk-full, permission-loss, and AV/file-lock failures:** Temp-file writes fail before `os.replace()`, unlinking the partial temp file so the prior `state.json` or target config file remains intact; `wb recover` compensates any incomplete `PLANNED`/`APPLYING`/`ROLLING_BACK`/`FAILED` run.

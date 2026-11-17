@@ -1,9 +1,9 @@
 [project]
 name = "winbearable"
 dynamic = ["version"]
-description = "Make Windows + WSL2 bearable (and locked down) for Linux people who are stuck with it — pure native Python, zero PowerShell wrappers."
+description = "Make Windows + WSL2 bearable (and locked down) — native Python for core tweaks, with a single PowerShell JSON exception for Hyper-V firewall (DEC-01)."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = { text = "MIT" }
 authors = [{ name = "hellqvio" }]
 classifiers = [
@@ -15,10 +15,8 @@ classifiers = [
   "Operating System :: Microsoft :: Windows :: Windows 11",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Topic :: System :: Systems Administration",
   "Typing :: Typed",
 ]
@@ -62,14 +60,14 @@ dev = [
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
