@@ -46,20 +46,32 @@ def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd=args, timeout=15.0, output=exc.output, stderr=exc.stderr) from exc
 
 
-def _decode_bool(raw: Any) -> bool:
+def _decode_bool(raw: Any) -> bool | None:
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, int):
-        return raw == 1
-    return str(raw).strip().lower() in {"1", "true", "yes"}
+        if raw == 1:
+            return True
+        if raw == 0:
+            return False
+        return None
+    if isinstance(raw, str):
+        low = raw.strip().lower()
+        if low in {"1", "true", "yes"}:
+            return True
+        if low in {"0", "false", "no"}:
+            return False
+    return None
 
 
-def _decode_action(raw: Any) -> str:
-    if raw == 4 or str(raw).strip().lower() == "block":
+def _decode_action(raw: Any) -> str | None:
+    if isinstance(raw, bool):
+        return None
+    if raw == 4 or (isinstance(raw, str) and raw.strip().lower() == "block"):
         return "Block"
-    if raw == 2 or str(raw).strip().lower() == "allow":
+    if raw == 2 or (isinstance(raw, str) and raw.strip().lower() == "allow"):
         return "Allow"
-    return "Unknown"
+    return None
 
 
 def _normalize_action(value: str, field_name: str) -> str:
@@ -77,16 +89,61 @@ def _parse_ps_setting_json(raw_stdout: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     if isinstance(parsed, list):
-        parsed = parsed[0] if parsed else None
+        parsed = parsed[0] if len(parsed) == 1 else None
     if not isinstance(parsed, dict) or "error" in parsed:
         return None
+
+    raw_name = parsed.get("Name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return None
+
+    enabled = _decode_bool(parsed.get("Enabled"))
+    inbound = _decode_action(parsed.get("DefaultInboundAction"))
+    outbound = _decode_action(parsed.get("DefaultOutboundAction"))
+    if enabled is None or inbound is None or outbound is None:
+        return None
+
+    raw_loopback = parsed.get("LoopbackEnabled")
+    loopback: bool | None = None
+    if raw_loopback is not None:
+        loopback = _decode_bool(raw_loopback)
+        if loopback is None:
+            return None
+
     return {
-        "vm_creator_id": str(parsed.get("Name", WSL_VM_CREATOR_ID)),
-        "enabled": _decode_bool(parsed.get("Enabled")),
-        "default_inbound_action": _decode_action(parsed.get("DefaultInboundAction")),
-        "default_outbound_action": _decode_action(parsed.get("DefaultOutboundAction")),
-        "loopback_enabled": _decode_bool(parsed.get("LoopbackEnabled")),
+        "vm_creator_id": raw_name.strip(),
+        "enabled": enabled,
+        "default_inbound_action": inbound,
+        "default_outbound_action": outbound,
+        "loopback_enabled": loopback,
     }
+
+
+def verify_hyperv_firewall_setting(
+    parsed: dict[str, Any],
+    *,
+    expected_vm_creator_id: str = WSL_VM_CREATOR_ID,
+    expected_enabled: bool,
+    expected_inbound: str,
+    expected_outbound: str,
+) -> str | None:
+    """Verify parsed effective Hyper-V firewall state matches the requested values."""
+    actual_id = str(parsed.get("vm_creator_id", "")).strip()
+    if actual_id.lower() != expected_vm_creator_id.strip().lower():
+        return f"vm_creator_id mismatch: expected {expected_vm_creator_id!r}, got {actual_id!r}"
+    if parsed.get("enabled") is not expected_enabled:
+        return f"enabled mismatch: expected {expected_enabled!r}, got {parsed.get('enabled')!r}"
+    if parsed.get("default_inbound_action") != expected_inbound:
+        return (
+            f"default_inbound_action mismatch: expected {expected_inbound!r}, "
+            f"got {parsed.get('default_inbound_action')!r}"
+        )
+    if parsed.get("default_outbound_action") != expected_outbound:
+        return (
+            f"default_outbound_action mismatch: expected {expected_outbound!r}, "
+            f"got {parsed.get('default_outbound_action')!r}"
+        )
+    return None
 
 
 def _parse_ps_error_json(raw_stdout: str, raw_stderr: str, returncode: int) -> str:
@@ -152,6 +209,7 @@ def set_wsl_hyperv_firewall_setting(
     cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script]
     previous = get_wsl_hyperv_firewall_setting(runner=runner, platform_override=platform_override)
     verified: dict[str, Any] | None = None
+    verified_ok = False
     returncode = 0
     error: str | None = None
 
@@ -173,6 +231,19 @@ def set_wsl_hyperv_firewall_setting(
                     if verified is None:
                         returncode = 1
                         error = "PARSE_ERROR: PowerShell returned invalid or empty Hyper-V firewall JSON."
+                    else:
+                        mismatch = verify_hyperv_firewall_setting(
+                            verified,
+                            expected_vm_creator_id=WSL_VM_CREATOR_ID,
+                            expected_enabled=enabled,
+                            expected_inbound=inbound,
+                            expected_outbound=outbound,
+                        )
+                        if mismatch is not None:
+                            returncode = 1
+                            error = f"VERIFICATION_FAILED: {mismatch}"
+                        else:
+                            verified_ok = True
             except subprocess.TimeoutExpired:
                 returncode = 124
                 error = "TIMEOUT: powershell.exe timed out after 15.0s configuring Hyper-V firewall."
@@ -190,6 +261,7 @@ def set_wsl_hyperv_firewall_setting(
             "default_outbound_action": outbound,
         },
         "verified": verified,
+        "verified_ok": verified_ok,
         "command": cmd,
         "returncode": returncode,
         "error": error,

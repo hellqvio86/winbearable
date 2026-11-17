@@ -927,8 +927,7 @@ def test_multidistro_wsl_failure_compensates_first_distro_and_wslconfig(
     assert distro_confs["Ubuntu"] == "[user]\ndefault=alice\n"
     runs = state_store.load_runs()
     assert runs[-1].state == TransactionState.FAILED
-    assert len(runs[-1].wsl_distro_snapshots) == 1
-    assert runs[-1].wsl_distro_snapshots[0].distro == "Ubuntu"
+    assert [snap.distro for snap in runs[-1].wsl_distro_snapshots] == ["Ubuntu", "Debian"]
 
 
 def test_operation_adapters_surface_structured_outcomes_on_failure(
@@ -1067,3 +1066,97 @@ def test_state_store_pruning_preserves_incomplete_and_credential_hygiene(tmp_pat
     assert dirty_res["ssh_agent_windows_leak"] is True
     assert len(dirty_res["windows_git_helpers"]) == 1
     assert len(dirty_res["ssh_insecure_keys"]) == 1
+
+
+def test_wsl_write_ahead_journal_before_mutation_and_probe_error_refusal(
+    state_store: StateStore,
+    tmp_path: Path,
+) -> None:
+    """Cover write-ahead WSL snapshot persistence before mutation and probe error refusal."""
+    from winbearable.backends.system import CommandResult
+    from winbearable.engine import recover_incomplete_runs
+    from winbearable.models import TransactionState, WslConfigSpec
+    from winbearable.wsl import WslOperationError, plan_or_apply_wsl, probe_distro_wsl_conf
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True, wsl_installed=True, wsl_distros=("Ubuntu", "Debian"))
+    env = sys_b.detect_environment(reg)
+    wslconfig = tmp_path / ".wslconfig"
+    wslconfig.write_text("[wsl2]\nmemory=4GB\n", encoding="utf-8")
+
+    distro_confs: dict[str, str] = {"Ubuntu": "[user]\ndefault=alice\n"}
+    saw_write_ahead_before_tee = False
+    in_recovery = False
+
+    def _wsl_with_crash_check(args: list[str], input_text: str | None = None) -> CommandResult:
+        nonlocal saw_write_ahead_before_tee
+        distro = args[1] if len(args) > 1 and args[0] == "-d" else ""
+        cmd = args[5] if len(args) > 5 else ""
+        if cmd == "test":
+            return CommandResult(tuple(args), 0 if distro in distro_confs else 1, "", "")
+        if cmd == "cat":
+            if distro in distro_confs:
+                return CommandResult(tuple(args), 0, distro_confs[distro], "")
+            return CommandResult(tuple(args), 1, "", "No such file")
+        if cmd == "tee":
+            if not in_recovery:
+                # Verify StateStore on disk ALREADY has APPLYING + backup + both distro snapshots before tee!
+                fresh_runs = StateStore(state_store.state_path).load_runs()
+                assert fresh_runs and fresh_runs[-1].state == TransactionState.APPLYING
+                assert fresh_runs[-1].wsl_backup_path is not None
+                assert [s.distro for s in fresh_runs[-1].wsl_distro_snapshots] == ["Ubuntu", "Debian"]
+                saw_write_ahead_before_tee = True
+                if distro != "Ubuntu":
+                    raise RuntimeError("simulated crash before Debian tee")
+            distro_confs[distro] = input_text or ""
+            return CommandResult(tuple(args), 0, "", "")
+        if cmd == "rm":
+            distro_confs.pop(distro, None)
+            return CommandResult(tuple(args), 0, "", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    prof = ProfileSpec(name="wsl-wa", description="wsl-wa", tweaks={}, wsl=WslConfigSpec(enabled=True))
+    with (
+        patch.object(sys_b, "run_wsl_command", side_effect=_wsl_with_crash_check),
+        pytest.raises(RuntimeError, match="simulated crash"),
+    ):
+        apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True, wslconfig_path=wslconfig)
+
+    assert saw_write_ahead_before_tee is True
+    assert StateStore(state_store.state_path).load_runs()[-1].state == TransactionState.APPLYING
+
+    # Fresh StateStore + recover_incomplete_runs restores .wslconfig and Ubuntu /etc/wsl.conf
+    in_recovery = True
+    with patch.object(sys_b, "run_wsl_command", side_effect=_wsl_with_crash_check):
+        rec_runs = recover_incomplete_runs(
+            StateStore(state_store.state_path), reg, sys_b, dry_run=False, allow_simulated=True
+        )
+    assert rec_runs and rec_runs[-1].state == TransactionState.ROLLED_BACK
+    assert wslconfig.read_text(encoding="utf-8") == "[wsl2]\nmemory=4GB\n"
+    assert distro_confs["Ubuntu"] == "[user]\ndefault=alice\n"
+
+    # P0.3: Distinguish confirmed missing vs permission denied / distro error
+    def _probe_errors(args: list[str], input_text: str | None = None) -> CommandResult:
+        distro = args[1] if len(args) > 1 and args[0] == "-d" else ""
+        cmd = args[5] if len(args) > 5 else ""
+        if distro == "PermDenied":
+            if cmd == "test":
+                return CommandResult(tuple(args), 0, "", "")
+            return CommandResult(tuple(args), 1, "", "cat: /etc/wsl.conf: Permission denied")
+        if distro == "MissingDistro":
+            return CommandResult(tuple(args), 1, "", "There is no distribution with the supplied name.")
+        return CommandResult(tuple(args), 1, "", "")
+
+    with patch.object(sys_b, "run_wsl_command", side_effect=_probe_errors):
+        assert probe_distro_wsl_conf("ConfirmedAbsent", sys_b).status == "missing"
+        assert probe_distro_wsl_conf("PermDenied", sys_b).status == "error"
+        assert probe_distro_wsl_conf("MissingDistro", sys_b).status == "error"
+
+        dry_res = plan_or_apply_wsl(WslConfigSpec(enabled=True), sys_b, wslconfig_path=wslconfig, distro="PermDenied")
+        assert dry_res["distro_read_status"] == "error"
+        assert "Permission denied" in dry_res["distro_read_evidence"]
+
+        with pytest.raises(WslOperationError, match="Refusing to modify /etc/wsl.conf"):
+            plan_or_apply_wsl(
+                WslConfigSpec(enabled=True), sys_b, wslconfig_path=wslconfig, distro="PermDenied", dry_run=False
+            )

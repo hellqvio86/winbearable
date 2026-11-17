@@ -15,11 +15,11 @@ Current baseline: **`v0.9.10`** (Windows 11 `26H2+`, build `>= 26300`).
 - [ ] **P0.1 — Bounded UAC elevation wait & Win32 API contracts** (`src/winbearable/uac.py`, `src/winbearable/const.py`) — *implemented / unit-tested / needs Windows verification*
   - Replace `INFINITE` with a bounded timeout; terminate owned child on timeout and warn to run `wb doctor` / `wb recover`.
   - Check exact `WaitForSingleObject` return (`WAIT_OBJECT_0`, `WAIT_TIMEOUT`, `WAIT_FAILED`), fail on null `hProcess`, configure `argtypes`/`restype`, and bound output capture.
-- [ ] **P0.2 — Persist WSL recovery metadata before first WSL mutation** (`engine.py`, `wsl.py`, `models.py`, `state.py`)
+- [ ] **P0.2 — Persist WSL recovery metadata before first WSL mutation** (`engine.py`, `wsl.py`, `models.py`, `state.py`) — *implemented / unit-tested / needs Windows verification*
   - Split prepare/snapshot from mutate; persist host backup + per-distro snapshots before any WSL file write and checkpoint after each distro.
-- [ ] **P0.3 — Distinguish missing `/etc/wsl.conf` from read failures** (`wsl.py`, `engine.py`)
+- [ ] **P0.3 — Distinguish missing `/etc/wsl.conf` from read failures** (`wsl.py`, `engine.py`) — *implemented / unit-tested / needs Windows verification*
   - Explicit existence/read probe; refuse apply on unknown/error read; only delete on rollback when absence was positively established.
-- [ ] **P0.4 — Verify Hyper-V firewall settings against requested state** (`hyperv_firewall.py`, `cli.py`)
+- [ ] **P0.4 — Verify Hyper-V firewall settings against requested state** (`hyperv_firewall.py`, `cli.py`) — *implemented / unit-tested / needs Windows verification*
   - Separate parse from semantic verification; match creator ID, tri-state booleans, recognized actions, and requested values.
 
 ---

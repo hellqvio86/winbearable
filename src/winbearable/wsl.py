@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -292,14 +293,23 @@ def _parse_ini_sections(text: str) -> dict[str, dict[str, str]]:
     return sections
 
 
-def _atomic_write_text(target_path: Path, content: str) -> Path | None:
+def _create_backup_file(target_path: Path) -> Path | None:
+    """Create a durable .bak copy of *target_path* if it exists."""
+    if not target_path.is_file():
+        return None
+    backup_path = target_path.with_suffix(f"{target_path.suffix}.bak")
+    shutil.copy2(target_path, backup_path)
+    return backup_path
+
+
+def _atomic_write_text(target_path: Path, content: str, *, create_backup: bool = True) -> Path | None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path: Path | None = None
     existing_mode: int | None = None
     if target_path.is_file():
         existing_mode = stat.S_IMODE(target_path.stat().st_mode)
-        backup_path = target_path.with_suffix(f"{target_path.suffix}.bak")
-        shutil.copy2(target_path, backup_path)
+        if create_backup:
+            backup_path = _create_backup_file(target_path)
 
     fd, temp_path_str = tempfile.mkstemp(
         prefix=f"{target_path.name}.",
@@ -318,6 +328,164 @@ def _atomic_write_text(target_path: Path, content: str) -> Path | None:
             os.unlink(temp_path_str)
         raise
     return backup_path
+
+
+@dataclass(frozen=True)
+class WslDistroConfProbe:
+    """Result of probing a WSL distro's /etc/wsl.conf before mutation."""
+
+    status: str  # "exists" | "missing" | "error"
+    content: str
+    evidence: str
+
+
+@dataclass(frozen=True)
+class PreparedWslDistroPlan:
+    """Prepared per-distro snapshot and desired /etc/wsl.conf content."""
+
+    distro: str
+    probe: WslDistroConfProbe
+    merged_content: str
+    changed: bool
+
+
+@dataclass(frozen=True)
+class PreparedWslPlan:
+    """Prepared host .wslconfig and per-distro snapshots prior to any WSL mutation."""
+
+    target_wslconfig: Path
+    backup_path: Path | None
+    host_memory_bytes: int
+    host_memory_gib: str
+    memory_limit_gib: int
+    merged_wslconfig: str
+    wslconfig_changed: bool
+    warnings: tuple[str, ...]
+    distro_plans: tuple[PreparedWslDistroPlan, ...]
+
+
+_ENOENT_MARKERS = ("no such file", "cannot find", "does not exist")
+_WSL_FAILURE_MARKERS = (
+    "permission denied",
+    "timed out",
+    "timeout",
+    "there is no distribution",
+    "not installed",
+    "wsl_e_",
+    "access is denied",
+    "failed",
+    "error:",
+)
+
+
+def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfProbe:
+    """Probe /etc/wsl.conf in *distro*, distinguishing confirmed absence from read/WSL errors."""
+    try:
+        test_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "test", "-e", "/etc/wsl.conf"])
+    except (WslOperationError, OSError, TimeoutError) as exc:
+        return WslDistroConfProbe(status="error", content="", evidence=str(exc))
+
+    test_stderr_low = (test_res.stderr or "").strip().lower()
+    if test_res.returncode == 1 and not any(marker in test_stderr_low for marker in _WSL_FAILURE_MARKERS):
+        return WslDistroConfProbe(status="missing", content="", evidence="confirmed_absent (test -e returned 1)")
+    if test_res.returncode != 0:
+        evidence = test_res.stderr.strip() or f"test -e /etc/wsl.conf exited with code {test_res.returncode}"
+        return WslDistroConfProbe(status="error", content="", evidence=evidence)
+
+    try:
+        cat_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
+    except (WslOperationError, OSError, TimeoutError) as exc:
+        return WslDistroConfProbe(status="error", content="", evidence=str(exc))
+
+    if cat_res.returncode == 0:
+        return WslDistroConfProbe(status="exists", content=cat_res.stdout, evidence="read_ok")
+
+    cat_stderr_low = (cat_res.stderr or "").strip().lower()
+    if any(marker in cat_stderr_low for marker in _ENOENT_MARKERS):
+        return WslDistroConfProbe(status="missing", content="", evidence=cat_res.stderr.strip())
+    evidence = cat_res.stderr.strip() or f"cat /etc/wsl.conf exited with code {cat_res.returncode}"
+    return WslDistroConfProbe(status="error", content="", evidence=evidence)
+
+
+def prepare_wsl_plan(
+    spec: WslConfigSpec,
+    system: SystemBackend,
+    *,
+    wslconfig_path: Path | None = None,
+    distros: tuple[str, ...] = (),
+    create_host_backup: bool = True,
+) -> PreparedWslPlan:
+    """Read host .wslconfig and probe all target distros before any WSL mutation occurs."""
+    target_wslconfig = wslconfig_path or get_default_wslconfig_path()
+    existing_wslconfig = (
+        target_wslconfig.read_text(encoding="utf-8").lstrip("\ufeff") if target_wslconfig.is_file() else ""
+    )
+
+    host_memory_bytes = system.get_total_memory_bytes()
+    host_memory_gib_str = format_host_memory_gib(host_memory_bytes)
+    memory_gib = spec.memory_gb if spec.memory_gb is not None else calculate_wsl_memory_gib(host_memory_bytes)
+
+    warnings: list[str] = []
+    desired_wslconfig_sections = build_wslconfig_sections(spec, host_memory_bytes, warnings=warnings)
+    merged_wslconfig = merge_ini_preserving_comments(existing_wslconfig, desired_wslconfig_sections)
+    wslconfig_changed = merged_wslconfig != existing_wslconfig
+
+    backup_path: Path | None = None
+    if create_host_backup and wslconfig_changed:
+        backup_path = _create_backup_file(target_wslconfig)
+
+    distro_sections = build_distro_wsl_conf_sections(spec)
+    distro_plans: list[PreparedWslDistroPlan] = []
+    for distro in distros:
+        probe = probe_distro_wsl_conf(distro, system)
+        if probe.status == "error":
+            raise WslOperationError(f"Refusing to modify /etc/wsl.conf in '{distro}': {probe.evidence}")
+        merged_distro_conf = merge_ini_preserving_comments(probe.content, distro_sections)
+        distro_plans.append(
+            PreparedWslDistroPlan(
+                distro=distro,
+                probe=probe,
+                merged_content=merged_distro_conf,
+                changed=merged_distro_conf != probe.content,
+            )
+        )
+
+    return PreparedWslPlan(
+        target_wslconfig=target_wslconfig,
+        backup_path=backup_path,
+        host_memory_bytes=host_memory_bytes,
+        host_memory_gib=host_memory_gib_str,
+        memory_limit_gib=memory_gib,
+        merged_wslconfig=merged_wslconfig,
+        wslconfig_changed=wslconfig_changed,
+        warnings=tuple(warnings),
+        distro_plans=tuple(distro_plans),
+    )
+
+
+def apply_wslconfig_target(plan: PreparedWslPlan) -> None:
+    """Write and verify host .wslconfig using a pre-prepared plan."""
+    if not plan.wslconfig_changed:
+        return
+    _atomic_write_text(plan.target_wslconfig, plan.merged_wslconfig, create_backup=plan.backup_path is None)
+    verified_text = plan.target_wslconfig.read_text(encoding="utf-8")
+    if verified_text != plan.merged_wslconfig:
+        raise WslOperationError(f"Verification failed after writing {plan.target_wslconfig}.")
+
+
+def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBackend) -> None:
+    """Write and verify /etc/wsl.conf for a single prepared distro."""
+    if not distro_plan.changed:
+        return
+    write_res = system.run_wsl_command(
+        ["-d", distro_plan.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
+        input_text=distro_plan.merged_content,
+    )
+    if write_res.returncode != 0:
+        raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro_plan.distro}': {write_res.stderr}")
+    verify_res = system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
+    if verify_res.returncode != 0 or verify_res.stdout != distro_plan.merged_content:
+        raise WslOperationError(f"Verification failed after writing /etc/wsl.conf in '{distro_plan.distro}'.")
 
 
 def plan_or_apply_wsl(
@@ -343,39 +511,49 @@ def plan_or_apply_wsl(
     wslconfig_changed = merged_wslconfig != existing_wslconfig
     backup_path: Path | None = None
 
+    distro_sections = build_distro_wsl_conf_sections(spec)
+    distro_changed = False
+    distro_existed = False
+    distro_read_status = "skipped"
+    distro_read_evidence = "no_distro"
+    existing_distro_conf = ""
+    merged_distro_conf = merge_ini_preserving_comments("", distro_sections)
+
+    if distro is not None:
+        probe = probe_distro_wsl_conf(distro, system)
+        distro_read_status = probe.status
+        distro_read_evidence = probe.evidence
+        if probe.status == "error":
+            if not dry_run:
+                raise WslOperationError(f"Refusing to modify /etc/wsl.conf in '{distro}': {probe.evidence}")
+            warnings.append(f"Could not read /etc/wsl.conf in '{distro}': {probe.evidence}")
+        else:
+            distro_existed = probe.status == "exists"
+            existing_distro_conf = probe.content
+            merged_distro_conf = merge_ini_preserving_comments(existing_distro_conf, distro_sections)
+            distro_changed = merged_distro_conf != existing_distro_conf
+
     if not dry_run and wslconfig_changed:
         backup_path = _atomic_write_text(target_wslconfig, merged_wslconfig)
         verified_text = target_wslconfig.read_text(encoding="utf-8")
         if verified_text != merged_wslconfig:
             raise WslOperationError(f"Verification failed after writing {target_wslconfig}.")
 
-    distro_sections = build_distro_wsl_conf_sections(spec)
-    distro_changed = False
-    distro_existed = False
-    existing_distro_conf = ""
-    merged_distro_conf = merge_ini_preserving_comments("", distro_sections)
-
-    if distro is not None:
-        cat_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-        distro_existed = cat_res.returncode == 0
-        existing_distro_conf = cat_res.stdout if distro_existed else ""
-        merged_distro_conf = merge_ini_preserving_comments(existing_distro_conf, distro_sections)
-        distro_changed = merged_distro_conf != existing_distro_conf
-        if not dry_run and distro_changed:
-            try:
-                write_res = system.run_wsl_command(
-                    ["-d", distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
-                    input_text=merged_distro_conf,
-                )
-                if write_res.returncode != 0:
-                    raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro}': {write_res.stderr}")
-                verify_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-                if verify_res.returncode != 0 or verify_res.stdout != merged_distro_conf:
-                    raise WslOperationError(f"Verification failed after writing /etc/wsl.conf in '{distro}'.")
-            except Exception:
-                if backup_path is not None and backup_path.is_file():
-                    shutil.copy2(backup_path, target_wslconfig)
-                raise
+    if not dry_run and distro is not None and distro_changed:
+        try:
+            apply_distro_wsl_conf(
+                PreparedWslDistroPlan(
+                    distro=distro,
+                    probe=WslDistroConfProbe(distro_read_status, existing_distro_conf, distro_read_evidence),
+                    merged_content=merged_distro_conf,
+                    changed=True,
+                ),
+                system,
+            )
+        except Exception:
+            if backup_path is not None and backup_path.is_file():
+                shutil.copy2(backup_path, target_wslconfig)
+            raise
 
     return {
         "dry_run": dry_run,
@@ -387,6 +565,8 @@ def plan_or_apply_wsl(
         "wslconfig_backup_path": str(backup_path) if backup_path is not None else None,
         "wslconfig_changed": wslconfig_changed,
         "distro_existed": distro_existed,
+        "distro_read_status": distro_read_status,
+        "distro_read_evidence": distro_read_evidence,
         "distro_previous_content": existing_distro_conf,
         "wslconfig_content": merged_wslconfig,
         "distro": distro,

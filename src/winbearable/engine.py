@@ -63,7 +63,13 @@ from .operations import (
 )
 from .state import StateStore, StateStoreError
 from .tweaks import get_all_tweaks, get_tweak
-from .wsl import WslOperationError, plan_or_apply_wsl
+from .wsl import (
+    WslOperationError,
+    apply_distro_wsl_conf,
+    apply_wslconfig_target,
+    plan_or_apply_wsl,
+    prepare_wsl_plan,
+)
 
 
 class HighRiskConfirmationError(RuntimeError):
@@ -1346,57 +1352,65 @@ def apply_profile(
             else:
                 if profile.wsl.enabled and env.wsl_installed:
                     try:
-                        distros = list(env.wsl_distros)
-                        if distros:
-                            distro_results: list[dict[str, Any]] = []
-                            first_res = plan_or_apply_wsl(
-                                spec=profile.wsl,
-                                system=system,
-                                distro=distros[0],
-                                wslconfig_path=wslconfig_path,
-                                dry_run=False,
-                            )
-                            wsl_backup_path = first_res.get("wslconfig_backup_path")
-                            wsl_target_path = first_res.get("wslconfig_path")
-                            if first_res.get("distro_changed"):
+                        distros = tuple(env.wsl_distros)
+                        prepared_wsl = prepare_wsl_plan(
+                            profile.wsl,
+                            system,
+                            wslconfig_path=wslconfig_path,
+                            distros=distros,
+                            create_host_backup=True,
+                        )
+                        wsl_backup_path = (
+                            str(prepared_wsl.backup_path) if prepared_wsl.backup_path is not None else None
+                        )
+                        wsl_target_path = str(prepared_wsl.target_wslconfig)
+                        for d_plan in prepared_wsl.distro_plans:
+                            if d_plan.changed:
                                 wsl_distro_snapshots.append(
                                     WslDistroSnapshot(
-                                        distro=distros[0],
-                                        existed=bool(first_res.get("distro_existed", False)),
-                                        previous_content=str(first_res.get("distro_previous_content", "")),
+                                        distro=d_plan.distro,
+                                        existed=d_plan.probe.status == "exists",
+                                        previous_content=d_plan.probe.content,
                                     )
                                 )
-                            distro_results.append({"distro": distros[0], "distro_changed": first_res["distro_changed"]})
-                            for extra_distro in distros[1:]:
-                                extra_res = plan_or_apply_wsl(
-                                    spec=profile.wsl,
-                                    system=system,
-                                    distro=extra_distro,
-                                    wslconfig_path=wslconfig_path,
-                                    dry_run=False,
-                                )
-                                if extra_res.get("distro_changed"):
-                                    wsl_distro_snapshots.append(
-                                        WslDistroSnapshot(
-                                            distro=extra_distro,
-                                            existed=bool(extra_res.get("distro_existed", False)),
-                                            previous_content=str(extra_res.get("distro_previous_content", "")),
-                                        )
-                                    )
-                                distro_results.append(
-                                    {"distro": extra_distro, "distro_changed": extra_res["distro_changed"]}
-                                )
-                            wsl_result = {**first_res, "distros_applied": distro_results}
-                        else:
-                            wsl_result = plan_or_apply_wsl(
-                                spec=profile.wsl,
-                                system=system,
-                                wslconfig_path=wslconfig_path,
-                                dry_run=False,
+                        wsl_changed = prepared_wsl.wslconfig_changed or bool(wsl_distro_snapshots)
+                        if wsl_changed:
+                            state_store.upsert_run(_make_record(TransactionState.APPLYING))
+
+                        apply_wslconfig_target(prepared_wsl)
+                        if prepared_wsl.wslconfig_changed:
+                            state_store.upsert_run(_make_record(TransactionState.APPLYING))
+
+                        distro_results: list[dict[str, Any]] = []
+                        for d_plan in prepared_wsl.distro_plans:
+                            apply_distro_wsl_conf(d_plan, system)
+                            if d_plan.changed:
+                                state_store.upsert_run(_make_record(TransactionState.APPLYING))
+                            distro_results.append(
+                                {
+                                    "distro": d_plan.distro,
+                                    "distro_changed": d_plan.changed,
+                                    "distro_read_status": d_plan.probe.status,
+                                    "distro_read_evidence": d_plan.probe.evidence,
+                                }
                             )
-                        wsl_backup_path = wsl_result.get("wslconfig_backup_path")
-                        wsl_target_path = wsl_result.get("wslconfig_path")
-                        wsl_changed = bool(wsl_result.get("wslconfig_changed")) or bool(wsl_distro_snapshots)
+
+                        wsl_result = {
+                            "dry_run": False,
+                            "mode": profile.wsl.mode,
+                            "host_memory_bytes": prepared_wsl.host_memory_bytes,
+                            "host_memory_gib": prepared_wsl.host_memory_gib,
+                            "memory_limit_gib": prepared_wsl.memory_limit_gib,
+                            "wslconfig_path": wsl_target_path,
+                            "wslconfig_backup_path": wsl_backup_path,
+                            "wslconfig_changed": prepared_wsl.wslconfig_changed,
+                            "wslconfig_content": prepared_wsl.merged_wslconfig,
+                            "distro": distros[0] if distros else None,
+                            "distro_changed": any(d.changed for d in prepared_wsl.distro_plans),
+                            "distro_restart_required": any(d.changed for d in prepared_wsl.distro_plans),
+                            "warnings": list(prepared_wsl.warnings),
+                            "distros_applied": distro_results,
+                        }
                         if drifted_indices or wsl_changed:
                             state_store.upsert_run(_make_record(TransactionState.COMMITTED))
                             run_id = run_id_candidate
@@ -1431,18 +1445,18 @@ def apply_profile(
             wsl_result = {"enabled": True, "skipped": True, "reason": "WSL2 is not installed on host."}
         else:
             try:
-                distros = list(env.wsl_distros)
-                if distros:
+                dry_distros = list(env.wsl_distros)
+                if dry_distros:
                     dry_distro_results: list[dict[str, Any]] = []
                     first_res = plan_or_apply_wsl(
                         spec=profile.wsl,
                         system=system,
-                        distro=distros[0],
+                        distro=dry_distros[0],
                         wslconfig_path=wslconfig_path,
                         dry_run=dry_run,
                     )
-                    dry_distro_results.append({"distro": distros[0], "distro_changed": first_res["distro_changed"]})
-                    for extra_distro in distros[1:]:
+                    dry_distro_results.append({"distro": dry_distros[0], "distro_changed": first_res["distro_changed"]})
+                    for extra_distro in dry_distros[1:]:
                         extra_res = plan_or_apply_wsl(
                             spec=profile.wsl,
                             system=system,
