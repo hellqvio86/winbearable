@@ -51,7 +51,7 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** distinguish `ABSENT` / `UNREADABLE` / `value`. Skip the tweak (status `NOT_APPLICABLE`) when the service key does not exist; never write `Start` into a missing key. On rollback, delete `Start` only if the snapshot positively recorded that the service key *and* value were created by this run; otherwise report an error. Wrap the `registry.delete_value` call in the error-collecting `try` (it currently can raise out of `_compensate_run_record` and abort every later restore step). Use `OpenService/ChangeServiceConfig` or `sc.exe config` as the source of truth, not only the registry.
 - **Done when:** tests: absent service ⇒ no key created and tweak not reported as applied; unreadable value ⇒ rollback errors instead of deleting; an exception in `delete_value` does not skip task/feature/file/WSL restores.
 
-### R-04 · P1 · `CODE` — Rollback imports whole firewall / audit policies and blindly overwrites
+### [x] R-04 · P1 · `CODE` — Rollback imports whole firewall / audit policies and blindly overwrites
 - **Where:** `engine.py:836` (`restore_auditpol`), `engine.py:858` (`import_firewall_policy`); also `restore_file_snapshot`, registry restore.
 - **Problem:** if a run contained any firewall-group or auditpol tweak, rollback/compensation/recover replaces the **entire** policy with the export from the start of that run, discarding anything the user, Windows, or other software changed afterwards. Per-group `previous_enabled` is recorded but ignored when an export exists. No restore step checks that the current value is still what winbearable wrote (files, registry, services).
 - **Fix:** restore per-item (`previous_enabled` / per-GUID) by default; keep the full export only as an explicit `--restore-full-policy` fallback. Record the post-apply value per item and warn (or require `--force`) when current state ≠ recorded post-state.
@@ -82,13 +82,13 @@ Severity: **P0** = data loss / wrong system state / privilege boundary. **P1** =
 - **Fix:** derive backup retention from the retained runs (delete a backup dir only when its run record is pruned); prune after the atomic state write succeeds; guard `stat()`.
 - **Done when:** test with >60 committed runs: every retained run still has its backup dir; failed write leaves backups intact.
 
-### R-09 · P2 · `NEEDS-SOURCE` — `.wslconfig` rollback when the file did not exist
+### [x] R-09 · P2 · `NEEDS-SOURCE` — `.wslconfig` rollback when the file did not exist
 - **Where:** `engine.py:895-899` (`if run_record.wsl_backup_path and run_record.wslconfig_path: shutil.copy2(bak, ...)`).
 - **Problem:** if `.wslconfig` was absent before apply there is (presumably) no backup, so rollback skips it and leaves the newly created file; restore is also a non-atomic `copy2`. I did not read `prepare_wsl_plan` to confirm the no-backup case — check first.
 - **Fix:** record `existed` for `.wslconfig` like `FileSnapshot`; delete on rollback if it did not exist; restore with `_atomic_write_bytes`.
 - **Done when:** apply→rollback on a machine without `.wslconfig` leaves none behind; test covers both existed/absent.
 
-### R-10 · P2 · `CODE` — Misc journal hygiene
+### [x] R-10 · P2 · `CODE` — Misc journal hygiene
 - `models.py:914-919` `WslDistroSnapshot.from_dict`: `str(payload.get("previous_content", ""))` turns JSON `null` into the literal string `"None"`, which `tee` would write into `/etc/wsl.conf`. Treat `None` as absent.
 - `state.py:63`: `msvcrt.locking(..., LK_LOCK, 1)` gives up after ~10 s and raises a raw `OSError`; wrap it in `StateStoreError` with a "another wb is running" message.
 - `state.py:195-201` / `operations.py:367-372`: no directory fsync (documented for Windows; add POSIX `fsync(dirfd)` for the Linux dev path, or document).

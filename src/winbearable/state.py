@@ -7,7 +7,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -60,12 +60,16 @@ class StateStore:
                 import msvcrt
 
                 lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                except OSError as exc:
+                    raise StateStoreError("Another winbearable process holds the state lock; retry later.") from exc
                 try:
                     yield
                 finally:
                     lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    with suppress(OSError):
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
 
@@ -207,6 +211,12 @@ class StateStore:
             if os.name == "posix":
                 os.chmod(temp_path_str, 0o600)
             os.replace(temp_path_str, self.state_path)
+            if os.name == "posix":
+                dir_fd = os.open(str(self.state_path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         except Exception:
             if os.path.exists(temp_path_str):
                 os.unlink(temp_path_str)

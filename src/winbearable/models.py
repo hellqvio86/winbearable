@@ -966,10 +966,11 @@ class WslDistroSnapshot:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> WslDistroSnapshot:
+        raw_prev = payload.get("previous_content")
         return cls(
             distro=str(payload["distro"]),
             existed=bool(payload.get("existed", False)),
-            previous_content=str(payload.get("previous_content", "")),
+            previous_content=str(raw_prev) if raw_prev is not None else "",
         )
 
 
@@ -1001,7 +1002,9 @@ class RunRecord:
     failure_outcomes: tuple[dict[str, Any], ...] = ()
     wsl_backup_path: str | None = None
     wslconfig_path: str | None = None
+    wslconfig_existed: bool | None = None
     wsl_distro_snapshots: tuple[WslDistroSnapshot, ...] = ()
+    planned_tweaks: tuple[str, ...] = ()
     state: TransactionState = TransactionState.COMMITTED
     error: str | None = None
 
@@ -1032,7 +1035,9 @@ class RunRecord:
             "failure_outcomes": list(self.failure_outcomes),
             "wsl_backup_path": self.wsl_backup_path,
             "wslconfig_path": self.wslconfig_path,
+            "wslconfig_existed": self.wslconfig_existed,
             "wsl_distro_snapshots": [snap.to_dict() for snap in self.wsl_distro_snapshots],
+            "planned_tweaks": list(self.planned_tweaks),
             "state": str(self.state),
             "error": self.error,
         }
@@ -1062,6 +1067,7 @@ class RunRecord:
         failure_outcomes = tuple(dict(item) for item in payload.get("failure_outcomes", []) if isinstance(item, dict))
         raw_wsl_backup = payload.get("wsl_backup_path")
         raw_wslconfig = payload.get("wslconfig_path")
+        raw_wslconfig_existed = payload.get("wslconfig_existed")
         raw_state = payload.get("state", TransactionState.COMMITTED)
         raw_error = payload.get("error")
         return cls(
@@ -1069,6 +1075,7 @@ class RunRecord:
             timestamp=str(payload["timestamp"]),
             profile_name=str(payload["profile_name"]),
             applied_tweaks=tuple(str(item) for item in payload.get("applied_tweaks", [])),
+            planned_tweaks=tuple(str(item) for item in payload.get("planned_tweaks", [])),
             registry_snapshots=reg_snaps,
             registry_key_snapshots=reg_key_snaps,
             service_snapshots=svc_snaps,
@@ -1089,6 +1096,7 @@ class RunRecord:
             failure_outcomes=failure_outcomes,
             wsl_backup_path=str(raw_wsl_backup) if raw_wsl_backup is not None else None,
             wslconfig_path=str(raw_wslconfig) if raw_wslconfig is not None else None,
+            wslconfig_existed=bool(raw_wslconfig_existed) if raw_wslconfig_existed is not None else None,
             wsl_distro_snapshots=tuple(
                 WslDistroSnapshot.from_dict(item) for item in payload.get("wsl_distro_snapshots", [])
             ),

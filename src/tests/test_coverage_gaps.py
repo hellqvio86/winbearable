@@ -1627,3 +1627,71 @@ def test_file_config_robustness_hyperv_not_configured_and_service_paths(
     assert "CleanArgs" not in finding.observation.evidence
     assert "VulnSpace" in finding.observation.evidence
     assert finding.severity == "low"
+
+
+def test_per_item_policy_rollback_wslconfig_absent_and_journal_hygiene(tmp_path: Path) -> None:
+    """R-04, R-09, R-10: per-item firewall/auditpol rollback, absent .wslconfig deletion, and journal hygiene."""
+    from unittest.mock import patch
+
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import InMemorySystemBackend
+    from winbearable.engine import rollback_runs
+    from winbearable.models import (
+        AuditpolSnapshot,
+        FirewallGroupSnapshot,
+        RunRecord,
+        TransactionState,
+        WslDistroSnapshot,
+    )
+    from winbearable.state import StateStore
+
+    # R-10: WslDistroSnapshot.from_dict handles JSON null previous_content without turning it into "None"
+    d_snap = WslDistroSnapshot.from_dict({"distro": "Ubuntu", "existed": False, "previous_content": None})
+    assert d_snap.previous_content == ""
+
+    # R-04 + R-09: per-item rollback does not call import_firewall_policy / restore_auditpol by default,
+    # and deletes .wslconfig when wslconfig_existed=False
+    wfw = tmp_path / "fw.wfw"
+    wfw.write_text("full-export", encoding="utf-8")
+    csv_bak = tmp_path / "ap.csv"
+    csv_bak.write_text("full-csv", encoding="utf-8")
+    wsl_cfg = tmp_path / ".wslconfig"
+    wsl_cfg.write_text("[wsl2]\nmemory=4GB\n", encoding="utf-8")
+
+    store = StateStore(tmp_path / "state.json")
+    store.append_run(
+        RunRecord(
+            run_id="r-policy",
+            timestamp="2026-01-01T00:00:00Z",
+            profile_name="hardened-baseline",
+            applied_tweaks=(),
+            planned_tweaks=("hardening.firewall_disable_risky_groups",),
+            auditpol_snapshots=(
+                AuditpolSnapshot(
+                    subcategory_guid="{0CCE9215-69AE-11D9-BED3-505054503030}",
+                    previous_setting="No Auditing",
+                    backup_csv_path=str(csv_bak),
+                ),
+            ),
+            firewall_group_snapshots=(
+                FirewallGroupSnapshot(
+                    group_resource_id="@FirewallAPI.dll,-28502",
+                    previous_enabled=False,
+                    export_wfw_path=str(wfw),
+                ),
+            ),
+            wslconfig_path=str(wsl_cfg),
+            wslconfig_existed=False,
+            state=TransactionState.COMMITTED,
+        )
+    )
+
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    with (
+        patch.object(sysb, "import_firewall_policy", side_effect=AssertionError("must not import full wfw")),
+        patch.object(sysb, "restore_auditpol", side_effect=AssertionError("must not restore full csv")),
+    ):
+        rolled = rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+    assert len(rolled) == 1 and rolled[0].state == TransactionState.ROLLED_BACK
+    assert not wsl_cfg.exists()
