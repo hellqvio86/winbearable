@@ -312,7 +312,7 @@ No `cis_mapping` unless verified (A3.5).
 | `hardening.ntlm_hardening` | medium | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` `LmCompatibilityLevel`=5, `NoLMHash`=1, `RestrictAnonymous`=1, `RestrictAnonymousSAM`=1 | breaks very old SMB servers |
 | `hardening.wdigest_off` | low | `...\Control\SecurityProviders\WDigest` `UseLogonCredential`=0 | enforce explicitly |
 | `hardening.uac_secure_desktop` | low | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` `EnableLUA`=1, `ConsentPromptBehaviorAdmin`=2, `PromptOnSecureDesktop`=1 | never lowers UAC |
-| `hardening.inactivity_lock` | low | `...\Policies\System` `InactivityTimeoutSecs` from `[params]`, no default | ENG-10 |
+| `hardening.inactivity_lock` | low | `...\Policies\System` `InactivityTimeoutSecs`=900 (15 min) | **done** (opt-in) |
 | `hardening.disable_rdp` | medium | `HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server` `fDenyTSConnections`=1; `...\Remote Assistance` `fAllowToGetHelp`=0 | managed devices often need RDP |
 | `hardening.credential_guard` | **high** | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa` `LsaCfgFlags` `[VERIFY: pick the value WITHOUT UEFI lock]` | **Never** use the UEFI-locked variant: it survives registry rollback. Requires VBS. Extend or sit beside `hardening.enable_vbs_hvci` without conflicting values |
 | `hardening.disable_legacy_tls` | medium | `...\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\{Client,Server}` `Enabled`=0, `DisabledByDefault`=1 (same for TLS 1.1, SSL 3.0) `[VERIFY defaults on 26300; ship audit-only if already off]` | |
@@ -328,7 +328,7 @@ Detect Tamper Protection (`HKLM\SOFTWARE\Microsoft\Windows Defender\Features` `T
 | `hardening.defender_network_protection_audit` | low | `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\Network Protection` `EnableNetworkProtection`=2 `[VERIFY]` | audit first; block is a separate opt-in |
 | `hardening.defender_asr_audit` | low | `...\Windows Defender Exploit Guard\ASR` `ExploitGuard_ASR_Rules`=1 and `\Rules\<GUID>`=2 | GUIDs only from Microsoft's ASR reference, committed with the URL. Start: LSASS credential stealing, executable content from email, Office child processes, obfuscated scripts, WMI persistence, vulnerable signed drivers |
 | `hardening.defender_asr_block_core` | medium | same, value 1 for that subset | `opt`; separate tweak |
-| `hardening.defender_controlled_folder_access_audit` | low | `...\Controlled Folder Access` `EnableControlledFolderAccess`=2 | audit only |
+| `hardening.defender_controlled_folder_access_audit` | low | `...\Controlled Folder Access` `EnableControlledFolderAccess`=2 | **done** (`hardened-baseline`) |
 | `hardening.enforce_smartscreen` | low | `HKLM\SOFTWARE\Policies\Microsoft\Windows\System` `EnableSmartScreen`=1 | confirm the shipped posture/PUA tweak does not already set it |
 
 ### TWK-I: Audit policy and logging (profile `HB`)

@@ -3142,6 +3142,57 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         tested_builds=DEFAULT_TESTED_BUILDS,
         winget_specs=(WingetSpec(package_id="9NBLGGH4R32N", scope="user", action="uninstall"),),
     ),
+    "hardening.defender_controlled_folder_access_audit": TweakDefinition(
+        tweak_id="hardening.defender_controlled_folder_access_audit",
+        category="hardening",
+        title="Enable Defender Controlled Folder Access (Audit Mode)",
+        description=(
+            "Sets Controlled Folder Access EnableControlledFolderAccess=2 (Audit) via policy; "
+            "honours Tamper Protection."
+        ),
+        source_url="https://learn.microsoft.com/en-us/defender-endpoint/enable-controlled-folders",
+        risk=RiskLevel.LOW,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        requires_tamper_protection_off=True,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=(
+                    r"SOFTWARE\Policies\Microsoft\Windows Defender"
+                    r"\Windows Defender Exploit Guard\Controlled Folder Access"
+                ),
+                value_name="EnableControlledFolderAccess",
+                value_data=2,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "hardening.inactivity_lock": TweakDefinition(
+        tweak_id="hardening.inactivity_lock",
+        category="hardening",
+        title="Enforce Machine Inactivity Lock Timeout (15 Minutes)",
+        description="Sets HKLM Policies\\System\\InactivityTimeoutSecs=900 (15 minutes before auto-lock).",
+        source_url="https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/interactive-logon-machine-inactivity-limit",
+        risk=RiskLevel.LOW,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+                value_name="InactivityTimeoutSecs",
+                value_data=900,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
 }
 
 TWEAK_CATALOG = {

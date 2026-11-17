@@ -32,6 +32,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.credential_guard` | `hardening` | Yes | `high` | — | *opt-in* | Enable Credential Guard Without UEFI Lock (LsaCfgFlags=2) |
 | `hardening.defender_asr_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Defender ASR Rules (Audit Mode) |
 | `hardening.defender_cloud_and_pua` | `hardening` | Yes | `medium` | `18.10.43` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enable Microsoft Defender PUA Block & Cloud Protection |
+| `hardening.defender_controlled_folder_access_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Controlled Folder Access (Audit Mode) |
 | `hardening.defender_network_protection_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Network Protection (Audit Mode) |
 | `hardening.disable_autorun` | `hardening` | Yes | `low` | `18.9.8.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable AutoRun and AutoPlay on All Drives |
 | `hardening.disable_guest_and_blank_passwords` | `hardening` | Yes | `medium` | `2.3.1.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Restrict Blank Passwords & Disable Remote Assistance Solicited Help |
@@ -53,6 +54,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.firewall_disable_risky_groups` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Disable Risky Inbound Firewall Rule Groups (Resource-ID Safe) |
 | `hardening.firewall_log_dropped` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Windows Firewall Dropped-Packet Logging |
 | `hardening.harden_ip_stack` | `hardening` | Yes | `low` | — | `hardened-baseline` | Harden TCP/IPv4 & IPv6 Stack (No Source Routing / ICMP Redirects) |
+| `hardening.inactivity_lock` | `hardening` | Yes | `low` | — | *opt-in* | Enforce Machine Inactivity Lock Timeout (15 Minutes) |
 | `hardening.ntlm_hardening` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Enforce NTLMv2 Only & Block Anonymous Enumeration |
 | `hardening.office_macro_ole` | `hardening` | No | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Block Office Internet Macros & Disable OLE Packager Shortcuts |
 | `hardening.powershell_module_logging` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable PowerShell Module Logging (*) |
