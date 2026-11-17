@@ -190,11 +190,11 @@ All `ENG-01`..`ENG-11` items below are **done**:
 
 | ID | Question | Default until decided |
 |----|----------|-----------------------|
-| DEC-01 | Hyper-V firewall (default-deny for the WSL VM) has no known native-`.exe` interface; supported cmdlets are PowerShell, which AGENTS.md forbids. Research a native path (registry/COM via `ctypes`), allow one narrowly scoped exception, or declare unsupported? | Unsupported; rely on `.wslconfig` `firewall=true`; document the gap |
-| DEC-02 | Appx removal without PowerShell: `winget uninstall --id` (per-user) and `dism.exe /Remove-ProvisionedAppxPackage` (provisioned). Accept? | Accept, explicit named list only, `irreversible` |
-| DEC-03 | Edge policies show "managed by your organization" and can conflict with employer policy. Ship as an opt-in `edge-quiet` preset only? | Opt-in only |
-| DEC-04 | Developer Mode (symlinks without admin) slightly enlarges attack surface. In `dev-comfort` by default? | Off by default |
-| DEC-05 | Sysmon config: vendor a pinned `sysmon-modular` copy (license attribution, no runtime download) or download with SHA-256? | Vendor |
+| DEC-01 | Hyper-V firewall (default-deny for the WSL VM) has no known native-`.exe` interface; supported cmdlets are PowerShell, which AGENTS.md forbids. Research a native path (registry/COM via `ctypes`), allow one narrowly scoped exception, or declare unsupported? | **DECIDED:** Narrowly scoped PowerShell JSON exception approved for Hyper-V firewall (`WSL-08`) only |
+| DEC-02 | Appx removal without PowerShell: `winget uninstall --id` (per-user) and `dism.exe /Remove-ProvisionedAppxPackage` (provisioned). Accept? | **DECIDED:** Accepted (explicit named list only, `irreversible`) |
+| DEC-03 | Edge policies show "managed by your organization" and can conflict with employer policy. Ship as an opt-in `edge-quiet` preset only? | **DECIDED:** Keep opt-in only |
+| DEC-04 | Developer Mode (symlinks without admin) slightly enlarges attack surface. In `dev-comfort` by default? | **DECIDED:** Keep off by default |
+| DEC-05 | Sysmon config: vendor a pinned `sysmon-modular` copy (license attribution, no runtime download) or download with SHA-256? | **DECIDED:** Declined / dropped (SSD write/log bloat) |
 | DEC-06 | WSL export encryption: stdlib has none. Add an optional dependency, or leave to BitLocker/user? | Leave to user, document |
 | DEC-07 | Approve new profiles `dev-comfort`, `corp-safe`, `privacy`, `hardened-baseline`, `edge-quiet` and their membership (section F names the intended profile per tweak)? | Approve as listed |
 | DEC-08 | Machine-scope tweaks on a managed device (MDM/domain/Entra): skip by default with `--allow-managed` opt-in? | Yes, skip by default |
@@ -296,7 +296,7 @@ Scheduled tasks (`ScheduledTaskSpec`, extend `telemetry.disable_scheduled_tasks`
 
 Optional features (`OptionalFeatureSpec`, reversible): `MicrosoftWindowsPowerShellV2Root` (+ `...V2`), `Internet-Explorer-Optional-amd64` `[VERIFY names with dism /Get-Features]`. (`SMB1Protocol` is already handled.)
 
-Appx removal (DEC-02): explicit named list, per-user via `winget uninstall --id`, provisioned via `dism /Remove-ProvisionedAppxPackage`; candidates `[VERIFY each via winget list]`: Bing News/Weather, Clipchamp, Xbox Gaming Overlay, Feedback Hub, Get Help, Tips, People, Solitaire, Maps, Power Automate, Office Hub. IDs `bloat.remove_*`, all `irreversible`, opt-in.
+Appx removal (DEC-02): explicit named list, per-user via `winget uninstall --id`, provisioned via `dism /Remove-ProvisionedAppxPackage`; verified & shipped as opt-in `irreversible` tweaks (`bloat.remove_bing_news`, `bloat.remove_bing_weather`, `bloat.remove_clipchamp`, `bloat.remove_feedback_hub`). Microsoft Teams and Power Automate are intentionally excluded so corporate workflows are never disrupted.
 
 ### TWK-G: Network and authentication hardening (profiles `HB`, `PA`; ENG-03 guard applies). Category `hardening`.
 
@@ -407,8 +407,8 @@ All tasks `status: todo`, `depends_on: none` unless listed. Every key below is `
 - accept: `wb wsl export` already exists; add sha256 recording, retention, and an optional per-user scheduled task (`schtasks /Create /SC WEEKLY`, no admin needed) with a dry-run; `wsl.exe --manage <distro> --set-sparse true` per distro when supported; encryption per DEC-06
 
 ### WSL-08: Hyper-V firewall rules
-- status: blocked:DEC-01
-- accept: after DEC-01. If "unsupported": add a read-only audit finding "Hyper-V firewall default action: not managed by winbearable" and a doc page
+- status: done (DEC-01 narrow PowerShell JSON exception)
+- accept: implement Hyper-V firewall default-deny / WSL VM rules via a narrowly scoped PowerShell JSON invocation (`hyperv_firewall.py`, `wb wsl firewall`, `chk.hyperv_firewall`), dry-run by default
 
 ---
 

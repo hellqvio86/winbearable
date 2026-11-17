@@ -31,9 +31,9 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
 
 ## Core Architectural Invariants
 
-1. **100% Native Python — Zero PowerShell Wrappers:**
-   - Never invoke `powershell.exe` or `pwsh.exe`.
-   - Use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, and direct native executables (`wsl.exe`, `sc.exe`, `schtasks.exe`, `dism.exe`, `reg.exe`, `taskkill.exe`) with `shell=False` argument lists.
+1. **100% Native Python — Zero PowerShell Wrappers (with sole `DEC-01` Hyper-V firewall exception):**
+   - Never invoke `powershell.exe` or `pwsh.exe` anywhere in `src/winbearable/` except the sole, narrowly scoped `DEC-01` Hyper-V firewall module (`src/winbearable/hyperv_firewall.py`, which uses `ConvertTo-Json -Compress` and `shell=False`).
+   - Everywhere else, use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, and direct native executables (`wsl.exe`, `sc.exe`, `schtasks.exe`, `dism.exe`, `reg.exe`, `taskkill.exe`) with `shell=False` argument lists.
 2. **Dry-Run by Default:**
    - `wb plan`, `wb apply` (without `--apply`), `wb rollback` (without `--apply`), and `wb wsl apply/install/export/import/baseline` (without `--apply`) must never mutate registry keys, files, processes, or services.
 3. **High-Risk Guardrail:**

@@ -541,3 +541,24 @@ def test_new_tweaks_roundtrip_and_tamper_protection(state_store: StateStore) -> 
     asr_res = detect_tweak(get_tweak("hardening.defender_asr_audit"), env, reg, sys_b)
     assert asr_res.status == TweakStatus.BLOCKED_BY_POLICY
     assert "tamper_protection" in asr_res.detail
+
+
+def test_bloat_remove_appx_opt_in_irreversible_guard(state_store: StateStore) -> None:
+    """DEC-02: bloat.remove_* tweaks require allow_irreversible and uninstall via winget."""
+    from winbearable.engine import IrreversibleActionError
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=False, installed_winget_packages={"9WZDNCRFHVFW"})
+    env = sys_b.detect_environment(reg)
+    prof = ProfileSpec(name="bloat", description="bloat", tweaks={"bloat.remove_bing_news": True})
+
+    assert detect_tweak(get_tweak("bloat.remove_bing_news"), env, reg, sys_b).status == TweakStatus.DRIFTED
+
+    with pytest.raises(IrreversibleActionError):
+        apply_profile(prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+
+    summary = apply_profile(
+        prof, env, reg, sys_b, state_store, dry_run=False, allow_irreversible=True, allow_simulated=True
+    )
+    assert "bloat.remove_bing_news" in summary.applied_ids
+    assert detect_tweak(get_tweak("bloat.remove_bing_news"), env, reg, sys_b).status == TweakStatus.APPLIED

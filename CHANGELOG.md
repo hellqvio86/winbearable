@@ -8,6 +8,13 @@ All notable changes to `winbearable` are documented in this file.
 
 - Added `bin/publish_winget.py` and `Makefile` targets (`winget-build`, `winget-validate`, `winget-publish`, `test-windows-docker`), documented in `docs/winget-releasing.md`.
 
+## [0.9.2] - 2026-11-17
+
+### Added
+
+- `WSL-08` (`DEC-01`): Added Hyper-V firewall management for the WSL2 VM (`wb wsl firewall [--inbound Block|Allow] [--outbound Block|Allow] [--disable] [--apply] [--json]`) via a narrowly scoped PowerShell `ConvertTo-Json -Compress` module (`src/winbearable/hyperv_firewall.py`), and updated `chk.hyperv_firewall` in `wb audit`.
+- `QA-05` & Winget packaging: Added coverage tests (`88.26%` total), `bin/build_winget.py` (`--onedir` portable zip), `packaging/winget/` manifests, and `docs/winget-releasing.md`.
+
 ## [0.9.1] - 2026-11-16
 
 ### Changed & Added

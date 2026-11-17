@@ -18,14 +18,21 @@ OPT_IN_TWEAKS: frozenset[str] = frozenset(
         "services.disable_spooler",
         "hardening.disable_wpad_service",
         "hardening.credential_guard",
+        "bloat.remove_bing_news",
+        "bloat.remove_bing_weather",
+        "bloat.remove_clipchamp",
+        "bloat.remove_feedback_hub",
     }
 )
 
 
 def test_catalog_never_invokes_powershell() -> None:
-    """No source file in src/winbearable/ may invoke powershell.exe or pwsh.exe."""
+    """No source file in src/winbearable/ may invoke powershell.exe/pwsh.exe except hyperv_firewall.py (DEC-01)."""
     src_root = Path(__file__).resolve().parent.parent / "winbearable"
+    allowed = {src_root / "hyperv_firewall.py"}
     for py_file in src_root.rglob("*.py"):
+        if py_file in allowed:
+            continue
         text = py_file.read_text(encoding="utf-8")
         assert not re.search(r'["\'](?:powershell|pwsh)(?:\.exe)?["\']', text, re.IGNORECASE), (
             f"Forbidden PowerShell command reference in {py_file}"
