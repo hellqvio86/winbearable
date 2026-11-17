@@ -70,6 +70,53 @@ def _get_win32_dlls(windll_override: Any = None) -> tuple[Any, Any]:
     return windll_factory("shell32", use_last_error=True), windll_factory("kernel32", use_last_error=True)
 
 
+def _is_wb_launcher(path: Path) -> bool:
+    """Return True if *path* is a standalone or script-shim `wb` / `winbearable` executable."""
+    return path.name.lower() in {"wb.exe", "winbearable.exe", "wb", "winbearable"}
+
+
+def resolve_elevation_target(
+    elevated_args: list[str],
+    executable: str | None = None,
+    argv0: str | None = None,
+) -> tuple[str, list[str]]:
+    """Resolve the UAC target executable and argument list.
+
+    Prefers a frozen `wb.exe` or `uv`/`pip` `wb.exe` script launcher over `python.exe`
+    so Windows UAC displays `wb.exe` / `winbearable` instead of `Python`.
+    """
+    if executable is not None:
+        target = Path(executable).resolve()
+        args = elevated_args if _is_wb_launcher(target) else ["-m", "winbearable", *elevated_args]
+        return str(target), args
+
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).resolve()), elevated_args
+
+    raw_argv0 = argv0 if argv0 is not None else (sys.argv[0] if sys.argv else "")
+    if raw_argv0:
+        argv0_path = Path(raw_argv0)
+        if argv0_path.name.lower() in {"wb.exe", "winbearable.exe"} and argv0_path.is_file():
+            return str(argv0_path.resolve()), elevated_args
+
+    sibling_wb = Path(sys.executable).resolve().with_name("wb.exe")
+    if sibling_wb.is_file():
+        return str(sibling_wb), elevated_args
+
+    return str(Path(sys.executable).resolve()), ["-m", "winbearable", *elevated_args]
+
+
+def set_console_title(title: str = "winbearable", windll_override: Any = None) -> bool:
+    """Set the Windows console window/tab title via kernel32 SetConsoleTitleW."""
+    if windll_override is None and sys.platform != "win32":
+        return False
+    try:
+        _, kernel32 = _get_win32_dlls(windll_override)
+        return bool(kernel32.SetConsoleTitleW(title))
+    except (AttributeError, OSError, UacElevationError):
+        return False
+
+
 def run_elevated_wb(
     argv: list[str],
     executable: str | None = None,
@@ -82,9 +129,9 @@ def run_elevated_wb(
     with tempfile.TemporaryDirectory(prefix="wb-uac-") as tmp_dir:
         out_path = Path(tmp_dir) / "uac-output.txt"
         elevated_args = build_elevated_cmdline_args(argv, out_path)
-        params = subprocess.list2cmdline(["-m", "winbearable", *elevated_args])
+        resolved_exe, launch_args = resolve_elevation_target(elevated_args, executable=executable)
+        params = subprocess.list2cmdline(launch_args)
 
-        resolved_exe = str(Path(executable or sys.executable).resolve())
         sei = _ShellExecuteInfoW()
         sei.cbSize = ctypes.sizeof(_ShellExecuteInfoW)
         sei.fMask = SEE_MASK_NOCLOSEPROCESS

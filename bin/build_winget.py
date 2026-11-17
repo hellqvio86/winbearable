@@ -14,6 +14,56 @@ from winbearable.const import __version__
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _parse_version_tuple(version: str) -> tuple[int, int, int, int]:
+    """Convert a PEP 440 / SemVer version string into a 4-part Windows version tuple."""
+    parts: list[int] = []
+    for raw in version.split("."):
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+        if len(parts) == 4:
+            break
+    while len(parts) < 4:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2], parts[3])
+
+
+def _write_version_info_file(path: Path, version: str) -> Path:
+    """Write a PyInstaller Windows VSVersionInfo resource file for `wb.exe`."""
+    ver_tuple = _parse_version_tuple(version)
+    content = f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={ver_tuple},
+    prodvers={ver_tuple},
+    mask=0x3F,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'winbearable'),
+          StringStruct('FileDescription', 'winbearable'),
+          StringStruct('FileVersion', '{version}'),
+          StringStruct('InternalName', 'wb'),
+          StringStruct('OriginalFilename', 'wb.exe'),
+          StringStruct('ProductName', 'winbearable'),
+          StringStruct('ProductVersion', '{version}'),
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def main() -> int:
     """Build `dist/wb/wb.exe` (--onedir) and package `dist/winbearable-<version>-win-x64.zip`."""
     if sys.platform != "win32":
@@ -25,6 +75,7 @@ def main() -> int:
     build_dir.mkdir(parents=True, exist_ok=True)
     entry_script = build_dir / "_wb_entry.py"
     entry_script.write_text("from winbearable.cli import main\n\nraise SystemExit(main())\n", encoding="utf-8")
+    version_file = _write_version_info_file(build_dir / "version_info.txt", __version__)
     wb_dir = dist_dir / "wb"
     if wb_dir.exists():
         shutil.rmtree(wb_dir)
@@ -39,6 +90,8 @@ def main() -> int:
         "--console",
         "--name",
         "wb",
+        "--version-file",
+        str(version_file),
         "--distpath",
         str(dist_dir),
         "--workpath",

@@ -1073,3 +1073,53 @@ def test_engine_posture_inspection_variants_and_apply_failures(tmp_path: Path) -
     t_git = _sample_tweak("test.git", service_specs=(), git_config_specs=(GitConfigSpec("core.eol", "lf"),))
     with patch.object(sys_b, "set_git_global_config", return_value=False), pytest.raises(_TweakMutationError):
         _execute_tweak_mutations(t_git, env, reg2, sys_b, tmp_path, set(), [], [])
+
+
+def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cover UAC executable resolution (frozen, uv wb.exe, fallback python) and SetConsoleTitleW."""
+    from winbearable.uac import resolve_elevation_target, set_console_title
+
+    elevated_args = ["apply", "--uac-output", "out.txt"]
+
+    # Explicit wb.exe omits '-m winbearable'; explicit python.exe keeps it
+    wb_exe = tmp_path / "wb.exe"
+    wb_exe.write_bytes(b"")
+    py_exe = tmp_path / "python.exe"
+    py_exe.write_bytes(b"")
+    assert resolve_elevation_target(elevated_args, executable=str(wb_exe)) == (str(wb_exe.resolve()), elevated_args)
+    assert resolve_elevation_target(elevated_args, executable=str(py_exe)) == (
+        str(py_exe.resolve()),
+        ["-m", "winbearable", *elevated_args],
+    )
+
+    # Frozen PyInstaller binary uses sys.executable directly without '-m winbearable'
+    monkeypatch.setattr("winbearable.uac.sys.frozen", True, raising=False)
+    monkeypatch.setattr("winbearable.uac.sys.executable", str(wb_exe))
+    assert resolve_elevation_target(elevated_args) == (str(wb_exe.resolve()), elevated_args)
+
+    # Non-frozen uv/pip wb.exe via argv0 or sibling wb.exe
+    monkeypatch.delattr("winbearable.uac.sys.frozen", raising=False)
+    monkeypatch.setattr("winbearable.uac.sys.executable", str(py_exe))
+    assert resolve_elevation_target(elevated_args, argv0=str(wb_exe)) == (str(wb_exe.resolve()), elevated_args)
+
+    # Sibling wb.exe next to sys.executable is preferred even when argv0 is missing
+    assert resolve_elevation_target(elevated_args, argv0="") == (str(wb_exe.resolve()), elevated_args)
+
+    # Fallback to python.exe -m winbearable when no wb.exe exists
+    wb_exe.unlink()
+    assert resolve_elevation_target(elevated_args, argv0="") == (
+        str(py_exe.resolve()),
+        ["-m", "winbearable", *elevated_args],
+    )
+
+    # Console title happy path & error paths
+    fake_windll = MagicMock()
+    fake_windll.kernel32.SetConsoleTitleW.return_value = 1
+    assert set_console_title("winbearable", windll_override=fake_windll) is True
+    fake_windll.kernel32.SetConsoleTitleW.assert_called_once_with("winbearable")
+
+    fake_windll.kernel32.SetConsoleTitleW.side_effect = OSError("no console")
+    assert set_console_title("winbearable", windll_override=fake_windll) is False
+
+    monkeypatch.setattr("winbearable.uac.sys.platform", "linux")
+    assert set_console_title("winbearable") is False
