@@ -26,6 +26,8 @@ systemd = true
 # Source: https://learn.microsoft.com/en-us/windows/privacy/manage-windows-recall
 "ai.disable_copilot_machine" = true
 "ai.disable_recall" = true
+"ai.disable_recall_feature" = true
+"ai.disable_notepad_paint_ai" = true
 "privacy.telemetry_minimal" = true
 "telemetry.disable_scheduled_tasks" = true
 

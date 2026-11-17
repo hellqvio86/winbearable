@@ -2858,8 +2858,11 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
     "hardening.defender_asr_audit": TweakDefinition(
         tweak_id="hardening.defender_asr_audit",
         category="hardening",
-        title="Enable Core Defender ASR Rules (Audit Mode)",
-        description="Sets ExploitGuard_ASR_Rules=1 and 6 core ASR GUIDs to 2 (Audit); honours Tamper Protection.",
+        title="Enable Core Defender ASR Rules (Audit or Block Mode)",
+        description=(
+            "Sets ExploitGuard_ASR_Rules=1 and 6 core ASR GUIDs to 2 (Audit, default) or 1 (Block via "
+            "[params.\"hardening.defender_asr_audit\"].mode = 'block'); honours Tamper Protection."
+        ),
         source_url="https://learn.microsoft.com/en-us/defender-endpoint/attack-surface-reduction-rules-reference",
         risk=RiskLevel.LOW,
         requires_admin=True,
@@ -3306,6 +3309,114 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         winget_specs=(WingetSpec(package_id="DEVCOM.JetBrainsMonoNerdFont", scope="user"),),
+    ),
+    "ai.disable_recall_feature": TweakDefinition(
+        tweak_id="ai.disable_recall_feature",
+        category="ai",
+        title="Disable Windows Recall Optional Feature",
+        description=(
+            "Disables the Windows `Recall` optional feature via dism.exe "
+            "(requires admin and reboot; complements ai.disable_recall)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/client-management/manage-recall",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=True,
+        requires_reboot=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        feature_specs=(OptionalFeatureSpec(feature_name="Recall", enabled=False),),
+    ),
+    "ai.disable_click_to_do": TweakDefinition(
+        tweak_id="ai.disable_click_to_do",
+        category="ai",
+        title="Disable Click to Do (User Policy)",
+        description=(
+            "Sets HKCU\\Software\\Policies\\Microsoft\\Windows\\WindowsAI\\DisableClickToDo=1 "
+            "(no admin required; may display 'managed by your organization' in Settings)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-windowsai",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Policies\Microsoft\Windows\WindowsAI",
+                value_name="DisableClickToDo",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "ai.disable_notepad_paint_ai": TweakDefinition(
+        tweak_id="ai.disable_notepad_paint_ai",
+        category="ai",
+        title="Disable AI Features in Notepad & Paint",
+        description=(
+            "Sets WindowsNotepad\\DisableAIFeatures=1 and Paint\\DisableGenerativeFill, "
+            "DisableImageCreator, DisableCocreator=1 under HKLM Policies."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-windowsai",
+        risk=RiskLevel.LOW,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Policies\WindowsNotepad",
+                value_name="DisableAIFeatures",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Paint",
+                value_name="DisableGenerativeFill",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Paint",
+                value_name="DisableImageCreator",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Paint",
+                value_name="DisableCocreator",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "ai.remove_copilot_app": TweakDefinition(
+        tweak_id="ai.remove_copilot_app",
+        category="ai",
+        title="Uninstall Microsoft Copilot App (Irreversible)",
+        description=(
+            "Irreversible: uninstalls Microsoft Copilot (XP9CXNGPPJ97XX) per-user via winget; "
+            "must be reinstalled manually from Microsoft Store."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/package-manager/winget/",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=False,
+        irreversible=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        winget_specs=(WingetSpec(package_id="XP9CXNGPPJ97XX", scope="user", action="uninstall"),),
     ),
 }
 

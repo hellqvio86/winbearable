@@ -253,7 +253,8 @@ def test_high_risk_requires_explicit_confirmation(state_store: StateStore) -> No
     system = InMemorySystemBackend(
         windows_build=MIN_SUPPORTED_BUILD,
         is_admin=True,
-        installed_winget_packages={"9WZDNCRFHVFW", "9WZDNCRFJ3Q2", "9P1J8S7CCWWT", "9NBLGGH4R32N"},
+        installed_winget_packages={"9WZDNCRFHVFW", "9WZDNCRFJ3Q2", "9P1J8S7CCWWT", "9NBLGGH4R32N", "XP9CXNGPPJ97XX"},
+        optional_features={"SMB1Protocol": True, "Recall": True},
     )
     env = system.detect_environment(registry)
     paranoid_profile = load_profile("paranoid")
@@ -317,7 +318,8 @@ def test_every_catalog_tweak_apply_and_revert_cycle(
     system = InMemorySystemBackend(
         windows_build=MIN_SUPPORTED_BUILD,
         is_admin=True,
-        installed_winget_packages={"9WZDNCRFHVFW", "9WZDNCRFJ3Q2", "9P1J8S7CCWWT", "9NBLGGH4R32N"},
+        installed_winget_packages={"9WZDNCRFHVFW", "9WZDNCRFJ3Q2", "9P1J8S7CCWWT", "9NBLGGH4R32N", "XP9CXNGPPJ97XX"},
+        optional_features={"SMB1Protocol": True, "Recall": True},
     )
     env = system.detect_environment(registry)
 
@@ -362,6 +364,7 @@ def test_every_catalog_tweak_apply_and_revert_cycle(
     reverted_score = calculate_hardening_score(env, registry, system)
     still_applied = [r["tweak_id"] for r in reverted_score["results"] if r["status"] == "applied"]
     assert set(still_applied) == {
+        "ai.remove_copilot_app",
         "bloat.remove_bing_news",
         "bloat.remove_bing_weather",
         "bloat.remove_clipchamp",

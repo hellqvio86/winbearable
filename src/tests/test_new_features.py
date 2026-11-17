@@ -786,3 +786,98 @@ def test_parameterized_tweaks_and_terminal_error_paths(
     with pytest.raises(RuntimeError, match="Rollback errors: fsutil"):
         rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
     assert sys_b.case_sensitive_dirs[str(non_empty_dir)] is True
+
+
+def test_ai_surface_tweaks_and_legacy_tls_audit_roundtrip_and_errors(state_store: StateStore) -> None:
+    """Cover TWK-C AI tweaks (roundtrip + irreversible guard) and chk.legacy_tls (clean + re-enabled)."""
+    from winbearable.engine import IrreversibleActionError
+    from winbearable.models import ObservationState
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(
+        is_admin=True,
+        installed_winget_packages={"XP9CXNGPPJ97XX"},
+        optional_features={"SMB1Protocol": True, "Recall": True},
+    )
+    env = sys_b.detect_environment(reg)
+
+    rev_ids = ["ai.disable_recall_feature", "ai.disable_click_to_do", "ai.disable_notepad_paint_ai"]
+    rev_prof = ProfileSpec(name="ai-rev", description="ai-rev", tweaks=dict.fromkeys(rev_ids, True))
+    summary = apply_profile(rev_prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert set(summary.applied_ids) == set(rev_ids)
+    for tid in rev_ids:
+        assert detect_tweak(get_tweak(tid), env, reg, sys_b).status == TweakStatus.APPLIED
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    for tid in rev_ids:
+        assert detect_tweak(get_tweak(tid), env, reg, sys_b).status == TweakStatus.DRIFTED
+
+    # Error path: irreversible ai.remove_copilot_app requires --allow-irreversible
+    copilot_prof = ProfileSpec(name="copilot", description="copilot", tweaks={"ai.remove_copilot_app": True})
+    with pytest.raises(IrreversibleActionError):
+        apply_profile(copilot_prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+
+    apply_profile(
+        copilot_prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True, allow_irreversible=True
+    )
+    assert detect_tweak(get_tweak("ai.remove_copilot_app"), env, reg, sys_b).status == TweakStatus.APPLIED
+
+    # chk.legacy_tls: disabled by default, medium severity if explicitly enabled
+    clean_findings = run_security_audit(env, reg, sys_b)
+    tls_clean = next(f for f in clean_findings if f.check_id == "chk.legacy_tls")
+    assert tls_clean.observation.state == ObservationState.DISABLED
+    assert tls_clean.severity == "info"
+
+    reg.set_value(
+        HIVE_HKLM,
+        r"SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Client",
+        "Enabled",
+        1,
+    )
+    bad_findings = run_security_audit(env, reg, sys_b)
+    tls_bad = next(f for f in bad_findings if f.check_id == "chk.legacy_tls")
+    assert tls_bad.observation.state == ObservationState.ENABLED
+    assert tls_bad.severity == "medium"
+
+
+def test_defender_asr_mode_selection_block_and_invalid_param(state_store: StateStore) -> None:
+    """hardening.defender_asr_audit supports [params].mode='block' (1) and rejects invalid modes with ERROR."""
+    from winbearable.engine import evaluate_profile
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_admin=True)
+    env = sys_b.detect_environment(reg)
+
+    # Error path: invalid mode reports ERROR
+    bad_prof = ProfileSpec(
+        name="asr-bad",
+        description="asr-bad",
+        tweaks={"hardening.defender_asr_audit": True},
+        params={"hardening.defender_asr_audit": {"mode": "invalid"}},
+    )
+    assert evaluate_profile(bad_prof, env, reg, sys_b)[0].status == TweakStatus.ERROR
+
+    # Happy path: block mode sets ASR GUIDs to 1 and rolls back cleanly
+    block_prof = ProfileSpec(
+        name="asr-block",
+        description="asr-block",
+        tweaks={"hardening.defender_asr_audit": True},
+        params={"hardening.defender_asr_audit": {"mode": "block"}},
+    )
+    summary = apply_profile(block_prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert summary.applied_ids == ("hardening.defender_asr_audit",)
+    assert reg.get_value(
+        HIVE_HKLM,
+        r"SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules",
+        "9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2",
+    ) == (1, "REG_DWORD")
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert (
+        reg.get_value(
+            HIVE_HKLM,
+            r"SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules",
+            "9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2",
+        )
+        is None
+    )

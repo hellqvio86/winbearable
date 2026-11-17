@@ -27,6 +27,7 @@ OPT_IN_TWEAKS: frozenset[str] = frozenset(
         "dev.case_sensitive_dirs",
         "dev.install_nerd_font_user",
         "hardening.update_active_hours",
+        "ai.remove_copilot_app",
     }
 )
 
