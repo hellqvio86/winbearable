@@ -2,6 +2,15 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.12.1] - 2026-11-18
+
+### Fixed
+
+- **WSL Export Pruning (`export_wsl_distro`):** Paired `.tar` and `.tar.sha256` sidecars during `keep_last` pruning so the newly created tarball is never deleted when `.sha256` is newer.
+- **Transaction Recovery (`recover_incomplete_runs`):** Skip re-uninstalling winget/VS Code packages on `FAILED` runs unless `--force` is passed; added `--force` to `wb rollback` and `wb recover` and documented snapshot-based recovery.
+- **Service Start Types (`set_service_start_type`):** Mapped `0` (`boot`) and `1` (`system`) alongside `2..4`, fail closed on unknown start types, and revert `sc.exe` if the subsequent registry write fails.
+- **Test Suite:** Renamed `test_coverage_gaps.py` to `test_system_uac_and_recovery.py`.
+
 ## [0.12.0] - 2026-11-17
 
 ### Security & Rollback Hardening
