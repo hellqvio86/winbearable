@@ -1093,14 +1093,22 @@ def export_wsl_distro(
                 encoding="utf-8",
             )
             if keep_last is not None and keep_last > 0:
-                existing = sorted(
-                    output_file.parent.glob(f"{distro}-*.tar*"),
-                    key=lambda p: p.stat().st_mtime,
+                other_tarballs = sorted(
+                    (
+                        p
+                        for p in output_file.parent.glob(f"{distro}-*.tar")
+                        if p.is_file() and p.resolve() != output_file.resolve()
+                    ),
+                    key=lambda p: (p.stat().st_mtime, p.name),
                     reverse=True,
                 )
-                for stale in existing[keep_last:]:
+                for stale in other_tarballs[max(0, keep_last - 1) :]:
                     stale.unlink(missing_ok=True)
                     pruned_files.append(str(stale))
+                    stale_sha = stale.with_suffix(f"{stale.suffix}.sha256")
+                    if stale_sha.is_file():
+                        stale_sha.unlink(missing_ok=True)
+                        pruned_files.append(str(stale_sha))
     return {
         "dry_run": dry_run,
         "distro": distro,

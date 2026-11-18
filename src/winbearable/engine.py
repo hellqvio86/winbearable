@@ -814,6 +814,7 @@ def _compensate_run_record(
     system: SystemBackend,
     restore_full_policy: bool = False,
     force_rollback: bool = False,
+    skip_package_uninstall: bool = False,
 ) -> list[str]:
     """Execute compensating rollback for a RunRecord and return any error messages."""
     errors: list[str] = []
@@ -945,12 +946,13 @@ def _compensate_run_record(
         except Exception as exc:
             errors.append(f"file {f_snap.path}: {exc}")
 
-    for ext_id in reversed(run_record.installed_vscode_extensions):
-        if not system.uninstall_vscode_extension(ext_id) or system.is_vscode_extension_installed(ext_id):
-            errors.append(f"vscode_extension {ext_id}")
-    for pkg_id in reversed(run_record.installed_winget_packages):
-        if not system.uninstall_winget_package(pkg_id) or system.is_winget_package_installed(pkg_id):
-            errors.append(f"winget {pkg_id}")
+    if not skip_package_uninstall:
+        for ext_id in reversed(run_record.installed_vscode_extensions):
+            if not system.uninstall_vscode_extension(ext_id) or system.is_vscode_extension_installed(ext_id):
+                errors.append(f"vscode_extension {ext_id}")
+        for pkg_id in reversed(run_record.installed_winget_packages):
+            if not system.uninstall_winget_package(pkg_id) or system.is_winget_package_installed(pkg_id):
+                errors.append(f"winget {pkg_id}")
     if run_record.wslconfig_path:
         try:
             target_cfg = Path(run_record.wslconfig_path)
@@ -1718,8 +1720,13 @@ def recover_incomplete_runs(
     system: SystemBackend,
     dry_run: bool = True,
     allow_simulated: bool = False,
+    force: bool = False,
 ) -> list[RunRecord]:
-    """Idempotently inspect and recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) runs."""
+    """Idempotently inspect and recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) runs.
+
+    Recovery is snapshot-based (per-tweak journal flush). For ``FAILED`` runs where compensation
+    was already attempted, package/extension uninstalls are skipped unless ``force=True``.
+    """
     from contextlib import nullcontext
 
     if not dry_run:
@@ -1739,9 +1746,16 @@ def recover_incomplete_runs(
                 recovered.append(done)
                 continue
 
+            was_failed = rec.state == TransactionState.FAILED
             rolling_back = replace(rec, state=TransactionState.ROLLING_BACK)
             state_store.upsert_run(rolling_back)
-            comp_errors = _compensate_run_record(rec, registry, system)
+            comp_errors = _compensate_run_record(
+                rec,
+                registry,
+                system,
+                force_rollback=force,
+                skip_package_uninstall=was_failed and not force,
+            )
             final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
             final_error = "; ".join(comp_errors) if comp_errors else rec.error
             final_rec = replace(rec, state=final_state, error=final_error)

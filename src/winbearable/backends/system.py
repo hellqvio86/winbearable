@@ -1397,16 +1397,36 @@ class NativeSystemBackend:
         return val if state == "present" else None
 
     def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> bool:
+        start_map = {0: "boot", 1: "system", 2: "auto", 3: "demand", 4: "disabled"}
+        if start_type not in start_map:
+            self.last_outcome = OperationOutcome(
+                status=OperationStatus.UNKNOWN,
+                message=f"Unsupported service start_type {start_type!r}; expected 0..4.",
+                command=("sc.exe", "config", service_name),
+            )
+            return False
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
         if not registry.key_exists(HIVE_HKLM, svc_key):
             return False
+        _, prev_val = _read_service_start_state(registry, service_name)
         if self._platform == "win32":
-            start_map = {2: "auto", 3: "demand", 4: "disabled"}
-            sc_mode = start_map.get(start_type, "demand")
+            sc_mode = start_map[start_type]
             res = self._run_native_cmd([self._sys32_exe("sc.exe"), "config", service_name, f"start={sc_mode}"])
             if res.returncode != 0:
                 return False
-        registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
+        try:
+            registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
+        except Exception as exc:
+            if self._platform == "win32" and prev_val in start_map:
+                self._run_native_cmd(
+                    [self._sys32_exe("sc.exe"), "config", service_name, f"start={start_map[prev_val]}"]
+                )
+            self.last_outcome = OperationOutcome(
+                status=OperationStatus.ACCESS_DENIED if isinstance(exc, PermissionError) else OperationStatus.UNKNOWN,
+                message=f"Registry write failed after SCM config for '{service_name}': {exc}",
+                command=("sc.exe", "config", service_name),
+            )
+            return False
         return True
 
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
