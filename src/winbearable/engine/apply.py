@@ -1,8 +1,11 @@
-"""Core evaluation, plan, apply, rollback, and hardening audit engine."""
+"""Transactional pre-apply snapshots, mutation execution, compensation, and apply_profile."""
+
+from __future__ import annotations
 
 import hashlib
 import json
 import re
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -10,37 +13,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .backends.registry import RegistryBackend, expand_registry_spec
-from .backends.system import SystemBackend
-from .const import (
-    ACTION_DELETE,
-    ACTION_DELETE_KEY,
-    ACTION_SET,
-    DEFENDER_FEATURES_KEY,
-    HIVE_HKLM,
-    REG_DWORD,
-    UNSUPPORTED_IOT_LTSC_EDITION_IDS,
-)
-from .models import (
-    AuditDimension,
+from ..backends.registry import RegistryBackend, expand_registry_spec
+from ..backends.system import SystemBackend
+from ..const import ACTION_DELETE, ACTION_DELETE_KEY, HIVE_HKLM
+from ..models import (
     AuditpolSnapshot,
     EnvironmentInfo,
     FileSnapshot,
-    FileSpec,
     FirewallGroupSnapshot,
-    FsutilCaseSensitiveSpec,
     FsutilSnapshot,
     GitConfigSnapshot,
     IcaclsSnapshot,
     OperationOutcome,
     OperationStatus,
     OptionalFeatureSnapshot,
-    PlannedOperation,
     PowercfgSnapshot,
     ProfileSpec,
-    RegistryChangeDetail,
     RegistryKeySnapshot,
-    RegistrySpec,
     RegistryValueSnapshot,
     RegistryView,
     RiskLevel,
@@ -55,18 +44,16 @@ from .models import (
     WevtutilSnapshot,
     WslDistroSnapshot,
 )
-from .operations import (
-    _atomic_write_bytes,
+from ..operations import (
     apply_file_spec,
+    atomic_write_bytes,
     expand_file_spec_path,
-    format_registry_op,
-    inspect_non_registry_operations,
     restore_file_snapshot,
     snapshot_file_spec,
 )
-from .state import StateStore, StateStoreError
-from .tweaks import get_all_tweaks, get_tweak
-from .wsl import (
+from ..state import StateStore
+from ..tweaks import get_tweak
+from ..wsl import (
     WslOperationError,
     apply_distro_wsl_conf,
     apply_wslconfig_target,
@@ -74,554 +61,21 @@ from .wsl import (
     plan_or_apply_wsl,
     prepare_wsl_plan,
 )
+from .evaluate import detect_tweak, evaluate_profile
+from .params import (
+    ApplySummary,
+    HighRiskConfirmationError,
+    IncompleteJournalError,
+    IrreversibleActionError,
+    TweakMutationError,
+    capture_failure_outcome,
+    resolve_tweak_params,
+)
 
 
-class HighRiskConfirmationError(RuntimeError):
-    """Raised when applying a high-risk tweak without --i-know-what-im-doing."""
-
-
-class IrreversibleActionError(RuntimeError):
-    """Raised when applying an irreversible tweak without --allow-irreversible."""
-
-
-class IncompleteJournalError(StateStoreError):
-    """Raised when applying while incomplete journal transactions require recovery."""
-
-
-class _TweakMutationError(RuntimeError):
-    """Internal error carrying structured OperationOutcome from a failed mutation."""
-
-    def __init__(self, outcome: OperationOutcome) -> None:
-        super().__init__(outcome.message or f"Operation failed with status {outcome.status}")
-        self.outcome = outcome
-
-
-def _capture_failure_outcome(system: SystemBackend, base_message: str) -> OperationOutcome:
-    """Capture structured OperationOutcome from backend or synthesize UNKNOWN outcome."""
-    raw = getattr(system, "last_outcome", None)
-    if isinstance(raw, OperationOutcome) and not raw.ok:
-        detail = _format_op_failure(system, base_message)
-        return OperationOutcome(
-            status=raw.status,
-            message=detail,
-            returncode=raw.returncode,
-            command=raw.command,
-        )
-    return OperationOutcome(status=OperationStatus.UNKNOWN, message=base_message)
-
-
-_CATEGORY_DIMENSION_MAP: dict[str, AuditDimension] = {
-    "hardening": AuditDimension.SECURITY,
-    "services": AuditDimension.SECURITY,
-    "privacy": AuditDimension.PRIVACY,
-    "telemetry": AuditDimension.PRIVACY,
-    "ai": AuditDimension.PRIVACY,
-    "edge": AuditDimension.PRIVACY,
-    "explorer": AuditDimension.USABILITY,
-    "start": AuditDimension.USABILITY,
-    "taskbar": AuditDimension.USABILITY,
-    "search": AuditDimension.USABILITY,
-    "onedrive": AuditDimension.USABILITY,
-    "bloat": AuditDimension.USABILITY,
-    "input": AuditDimension.USABILITY,
-    "terminal": AuditDimension.DEVELOPER,
-    "dev": AuditDimension.DEVELOPER,
-    "power": AuditDimension.USABILITY,
-    "apps": AuditDimension.DEVELOPER,
-}
-
-_EDITION_CANONICAL_MAP: dict[str, str] = {
-    "professional": "pro",
-    "pro": "pro",
-    "professionalworkstation": "pro",
-    "professionaleducation": "pro",
-    "professionalsinglelanguage": "pro",
-    "professionalcountryspecific": "pro",
-    "core": "home",
-    "home": "home",
-    "coresinglelanguage": "home",
-    "corecountryspecific": "home",
-    "coreconnected": "home",
-    "enterprise": "enterprise",
-    "education": "education",
-}
-
-
-def is_iot_or_ltsc_edition(edition: str) -> bool:
-    """Return True if the edition string represents an unsupported Windows IoT, LTSC, or Server SKU."""
-    low = edition.strip().lower()
-    if not low:
-        return False
-    return "iot" in low or "ltsc" in low or low in UNSUPPORTED_IOT_LTSC_EDITION_IDS or low.startswith("server")
-
-
-def is_edition_supported(env_edition: str, supported_editions: tuple[str, ...]) -> bool:
-    """Check whether env.edition is supported by a tweak's supported_editions (rejecting all IoT/LTSC SKUs)."""
-    if is_iot_or_ltsc_edition(env_edition):
-        return False
-    raw = env_edition.strip().lower()
-    if not raw or raw == "unknown":
-        return True
-    canonical = _EDITION_CANONICAL_MAP.get(raw, raw)
-    allowed = {_EDITION_CANONICAL_MAP.get(ed.strip().lower(), ed.strip().lower()) for ed in supported_editions}
-    return canonical in allowed
-
-
-def is_managed_device(env: EnvironmentInfo) -> bool:
-    """Return True when the device is confirmed domain-joined, Entra-joined, or MDM-enrolled."""
-    return bool(env.domain_joined is True or env.entra_joined is True or env.mdm_enrolled is True)
-
-
-def is_tamper_protection_enabled(registry: RegistryBackend) -> bool:
-    """Return True if Windows Defender Tamper Protection is active in registry."""
-    try:
-        val = registry.get_value(HIVE_HKLM, DEFENDER_FEATURES_KEY, "TamperProtection")
-    except PermissionError:
-        return False
-    if val is None or not isinstance(val[0], int):
-        return False
-    # TamperProtection=5 (or 1) indicates enabled
-    return val[0] in (1, 5)
-
-
-def _resolve_dimension(category: str) -> AuditDimension:
-    """Map a tweak category to its audit dimension."""
-    return _CATEGORY_DIMENSION_MAP.get(category, AuditDimension.USABILITY)
-
-
-def _resolve_verification_method(tweak: TweakDefinition) -> str:
-    """Describe the technical verification methods used to inspect a tweak."""
-    if tweak.cis_mapping is not None:
-        return tweak.cis_mapping.verification_method
-    methods: list[str] = []
-    if tweak.registry_specs:
-        methods.append("registry_value")
-    if tweak.service_specs:
-        methods.append("service_start_type")
-    if tweak.task_specs:
-        methods.append("scheduled_task")
-    if tweak.feature_specs:
-        methods.append("dism_optional_feature")
-    if tweak.winget_specs:
-        methods.append("winget_package")
-    if tweak.auditpol_specs:
-        methods.append("auditpol")
-    if tweak.wevtutil_specs:
-        methods.append("wevtutil")
-    if tweak.firewall_group_specs:
-        methods.append("firewall_group")
-    if tweak.fsutil_specs:
-        methods.append("fsutil")
-    if tweak.powercfg_specs:
-        methods.append("powercfg")
-    if tweak.git_config_specs:
-        methods.append("git_config")
-    if tweak.icacls_specs:
-        methods.append("icacls")
-    if tweak.file_specs:
-        methods.append("file_config")
-    if tweak.stop_processes:
-        methods.append("process_list")
-    if tweak.uninstall_onedrive:
-        methods.append("onedrive_client_state")
-    return "+".join(methods) if methods else "none"
-
-
-def _make_check_result(
-    tweak: TweakDefinition,
-    status: TweakStatus,
-    detail: str,
-    registry_changes: tuple[RegistryChangeDetail, ...] = (),
-    pending_restart: bool = False,
-    operations: tuple[PlannedOperation, ...] = (),
-) -> TweakCheckResult:
-    """Construct a TweakCheckResult with consistent dimension and CIS provenance metadata."""
-    return TweakCheckResult(
-        tweak_id=tweak.tweak_id,
-        title=tweak.title,
-        category=tweak.category,
-        dimension=_resolve_dimension(tweak.category),
-        risk=tweak.risk,
-        requires_admin=tweak.requires_admin,
-        status=status,
-        detail=detail,
-        source_url=tweak.source_url,
-        registry_changes=registry_changes,
-        cis_id=tweak.cis_id,
-        cis_mapping=tweak.cis_mapping,
-        verification_method=_resolve_verification_method(tweak),
-        pending_restart=pending_restart,
-        requires_reboot=tweak.requires_reboot,
-        requires_explorer_restart=tweak.requires_explorer_restart,
-        irreversible=tweak.irreversible,
-        operations=operations,
-    )
-
-
-@dataclass(frozen=True)
-class ApplySummary:
-    """Summary of a plan or apply run."""
-
-    profile_name: str
-    dry_run: bool
-    run_id: str | None
-    results: tuple[TweakCheckResult, ...]
-    applied_ids: tuple[str, ...]
-    skipped_policy_ids: tuple[str, ...]
-    skipped_admin_ids: tuple[str, ...]
-    skipped_build_ids: tuple[str, ...]
-    already_applied_ids: tuple[str, ...]
-    skipped_edition_ids: tuple[str, ...] = ()
-    skipped_managed_ids: tuple[str, ...] = ()
-    failed_ids: tuple[str, ...] = ()
-    rolled_back_ids: tuple[str, ...] = ()
-    wsl_result: dict[str, Any] | None = None
-    plan_digest: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize summary to a JSON-compatible dictionary."""
-        return {
-            "profile_name": self.profile_name,
-            "dry_run": self.dry_run,
-            "run_id": self.run_id,
-            "plan_digest": self.plan_digest,
-            "applied_ids": list(self.applied_ids),
-            "rolled_back_ids": list(self.rolled_back_ids),
-            "already_applied_ids": list(self.already_applied_ids),
-            "skipped_policy_ids": list(self.skipped_policy_ids),
-            "skipped_admin_ids": list(self.skipped_admin_ids),
-            "skipped_build_ids": list(self.skipped_build_ids),
-            "skipped_edition_ids": list(self.skipped_edition_ids),
-            "skipped_managed_ids": list(self.skipped_managed_ids),
-            "failed_ids": list(self.failed_ids),
-            "wsl_result": self.wsl_result,
-            "results": [res.to_dict() for res in self.results],
-        }
-
-
-def _inspect_registry_specs(
-    tweak: TweakDefinition,
-    registry: RegistryBackend,
-) -> tuple[list[RegistryChangeDetail], list[str], list[str]]:
-    """Inspect all registry specs for a tweak and return (RegistryChangeDetails, drifted_reasons, zero_glob_notes)."""
-    reg_details: list[RegistryChangeDetail] = []
-    drifted_reasons: list[str] = []
-    zero_glob_notes: list[str] = []
-
-    for raw_spec in tweak.registry_specs:
-        expanded_specs = expand_registry_spec(raw_spec, registry)
-        if not expanded_specs and raw_spec.key_path_glob is not None:
-            zero_glob_notes.append(f"0 matching subkeys for {raw_spec.hive}\\{raw_spec.key_path_glob}")
-            continue
-        for reg_spec in expanded_specs:
-            if reg_spec.action == ACTION_DELETE_KEY:
-                key_exists = registry.key_exists(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)
-                is_compliant = not key_exists
-                change_detail = RegistryChangeDetail(
-                    hive=reg_spec.hive,
-                    key_path=reg_spec.key_path,
-                    value_name="",
-                    value_type="KEY",
-                    action=ACTION_DELETE_KEY,
-                    current_value="<key present>" if key_exists else None,
-                    current_exists=key_exists,
-                    target_value=None,
-                    is_compliant=is_compliant,
-                    current_type="KEY" if key_exists else None,
-                )
-                reg_details.append(change_detail)
-                if not is_compliant:
-                    drifted_reasons.append(f"{change_detail.full_key_path}: <key present> -> <key deleted>")
-                continue
-
-            current = registry.get_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name, view=reg_spec.view)
-            current_exists = current is not None
-            current_val = current[0] if current is not None else None
-            current_type = current[1] if current is not None else None
-
-            if reg_spec.action == ACTION_DELETE:
-                is_compliant = not current_exists
-            else:
-                is_compliant = (
-                    current_exists and current_val == reg_spec.value_data and current_type == reg_spec.value_type
-                )
-
-            change_detail = RegistryChangeDetail(
-                hive=reg_spec.hive,
-                key_path=reg_spec.key_path,
-                value_name=reg_spec.value_name,
-                value_type=reg_spec.value_type,
-                action=reg_spec.action,
-                current_value=current_val,
-                current_exists=current_exists,
-                target_value=reg_spec.value_data,
-                is_compliant=is_compliant,
-                current_type=current_type,
-            )
-            reg_details.append(change_detail)
-
-            if not is_compliant:
-                drifted_reasons.append(change_detail.format_transition())
-
-    return reg_details, drifted_reasons, zero_glob_notes
-
-
-def detect_tweak(
-    tweak: TweakDefinition,
-    env: EnvironmentInfo,
-    registry: RegistryBackend,
-    system: SystemBackend,
-    allow_managed: bool = True,
-) -> TweakCheckResult:
-    """Evaluate a single tweak's current state against the host environment."""
-    try:
-        reg_details, drifted_reasons, zero_glob_notes = _inspect_registry_specs(tweak, registry)
-    except PermissionError as exc:
-        return _make_check_result(tweak, TweakStatus.ERROR, f"Inaccessible registry key/value: {exc}")
-
-    if env.windows_build < tweak.min_build:
-        return _make_check_result(
-            tweak,
-            TweakStatus.UNSUPPORTED_BUILD,
-            f"Requires Windows 11 build >= {tweak.min_build} (detected {env.windows_build})",
-            registry_changes=tuple(reg_details),
-        )
-
-    if tweak.max_build is not None and env.windows_build > tweak.max_build:
-        return _make_check_result(
-            tweak,
-            TweakStatus.UNSUPPORTED_BUILD,
-            f"Requires Windows build <= {tweak.max_build} (detected {env.windows_build})",
-            registry_changes=tuple(reg_details),
-        )
-
-    supported_eds = (
-        tweak.provenance.supported_editions
-        if tweak.provenance is not None
-        else ("Home", "Pro", "Enterprise", "Education")
-    )
-    if not is_edition_supported(env.edition, supported_eds):
-        iot_note = " (Windows IoT/LTSC is never supported)" if is_iot_or_ltsc_edition(env.edition) else ""
-        return _make_check_result(
-            tweak,
-            TweakStatus.UNSUPPORTED_EDITION,
-            f"Unsupported Windows edition {env.edition!r}; supported: {', '.join(supported_eds)}{iot_note}",
-            registry_changes=tuple(reg_details),
-        )
-
-    if tweak.requires_tamper_protection_off and is_tamper_protection_enabled(registry):
-        return _make_check_result(
-            tweak,
-            TweakStatus.BLOCKED_BY_POLICY,
-            "Blocked by Defender Tamper Protection (tamper_protection)",
-            registry_changes=tuple(reg_details),
-        )
-
-    if tweak.parameterized and not (
-        tweak.registry_specs
-        or tweak.fsutil_specs
-        or tweak.file_specs
-        or tweak.service_specs
-        or tweak.task_specs
-        or tweak.feature_specs
-        or tweak.winget_specs
-    ):
-        return _make_check_result(
-            tweak,
-            TweakStatus.ERROR,
-            f"Tweak '{tweak.tweak_id}' requires [params.\"{tweak.tweak_id}\"] configuration in the profile.",
-        )
-
-    for reg_spec in tweak.registry_specs:
-        conflict = registry.check_policy_conflict(reg_spec.policy_checks)
-        if conflict is not None:
-            return _make_check_result(
-                tweak,
-                TweakStatus.BLOCKED_BY_POLICY,
-                conflict,
-                registry_changes=tuple(reg_details),
-            )
-
-    planned_ops: list[PlannedOperation] = [
-        format_registry_op(
-            item.full_key_path,
-            item.display_value_name,
-            item.action,
-            item.current_value,
-            item.target_value,
-            tweak.irreversible,
-        )
-        for item in reg_details
-    ]
-    non_reg_ops, non_reg_drifted, unverified_reasons = inspect_non_registry_operations(tweak, registry, system)
-    planned_ops.extend(non_reg_ops)
-    drifted_reasons.extend(non_reg_drifted)
-
-    ops_tuple = tuple(planned_ops)
-
-    if not drifted_reasons and not unverified_reasons:
-        compliant_parts: list[str] = []
-        for item in reg_details:
-            if item.action == ACTION_DELETE_KEY:
-                compliant_parts.append(f"{item.full_key_path}=<key deleted>")
-            else:
-                val_repr = "<deleted>" if item.action == ACTION_DELETE else repr(item.target_value)
-                compliant_parts.append(f"{item.full_key_path} [{item.display_value_name}]={val_repr}")
-        compliant_parts.extend(zero_glob_notes)
-        for svc_spec in tweak.service_specs:
-            compliant_parts.append(f"{svc_spec.registry_key_path} [Start]={svc_spec.start_type}")
-        for task_spec in tweak.task_specs:
-            compliant_parts.append(f"schtasks:{task_spec.task_path}=enabled({task_spec.enabled})")
-        for feat_spec in tweak.feature_specs:
-            compliant_parts.append(f"dism:{feat_spec.feature_name}=enabled({feat_spec.enabled})")
-        for winget_spec in tweak.winget_specs:
-            state_lbl = "uninstalled" if winget_spec.action == "uninstall" else "installed"
-            compliant_parts.append(f"winget:{winget_spec.package_id}={state_lbl}")
-        compliant_summary = "; ".join(compliant_parts)
-        return _make_check_result(
-            tweak,
-            TweakStatus.APPLIED,
-            f"Compliant ({compliant_summary})",
-            registry_changes=tuple(reg_details),
-            pending_restart=(tweak.requires_reboot or tweak.requires_explorer_restart),
-            operations=ops_tuple,
-        )
-
-    if tweak.requires_admin and is_managed_device(env) and not allow_managed:
-        return _make_check_result(
-            tweak,
-            TweakStatus.SKIPPED_MANAGED,
-            "Skipped (managed_device: machine is domain/Entra/MDM managed; pass --allow-managed to override)",
-            registry_changes=tuple(reg_details),
-            operations=ops_tuple,
-        )
-
-    if tweak.requires_admin and not env.is_admin:
-        all_reasons = drifted_reasons + unverified_reasons
-        return _make_check_result(
-            tweak,
-            TweakStatus.REQUIRES_ADMIN,
-            "Skipped (requires Administrator): " + "; ".join(all_reasons),
-            registry_changes=tuple(reg_details),
-            operations=ops_tuple,
-        )
-
-    if unverified_reasons:
-        return _make_check_result(
-            tweak,
-            TweakStatus.ERROR,
-            "Unverified state: " + "; ".join(unverified_reasons + drifted_reasons),
-            registry_changes=tuple(reg_details),
-            operations=ops_tuple,
-        )
-
-    return _make_check_result(
-        tweak,
-        TweakStatus.DRIFTED,
-        "; ".join(drifted_reasons),
-        registry_changes=tuple(reg_details),
-        operations=ops_tuple,
-    )
-
-
-def resolve_tweak_params(tweak: TweakDefinition, params: dict[str, Any] | None) -> TweakDefinition:
-    """Resolve profile [params] overrides into concrete operation specs on a TweakDefinition."""
-    if not params:
-        return tweak
-    if tweak.tweak_id == "dev.case_sensitive_dirs":
-        dirs = params.get("directories")
-        if isinstance(dirs, (list, tuple)):
-            specs = tuple(FsutilCaseSensitiveSpec(directory=str(d), enabled=True) for d in dirs if str(d).strip())
-            if specs:
-                return replace(tweak, fsutil_specs=specs)
-    elif tweak.tweak_id == "hardening.update_active_hours":
-        start = params.get("active_hours_start")
-        end = params.get("active_hours_end")
-        if (
-            isinstance(start, int)
-            and not isinstance(start, bool)
-            and isinstance(end, int)
-            and not isinstance(end, bool)
-            and 0 <= start <= 23
-            and 0 <= end <= 23
-        ):
-            reg_specs = (
-                RegistrySpec(
-                    hive=HIVE_HKLM,
-                    key_path=r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
-                    value_name="ActiveHoursStart",
-                    value_data=start,
-                    value_type=REG_DWORD,
-                    action=ACTION_SET,
-                ),
-                RegistrySpec(
-                    hive=HIVE_HKLM,
-                    key_path=r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
-                    value_name="ActiveHoursEnd",
-                    value_data=end,
-                    value_type=REG_DWORD,
-                    action=ACTION_SET,
-                ),
-            )
-            return replace(tweak, registry_specs=reg_specs)
-    elif tweak.tweak_id == "dev.terminal_settings_defaults" and tweak.file_specs:
-        base_spec = tweak.file_specs[0]
-        desired = dict(base_spec.desired_keys)
-        if isinstance(params.get("default_profile_guid"), str) and params["default_profile_guid"].strip():
-            desired["defaultProfile"] = params["default_profile_guid"].strip()
-        if isinstance(params.get("font_face"), str) and params["font_face"].strip():
-            desired["profiles"] = {"defaults": {"font": {"face": params["font_face"].strip()}}}
-        return replace(
-            tweak,
-            file_specs=(
-                FileSpec(
-                    path_template=base_spec.path_template,
-                    file_format=base_spec.file_format,
-                    desired_keys=desired,
-                ),
-            ),
-        )
-    elif tweak.tweak_id == "hardening.defender_asr_audit" and "mode" in params:
-        raw_mode = params["mode"]
-        if not isinstance(raw_mode, str) or raw_mode.lower() not in {"audit", "block"}:
-            return replace(tweak, registry_specs=(), parameterized=True)
-        target_val = 1 if raw_mode.lower() == "block" else 2
-        updated_specs = tuple(
-            replace(spec, value_data=target_val) if spec.key_path.endswith(r"\ASR\Rules") else spec
-            for spec in tweak.registry_specs
-        )
-        return replace(tweak, registry_specs=updated_specs)
-    return tweak
-
-
-def evaluate_profile(
-    profile: ProfileSpec,
-    env: EnvironmentInfo,
-    registry: RegistryBackend,
-    system: SystemBackend,
-    only_ids: set[str] | None = None,
-    skip_ids: set[str] | None = None,
-    category_filter: str | None = None,
-    allow_managed: bool = True,
-) -> list[TweakCheckResult]:
-    """Evaluate all enabled (or explicitly selected) tweaks in a profile."""
-    results: list[TweakCheckResult] = []
-    if only_ids is not None:
-        candidate_ids = [tid for tid in profile.tweaks if tid in only_ids]
-        for extra_id in sorted(only_ids):
-            if extra_id not in candidate_ids:
-                candidate_ids.append(extra_id)
-    else:
-        candidate_ids = [tid for tid, enabled in profile.tweaks.items() if enabled]
-
-    for tweak_id in candidate_ids:
-        if skip_ids and tweak_id in skip_ids:
-            continue
-        tweak = resolve_tweak_params(get_tweak(tweak_id), profile.params.get(tweak_id))
-        if category_filter and tweak.category.lower() != category_filter.lower():
-            continue
-        results.append(detect_tweak(tweak, env, registry, system, allow_managed=allow_managed))
-    return results
+def _eng_attr(name: str, default_fn: Any) -> Any:
+    pkg_mod = sys.modules.get("winbearable.engine")
+    return getattr(pkg_mod, name, default_fn) if pkg_mod is not None else default_fn
 
 
 @dataclass(frozen=True)
@@ -795,7 +249,7 @@ def _collect_pre_apply_snapshots(
                 )
                 seen_git.add(git_spec.key)
         for f_spec in tweak.file_specs:
-            expanded = str(expand_file_spec_path(f_spec.path_template))
+            expanded = str(_eng_attr("expand_file_spec_path", expand_file_spec_path)(f_spec.path_template))
             if expanded not in seen_files:
                 file_snapshots.append(snapshot_file_spec(f_spec))
                 seen_files.add(expanded)
@@ -825,7 +279,7 @@ def _collect_pre_apply_snapshots(
     )
 
 
-def _compensate_run_record(
+def compensate_run_record(
     run_record: RunRecord,
     registry: RegistryBackend,
     system: SystemBackend,
@@ -948,7 +402,7 @@ def _compensate_run_record(
             errors.append(f"icacls restore {ic_snap.path_template}")
 
     for hv_snap in reversed(run_record.hyperv_firewall_snapshots):
-        from .hyperv_firewall import set_wsl_hyperv_firewall_setting
+        from ..hyperv_firewall import set_wsl_hyperv_firewall_setting
 
         if hv_snap.previous_enabled is not None:
             hv_res = set_wsl_hyperv_firewall_setting(
@@ -990,7 +444,7 @@ def _compensate_run_record(
             elif run_record.wsl_backup_path:
                 bak = Path(run_record.wsl_backup_path)
                 if bak.is_file():
-                    _atomic_write_bytes(target_cfg, bak.read_bytes())
+                    atomic_write_bytes(target_cfg, bak.read_bytes())
         except OSError as exc:
             errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
     for d_snap in reversed(run_record.wsl_distro_snapshots):
@@ -1015,7 +469,7 @@ def _compensate_run_record(
     return errors
 
 
-def _execute_tweak_mutations(
+def execute_tweak_mutations(
     tweak: TweakDefinition,
     env: EnvironmentInfo,
     registry: RegistryBackend,
@@ -1038,8 +492,8 @@ def _execute_tweak_mutations(
 
     for proc_name in tweak.stop_processes:
         if system.is_process_running(proc_name) and not system.stop_process(proc_name, force=force_kill_processes):
-            raise _TweakMutationError(
-                _capture_failure_outcome(
+            raise TweakMutationError(
+                capture_failure_outcome(
                     system,
                     f"Failed to stop process '{proc_name}' gracefully (pass --force-kill to force termination).",
                 )
@@ -1065,8 +519,8 @@ def _execute_tweak_mutations(
                     backup_dir / f"{reg_spec.hive}_{sanitized}{view_tag}.reg",
                     view=reg_spec.view,
                 ):
-                    raise _TweakMutationError(
-                        _capture_failure_outcome(
+                    raise TweakMutationError(
+                        capture_failure_outcome(
                             system,
                             f"Failed to export registry backup for {reg_spec.hive}\\{reg_spec.key_path}.",
                         )
@@ -1096,8 +550,8 @@ def _execute_tweak_mutations(
             _ckpt(f"{tweak.tweak_id}:service_skip_absent:{svc_spec.service_name}")
             continue
         if not system.set_service_start_type(registry, svc_spec.service_name, svc_spec.start_type):
-            raise _TweakMutationError(
-                _capture_failure_outcome(
+            raise TweakMutationError(
+                capture_failure_outcome(
                     system,
                     f"Failed to configure service '{svc_spec.service_name}' start_type={svc_spec.start_type}.",
                 )
@@ -1106,8 +560,8 @@ def _execute_tweak_mutations(
 
     for task_spec in tweak.task_specs:
         if not system.set_scheduled_task_enabled(task_spec.task_path, task_spec.enabled):
-            raise _TweakMutationError(
-                _capture_failure_outcome(
+            raise TweakMutationError(
+                capture_failure_outcome(
                     system,
                     f"Failed to set scheduled task '{task_spec.task_path}' enabled={task_spec.enabled}.",
                 )
@@ -1116,8 +570,8 @@ def _execute_tweak_mutations(
 
     for feat_spec in tweak.feature_specs:
         if not system.set_optional_feature_enabled(feat_spec.feature_name, feat_spec.enabled):
-            raise _TweakMutationError(
-                _capture_failure_outcome(
+            raise TweakMutationError(
+                capture_failure_outcome(
                     system,
                     f"Failed to set optional feature '{feat_spec.feature_name}' enabled={feat_spec.enabled}.",
                 )
@@ -1129,8 +583,8 @@ def _execute_tweak_mutations(
         if winget_spec.action == "uninstall":
             if system.is_winget_package_installed(winget_spec.package_id):
                 if not system.uninstall_winget_package(winget_spec.package_id):
-                    raise _TweakMutationError(
-                        _capture_failure_outcome(
+                    raise TweakMutationError(
+                        capture_failure_outcome(
                             system, f"Failed to uninstall winget package '{winget_spec.package_id}'."
                         )
                     )
@@ -1142,8 +596,8 @@ def _execute_tweak_mutations(
                 scope=winget_spec.scope,
                 vscode_extensions=(),
             ):
-                raise _TweakMutationError(
-                    _capture_failure_outcome(system, f"Failed to install winget package '{winget_spec.package_id}'.")
+                raise TweakMutationError(
+                    capture_failure_outcome(system, f"Failed to install winget package '{winget_spec.package_id}'.")
                 )
             newly_installed_winget.append(winget_spec.package_id)
             _ckpt(f"{tweak.tweak_id}:winget:{winget_spec.package_id}")
@@ -1159,8 +613,8 @@ def _execute_tweak_mutations(
                         ext_skipped_elevated = True
                         _ckpt(f"{tweak.tweak_id}:vscode_ext:{ext}:skipped_elevated")
                         continue
-                    raise _TweakMutationError(
-                        _capture_failure_outcome(
+                    raise TweakMutationError(
+                        capture_failure_outcome(
                             system,
                             f"Failed to install VS Code extension '{ext}' for '{winget_spec.package_id}'.",
                         )
@@ -1170,8 +624,8 @@ def _execute_tweak_mutations(
 
     for ap_spec in tweak.auditpol_specs:
         if not system.set_auditpol_subcategory(ap_spec.subcategory_guid, ap_spec.success, ap_spec.failure):
-            raise _TweakMutationError(
-                _capture_failure_outcome(system, f"Failed to set auditpol subcategory {ap_spec.subcategory_guid}.")
+            raise TweakMutationError(
+                capture_failure_outcome(system, f"Failed to set auditpol subcategory {ap_spec.subcategory_guid}.")
             )
         _ckpt(f"{tweak.tweak_id}:auditpol:{ap_spec.subcategory_guid}")
 
@@ -1181,15 +635,15 @@ def _execute_tweak_mutations(
             enabled=w_spec.enabled,
             max_size_bytes=w_spec.max_size_bytes,
         ):
-            raise _TweakMutationError(
-                _capture_failure_outcome(system, f"Failed to configure event log '{w_spec.channel}'.")
+            raise TweakMutationError(
+                capture_failure_outcome(system, f"Failed to configure event log '{w_spec.channel}'.")
             )
         _ckpt(f"{tweak.tweak_id}:wevtutil:{w_spec.channel}")
 
     for fw_spec in tweak.firewall_group_specs:
         if not system.set_firewall_group_enabled(fw_spec.group_resource_id, fw_spec.enabled):
-            raise _TweakMutationError(
-                _capture_failure_outcome(
+            raise TweakMutationError(
+                capture_failure_outcome(
                     system,
                     f"Failed to set firewall group '{fw_spec.group_resource_id}' enabled={fw_spec.enabled}.",
                 )
@@ -1198,8 +652,8 @@ def _execute_tweak_mutations(
 
     for fs_spec in tweak.fsutil_specs:
         if not system.set_dir_case_sensitive(fs_spec.directory, fs_spec.enabled):
-            raise _TweakMutationError(
-                _capture_failure_outcome(
+            raise TweakMutationError(
+                capture_failure_outcome(
                     system,
                     f"Failed to set NTFS case sensitivity on '{fs_spec.directory}' to {fs_spec.enabled}.",
                 )
@@ -1208,28 +662,28 @@ def _execute_tweak_mutations(
 
     for p_spec in tweak.powercfg_specs:
         if not system.set_hibernate_enabled(registry, p_spec.enabled):
-            raise _TweakMutationError(
-                _capture_failure_outcome(system, f"Failed to set hibernation enabled={p_spec.enabled}.")
+            raise TweakMutationError(
+                capture_failure_outcome(system, f"Failed to set hibernation enabled={p_spec.enabled}.")
             )
         _ckpt(f"{tweak.tweak_id}:powercfg:hibernate={p_spec.enabled}")
 
     if tweak.git_config_specs and system.git_installed:
         for g_spec in tweak.git_config_specs:
             if not system.set_git_global_config(g_spec.key, g_spec.value):
-                raise _TweakMutationError(
-                    _capture_failure_outcome(system, f"Failed to set git config --global {g_spec.key}.")
+                raise TweakMutationError(
+                    capture_failure_outcome(system, f"Failed to set git config --global {g_spec.key}.")
                 )
             _ckpt(f"{tweak.tweak_id}:git_config:{g_spec.key}")
 
     for ic_spec in tweak.icacls_specs:
         if not system.restrict_acl_to_current_user(ic_spec.path_template):
-            raise _TweakMutationError(
-                _capture_failure_outcome(system, f"Failed to restrict ACL on '{ic_spec.path_template}'.")
+            raise TweakMutationError(
+                capture_failure_outcome(system, f"Failed to restrict ACL on '{ic_spec.path_template}'.")
             )
         _ckpt(f"{tweak.tweak_id}:icacls:{ic_spec.path_template}")
 
     for f_spec in tweak.file_specs:
-        target_str = str(expand_file_spec_path(f_spec.path_template))
+        target_str = str(_eng_attr("expand_file_spec_path", expand_file_spec_path)(f_spec.path_template))
         expected_sha = file_hashes.get(target_str) if file_hashes is not None else None
         expected_existed = file_exists.get(target_str) if file_exists is not None else None
         apply_file_spec(f_spec, expected_sha256=expected_sha, expected_existed=expected_existed)
@@ -1237,14 +691,14 @@ def _execute_tweak_mutations(
 
     if tweak.uninstall_onedrive:
         if not system.uninstall_onedrive_client():
-            raise _TweakMutationError(_capture_failure_outcome(system, "Failed to uninstall OneDrive client."))
+            raise TweakMutationError(capture_failure_outcome(system, "Failed to uninstall OneDrive client."))
         _ckpt(f"{tweak.tweak_id}:onedrive_uninstall")
 
     post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
     if post_check.status != TweakStatus.APPLIED and not (
         tweak.winget_specs and "ext_skipped_elevated" in locals() and locals()["ext_skipped_elevated"]
     ):
-        raise _TweakMutationError(
+        raise TweakMutationError(
             OperationOutcome(
                 status=OperationStatus.UNKNOWN,
                 message=(
@@ -1254,7 +708,7 @@ def _execute_tweak_mutations(
         )
 
 
-def _require_native_backends(
+def require_native_backends(
     registry: RegistryBackend,
     system: SystemBackend,
     allow_simulated: bool,
@@ -1266,18 +720,6 @@ def _require_native_backends(
             "Refusing mutating operation against simulated/in-memory backend. "
             "Use native Windows backends for real changes."
         )
-
-
-def _format_op_failure(system: SystemBackend, fallback_msg: str) -> str:
-    outcome = getattr(system, "last_outcome", None)
-    if outcome is not None and not outcome.ok:
-        detail = outcome.message.strip() if outcome.message else fallback_msg
-        return (
-            f"[{outcome.status}] {fallback_msg}: {detail}"
-            if detail != fallback_msg
-            else f"[{outcome.status}] {fallback_msg}"
-        )
-    return fallback_msg
 
 
 def apply_profile(
@@ -1303,7 +745,7 @@ def apply_profile(
     if not dry_run:
         if not env.is_windows:
             raise UnsupportedPlatformError(f"Applying tweaks is only supported on Windows (current OS: {env.os_name}).")
-        _require_native_backends(registry, system, allow_simulated)
+        require_native_backends(registry, system, allow_simulated)
 
     lock_ctx = state_store.transaction_lock() if not dry_run else nullcontext()
     with lock_ctx:
@@ -1502,7 +944,7 @@ def _apply_profile_locked(
                 res = evaluations[idx]
                 tweak = resolve_tweak_params(get_tweak(res.tweak_id), profile.params.get(res.tweak_id))
                 try:
-                    _execute_tweak_mutations(
+                    execute_tweak_mutations(
                         tweak=tweak,
                         env=env,
                         registry=registry,
@@ -1520,9 +962,7 @@ def _apply_profile_locked(
                 except Exception as exc:
                     err_msg = str(exc)
                     outcome = (
-                        exc.outcome
-                        if isinstance(exc, _TweakMutationError)
-                        else _capture_failure_outcome(system, err_msg)
+                        exc.outcome if isinstance(exc, TweakMutationError) else capture_failure_outcome(system, err_msg)
                     )
                     failed_ids.append(res.tweak_id)
                     failure_outcomes.append({"tweak_id": res.tweak_id, **outcome.to_dict()})
@@ -1532,7 +972,7 @@ def _apply_profile_locked(
                         detail=err_msg,
                         outcome=outcome,
                     )
-                    comp_errors = _compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
+                    comp_errors = compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
                     rolled_back_ids.extend(applied_ids)
                     applied_ids.clear()
                     irrev_notes = [
@@ -1559,7 +999,7 @@ def _apply_profile_locked(
                     wsl_changed = False
                     try:
                         distros = tuple(env.wsl_distros)
-                        prepared_wsl = prepare_wsl_plan(
+                        prepared_wsl = _eng_attr("prepare_wsl_plan", prepare_wsl_plan)(
                             profile.wsl,
                             system,
                             wslconfig_path=wslconfig_path,
@@ -1588,7 +1028,7 @@ def _apply_profile_locked(
                         if wsl_changed:
                             state_store.upsert_run(_make_record(TransactionState.APPLYING))
 
-                        apply_wslconfig_target(prepared_wsl)
+                        _eng_attr("apply_wslconfig_target", apply_wslconfig_target)(prepared_wsl)
                         if prepared_wsl.wslconfig_changed:
                             state_store.upsert_run(_make_record(TransactionState.APPLYING))
 
@@ -1627,7 +1067,7 @@ def _apply_profile_locked(
                             run_id = run_id_candidate
                     except PermissionError as exc:
                         if wslconfig_path is not None:
-                            comp_errors = _compensate_run_record(
+                            comp_errors = compensate_run_record(
                                 _make_record(TransactionState.ROLLING_BACK), registry, system
                             )
                             rolled_back_ids.extend(applied_ids)
@@ -1638,7 +1078,7 @@ def _apply_profile_locked(
                             raise
                         wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
                         if wsl_changed:
-                            comp_errors = _compensate_run_record(
+                            comp_errors = compensate_run_record(
                                 _make_record(TransactionState.ROLLING_BACK), registry, system
                             )
                             rolled_back_ids.extend(applied_ids)
@@ -1660,7 +1100,7 @@ def _apply_profile_locked(
                         wsl_outcome = OperationOutcome(status=OperationStatus.UNKNOWN, message=err_msg)
                         failure_outcomes.append({"tweak_id": "wsl", **wsl_outcome.to_dict()})
                         wsl_result = {"enabled": True, "error": err_msg, "outcome": wsl_outcome.to_dict()}
-                        comp_errors = _compensate_run_record(
+                        comp_errors = compensate_run_record(
                             _make_record(TransactionState.ROLLING_BACK), registry, system
                         )
                         rolled_back_ids.extend(applied_ids)
@@ -1749,368 +1189,3 @@ def _apply_profile_locked(
         wsl_result=wsl_result,
         plan_digest=plan_digest,
     )
-
-
-def rollback_runs(
-    state_store: StateStore,
-    registry: RegistryBackend,
-    system: SystemBackend,
-    to_run_id: str | None = None,
-    dry_run: bool = True,
-    allow_simulated: bool = False,
-    restore_full_policy: bool = False,
-    force: bool = False,
-) -> list[RunRecord]:
-    """Revert the latest run (or all runs back to to_run_id inclusive)."""
-    from contextlib import nullcontext
-
-    if not dry_run:
-        _require_native_backends(registry, system, allow_simulated)
-
-    lock_ctx = state_store.transaction_lock() if not dry_run else nullcontext()
-    with lock_ctx:
-        return _rollback_runs_impl(
-            state_store=state_store,
-            registry=registry,
-            system=system,
-            to_run_id=to_run_id,
-            dry_run=dry_run,
-            restore_full_policy=restore_full_policy,
-            force=force,
-        )
-
-
-def recover_incomplete_runs(
-    state_store: StateStore,
-    registry: RegistryBackend,
-    system: SystemBackend,
-    dry_run: bool = True,
-    allow_simulated: bool = False,
-    force: bool = False,
-    keep_conflicts: bool = False,
-) -> list[RunRecord]:
-    """Idempotently inspect and recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) runs.
-
-    Recovery is snapshot-based (per-tweak journal flush). For ``FAILED`` runs where compensation
-    was already attempted, package/extension uninstalls are skipped unless ``force=True``.
-    When ``keep_conflicts=True`` and all remaining errors are ``restore_conflict``, transitions
-    the run to ``PARTIALLY_ROLLED_BACK`` so user edits are preserved and future applies are unblocked.
-    """
-    from contextlib import nullcontext
-
-    if not dry_run:
-        _require_native_backends(registry, system, allow_simulated)
-
-    lock_ctx = state_store.transaction_lock() if not dry_run else nullcontext()
-    with lock_ctx:
-        incomplete = state_store.get_incomplete_runs()
-        if dry_run or not incomplete:
-            return list(reversed(incomplete))
-
-        recovered: list[RunRecord] = []
-        for rec in reversed(incomplete):
-            if rec.state == TransactionState.PLANNED and not rec.completed_operations:
-                done = replace(rec, state=TransactionState.ROLLED_BACK)
-                state_store.upsert_run(done)
-                recovered.append(done)
-                continue
-
-            was_failed = rec.state == TransactionState.FAILED
-            rolling_back = replace(rec, state=TransactionState.ROLLING_BACK)
-            state_store.upsert_run(rolling_back)
-            comp_errors = _compensate_run_record(
-                rec,
-                registry,
-                system,
-                force_rollback=force,
-                skip_package_uninstall=was_failed and not force,
-            )
-            only_conflicts = bool(comp_errors) and all(err.startswith("restore_conflict ") for err in comp_errors)
-            if not comp_errors:
-                final_state = TransactionState.ROLLED_BACK
-            elif keep_conflicts and only_conflicts:
-                final_state = TransactionState.PARTIALLY_ROLLED_BACK
-            else:
-                final_state = TransactionState.FAILED
-            final_error = "; ".join(comp_errors) if comp_errors else rec.error
-            final_rec = replace(rec, state=final_state, error=final_error)
-            state_store.upsert_run(final_rec)
-            recovered.append(final_rec)
-        return recovered
-
-
-def _rollback_runs_impl(
-    state_store: StateStore,
-    registry: RegistryBackend,
-    system: SystemBackend,
-    to_run_id: str | None = None,
-    dry_run: bool = True,
-    restore_full_policy: bool = False,
-    force: bool = False,
-) -> list[RunRecord]:
-    all_runs = state_store.load_runs()
-    if not all_runs:
-        if to_run_id is not None:
-            raise KeyError(f"Run ID '{to_run_id}' not found in state store.")
-        return []
-
-    if not dry_run:
-        incomplete = state_store.get_incomplete_runs()
-        if incomplete:
-            ids = ", ".join(rec.run_id for rec in incomplete)
-            raise IncompleteJournalError(
-                f"Cannot rollback while incomplete/FAILED run(s) exist ({ids}). Run `wb recover --apply` first."
-            )
-
-    if to_run_id is None:
-        committed = [rec for rec in all_runs if rec.state == TransactionState.COMMITTED]
-        if not committed:
-            return []
-        runs_to_revert = [committed[-1]]
-    else:
-        matching_indices = [idx for idx, rec in enumerate(all_runs) if rec.run_id == to_run_id]
-        if not matching_indices:
-            raise KeyError(f"Run ID '{to_run_id}' not found in state store.")
-        cut_idx = matching_indices[0]
-        target_rec = all_runs[cut_idx]
-        if target_rec.state != TransactionState.COMMITTED:
-            raise ValueError(f"Run ID '{to_run_id}' is in state '{target_rec.state}' (expected 'committed').")
-        runs_to_revert = [rec for rec in reversed(all_runs[cut_idx:]) if rec.state == TransactionState.COMMITTED]
-
-    reverted_records: list[RunRecord] = []
-    if not dry_run:
-        for run_record in runs_to_revert:
-            rolling_back = replace(run_record, state=TransactionState.ROLLING_BACK)
-            state_store.upsert_run(rolling_back)
-            comp_errors = _compensate_run_record(
-                run_record, registry, system, restore_full_policy=restore_full_policy, force_rollback=force
-            )
-            if comp_errors:
-                err_msg = f"Rollback errors: {'; '.join(comp_errors)}"
-                state_store.upsert_run(
-                    replace(
-                        run_record,
-                        state=TransactionState.FAILED,
-                        error=err_msg,
-                    )
-                )
-                raise RuntimeError(err_msg)
-            done = replace(run_record, state=TransactionState.ROLLED_BACK)
-            state_store.upsert_run(done)
-            reverted_records.append(done)
-        return reverted_records
-
-    return runs_to_revert
-
-
-def _classify_audit_status(status: TweakStatus) -> str:
-    """Map TweakStatus to explicit audit outcome buckets."""
-    if status == TweakStatus.APPLIED:
-        return "passed"
-    if status in (TweakStatus.UNSUPPORTED_BUILD, TweakStatus.UNSUPPORTED_EDITION, TweakStatus.SKIPPED_MANAGED):
-        return "not_applicable"
-    if status == TweakStatus.BLOCKED_BY_POLICY:
-        return "blocked_by_policy"
-    if status in (TweakStatus.REQUIRES_ADMIN, TweakStatus.ERROR):
-        return "unknown"
-    return "failed"
-
-
-def _summarize_dimension(results: list[TweakCheckResult]) -> dict[str, Any]:
-    """Summarize passed/failed/blocked/not_applicable/unknown counts for a list of checks."""
-    counts = {
-        "passed": 0,
-        "failed": 0,
-        "blocked_by_policy": 0,
-        "not_applicable": 0,
-        "unknown": 0,
-    }
-    for res in results:
-        counts[_classify_audit_status(res.status)] += 1
-    total_applicable = len(results) - counts["not_applicable"]
-    score_percent = round((counts["passed"] / total_applicable) * 100, 1) if total_applicable > 0 else 100.0
-    confidence = "none" if total_applicable == 0 else ("partial" if counts["unknown"] > 0 else "high")
-    return {
-        **counts,
-        "total_applicable": total_applicable,
-        "score_percent": score_percent,
-        "confidence": confidence,
-    }
-
-
-def calculate_hardening_score(
-    env: EnvironmentInfo,
-    registry: RegistryBackend,
-    system: SystemBackend,
-) -> dict[str, Any]:
-    """Audit all catalog tweaks across separated dimensions and traceable CIS controls."""
-    all_results = [detect_tweak(tweak, env, registry, system) for tweak in get_all_tweaks()]
-    applicable = [res for res in all_results if res.status != TweakStatus.UNSUPPORTED_BUILD]
-    passed = [res for res in applicable if res.status == TweakStatus.APPLIED]
-    cis_results = [res for res in applicable if res.cis_mapping is not None and res.cis_mapping.verified_on is not None]
-    cis_passed = [res for res in cis_results if res.status == TweakStatus.APPLIED]
-
-    dimensions = {
-        dim.value: _summarize_dimension([res for res in all_results if res.dimension == dim]) for dim in AuditDimension
-    }
-    status_breakdown = _summarize_dimension(all_results)
-
-    total_count = len(applicable)
-    passed_count = len(passed)
-    score_pct = round((passed_count / total_count) * 100, 1) if total_count > 0 else 100.0
-
-    cis_controls_list = [
-        {
-            "tweak_id": res.tweak_id,
-            "audit_status": _classify_audit_status(res.status),
-            "status": str(res.status),
-            "alignment": (
-                f"aligned with CIS {res.cis_mapping.control_id} (partial)"
-                if res.cis_mapping.partial_registry_only
-                else f"aligned with CIS {res.cis_mapping.control_id}"
-            ),
-            "evidence": res.detail,
-            **res.cis_mapping.to_dict(),
-        }
-        for res in all_results
-        if res.cis_mapping is not None and res.cis_mapping.verified_on is not None
-    ]
-
-    return {
-        "passed": passed_count,
-        "total": total_count,
-        "score_percent": score_pct,
-        "security_score_percent": dimensions[AuditDimension.SECURITY.value]["score_percent"],
-        "dimensions": dimensions,
-        "status_breakdown": status_breakdown,
-        "cis_passed": len(cis_passed),
-        "cis_total": len(cis_results),
-        "cis_controls": {
-            "benchmark": "CIS Microsoft Windows 11 Enterprise Benchmark",
-            "version": "v3.0.0",
-            "note": (
-                "Registry and OS policy checks represent partial technical control verification, "
-                "not full CIS Benchmark certification."
-            ),
-            "verified_controls": len(cis_passed),
-            "total_controls": len(cis_results),
-            "controls": cis_controls_list,
-        },
-        "results": [res.to_dict() for res in all_results],
-    }
-
-
-def inspect_defender_smartscreen_posture(registry: RegistryBackend) -> dict[str, Any]:
-    """Observe Defender PUA and Windows SmartScreen registry posture with honest confidence."""
-    pua_policy = registry.get_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows Defender", "PUAProtection")
-    pua_local = registry.get_value(HIVE_HKLM, r"SOFTWARE\Microsoft\Windows Defender", "PUAProtection")
-    pua_raw = pua_policy[0] if pua_policy is not None else (pua_local[0] if pua_local is not None else None)
-    pua_map = {0: "disabled", 1: "enabled", 2: "audit"}
-    if isinstance(pua_raw, int) and pua_raw in pua_map:
-        pua_state = pua_map[pua_raw]
-        pua_confidence = "partial"
-    elif pua_raw is None:
-        pua_state = "unset"
-        pua_confidence = "unknown"
-    else:
-        pua_state = f"unknown({pua_raw!r})"
-        pua_confidence = "unknown"
-
-    ss_policy = registry.get_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows\System", "EnableSmartScreen")
-    ss_explorer = registry.get_value(
-        HIVE_HKLM, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer", "SmartScreenEnabled"
-    )
-    if ss_policy is not None:
-        ss_val = ss_policy[0]
-        if ss_val == 0:
-            ss_state = "disabled"
-        elif ss_val in {1, 2}:
-            ss_state = "enabled"
-        else:
-            ss_state = f"unknown({ss_val!r})"
-        ss_confidence = "partial"
-    elif ss_explorer is not None:
-        raw_ss = str(ss_explorer[0]).strip().lower()
-        if raw_ss in {"off", "0"}:
-            ss_state = "disabled"
-        elif raw_ss in {"warn", "requireadmin", "on"}:
-            ss_state = "enabled"
-        else:
-            ss_state = f"unknown({ss_explorer[0]!r})"
-        ss_confidence = "partial"
-    else:
-        ss_state = "unset"
-        ss_confidence = "unknown"
-
-    return {
-        "defender_pua": {
-            "state": pua_state,
-            "confidence": pua_confidence,
-            "managed_by_wb": pua_policy is not None,
-            "source": ("policy" if pua_policy is not None else ("local" if pua_local is not None else "none")),
-        },
-        "smartscreen": {
-            "state": ss_state,
-            "confidence": ss_confidence,
-            "managed_by_wb": False,
-            "source": ("policy" if ss_policy is not None else ("explorer" if ss_explorer is not None else "none")),
-        },
-        "note": (
-            "Registry policy values alone provide partial verification; Defender Tamper Protection "
-            "or third-party AV may override runtime enforcement, and winbearable does not manage SmartScreen."
-        ),
-    }
-
-
-def inspect_vbs_credential_guard_posture(registry: RegistryBackend) -> dict[str, Any]:
-    """Observe VBS, HVCI, and Credential Guard configuration without auto-enabling Credential Guard."""
-    dg_key = r"SYSTEM\CurrentControlSet\Control\DeviceGuard"
-    hvci_key = rf"{dg_key}\Scenarios\HypervisorEnforcedCodeIntegrity"
-    cg_key = rf"{dg_key}\Scenarios\CredentialGuard"
-    lsa_key = r"SYSTEM\CurrentControlSet\Control\Lsa"
-
-    vbs_raw = registry.get_value(HIVE_HKLM, dg_key, "EnableVirtualizationBasedSecurity")
-    hvci_raw = registry.get_value(HIVE_HKLM, hvci_key, "Enabled")
-    lsa_cfg = registry.get_value(HIVE_HKLM, lsa_key, "LsaCfgFlags")
-    cg_enabled = registry.get_value(HIVE_HKLM, cg_key, "Enabled")
-
-    def _bin_state(val: tuple[Any, str] | None) -> tuple[str, str]:
-        if val is None:
-            return "unset", "unknown"
-        if val[0] == 1:
-            return "enabled", "partial"
-        if val[0] == 0:
-            return "disabled", "partial"
-        return f"unknown({val[0]!r})", "unknown"
-
-    vbs_state, vbs_conf = _bin_state(vbs_raw)
-    hvci_state, hvci_conf = _bin_state(hvci_raw)
-
-    if lsa_cfg is not None:
-        flag = lsa_cfg[0]
-        if flag == 1:
-            cg_state, cg_conf = "enabled_with_uefi_lock", "partial"
-        elif flag == 2:
-            cg_state, cg_conf = "enabled_without_lock", "partial"
-        elif flag == 0:
-            cg_state, cg_conf = "disabled", "partial"
-        else:
-            cg_state, cg_conf = f"unknown({flag!r})", "unknown"
-    else:
-        cg_state, cg_conf = _bin_state(cg_enabled)
-
-    return {
-        "vbs": {"state": vbs_state, "confidence": vbs_conf},
-        "hvci": {"state": hvci_state, "confidence": hvci_conf},
-        "credential_guard": {
-            "state": cg_state,
-            "confidence": cg_conf,
-            "auto_enable_supported": False,
-        },
-        "wsl_performance_note": (
-            "VBS, HVCI, and Credential Guard share the Hyper-V hypervisor with WSL2; "
-            "enabling them isolates kernel/LSA memory but can add CPU, memory, and I/O overhead "
-            "(especially on memory-constrained or nested-virtualization hosts). "
-            "Credential Guard is observe-only in winbearable."
-        ),
-    }

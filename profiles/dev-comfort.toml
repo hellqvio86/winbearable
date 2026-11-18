@@ -24,3 +24,4 @@ description = "Linux-comfort input, terminal, Explorer, and developer defaults (
 "dev.fix_ssh_key_permissions" = true
 "dev.vscode_settings_defaults" = true
 "dev.terminal_settings_defaults" = true
+"dev.install_nerd_font_user" = true

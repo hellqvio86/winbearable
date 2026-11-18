@@ -1,0 +1,208 @@
+"""Built-in tweaks and provenance for the `search` category."""
+
+from __future__ import annotations
+
+from ...const import (
+    ACTION_SET,
+    DEFAULT_TESTED_BUILDS,
+    HIVE_HKCU,
+    HIVE_HKLM,
+    MIN_SUPPORTED_BUILD,
+    REG_DWORD,
+)
+from ...models import (
+    PolicyConflictPath,
+    RegistrySpec,
+    RiskLevel,
+    ServiceSpec,
+    TweakDefinition,
+    TweakProvenance,
+)
+from ..helpers import provenance_entry
+
+TWEAKS: dict[str, TweakDefinition] = {
+    "search.disable_bing": TweakDefinition(
+        tweak_id="search.disable_bing",
+        category="search",
+        title="Disable Bing / Web Results in Start Menu Search",
+        description="Prevents Start Menu search from sending local search queries to Bing.",
+        source_url="https://learn.microsoft.com/en-us/windows/configuration/search/",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Policies\Microsoft\Windows\Explorer",
+                value_name="DisableSearchBoxSuggestions",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+                policy_checks=(
+                    PolicyConflictPath(
+                        hive=HIVE_HKLM,
+                        key_path=r"SOFTWARE\Policies\Microsoft\Windows\Explorer",
+                        value_name="DisableSearchBoxSuggestions",
+                        enforced_value=0,
+                    ),
+                ),
+            ),
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Microsoft\Windows\CurrentVersion\Search",
+                value_name="BingSearchEnabled",
+                value_data=0,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "search.disable_highlights": TweakDefinition(
+        tweak_id="search.disable_highlights",
+        category="search",
+        title="Disable Search Highlights",
+        description="Disables daily illustrations and trending content in the Windows search box.",
+        source_url="https://learn.microsoft.com/en-us/windows/configuration/search/",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Microsoft\Windows\CurrentVersion\SearchSettings",
+                value_name="IsDynamicSearchBoxEnabled",
+                value_data=0,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+                policy_checks=(
+                    PolicyConflictPath(
+                        hive=HIVE_HKLM,
+                        key_path=r"SOFTWARE\Policies\Microsoft\Windows\Windows Search",
+                        value_name="EnableDynamicContentInWSB",
+                        enforced_value=1,
+                    ),
+                ),
+            ),
+        ),
+    ),
+    "search.hide_taskbar_box": TweakDefinition(
+        tweak_id="search.hide_taskbar_box",
+        category="search",
+        title="Hide Taskbar Search Box",
+        description="Hides the search bar/icon on the taskbar (Win key still opens Start search).",
+        source_url="https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Microsoft\Windows\CurrentVersion\Search",
+                value_name="SearchboxTaskbarMode",
+                value_data=0,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "search.disable_cloud_and_history": TweakDefinition(
+        tweak_id="search.disable_cloud_and_history",
+        category="search",
+        title="Disable Cloud Content Search and Search History",
+        description="Disables Microsoft Account / Entra cloud content indexing and local device search history.",
+        source_url="https://learn.microsoft.com/en-us/windows/configuration/search/",
+        risk=RiskLevel.LOW,
+        requires_admin=False,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Microsoft\Windows\CurrentVersion\SearchSettings",
+                value_name="IsMSACloudSearchEnabled",
+                value_data=0,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Microsoft\Windows\CurrentVersion\SearchSettings",
+                value_name="IsAADCloudSearchEnabled",
+                value_data=0,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKCU,
+                key_path=r"Software\Microsoft\Windows\CurrentVersion\SearchSettings",
+                value_name="IsDeviceSearchHistoryEnabled",
+                value_data=0,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "search.disable_wsearch_service": TweakDefinition(
+        tweak_id="search.disable_wsearch_service",
+        category="search",
+        title="Disable Windows Search Indexer Service (WSearch)",
+        description="Disables background WSearch disk indexing (use Everything or Flow Launcher instead).",
+        source_url="https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/fix-problems-in-windows-search",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        service_specs=(ServiceSpec(service_name="WSearch", start_type=4),),
+    ),
+}
+
+PROVENANCE: dict[str, TweakProvenance] = {
+    "search.disable_bing": provenance_entry(
+        "Prevents Windows Search from sending local Start queries to Bing.",
+        "Microsoft Windows Search Group Policy / BingSearchEnabled registry reference",
+        "Low risk: HKCU search UI preference.",
+        "Start menu search stays local.",
+        "registry_value",
+        "Verified HKCU Search BingSearchEnabled=0 and DisableSearchBoxSuggestions=1.",
+    ),
+    "search.disable_highlights": provenance_entry(
+        "Removes promotional Search Highlights graphics from the search box.",
+        "Microsoft Windows Search Settings IsDynamicSearchBoxEnabled reference",
+        "Low risk: HKCU search UI toggle.",
+        "Hides daily search illustrations and trending suggestions.",
+        "registry_value",
+        "Verified HKCU SearchSettings IsDynamicSearchBoxEnabled=0.",
+    ),
+    "search.hide_taskbar_box": provenance_entry(
+        "Reclaims taskbar space by hiding the Windows Search box.",
+        "Microsoft Windows Search TaskbarMode registry reference",
+        "Low risk: HKCU taskbar visual preference.",
+        "Hides search box on taskbar (Start search remains accessible via Win key).",
+        "registry_value",
+        "Verified HKCU Search SearchboxTaskbarMode=0.",
+    ),
+    "search.disable_cloud_and_history": provenance_entry(
+        "Disables cloud search results and local device search history.",
+        "Microsoft Windows Search Settings policy documentation",
+        "Low risk: HKCU search privacy preference.",
+        "Disables Microsoft account/AAD cloud search and search history.",
+        "registry_value",
+        "Verified HKCU SearchSettings MSA/AAD cloud search and device search history disabled.",
+    ),
+    "search.disable_wsearch_service": provenance_entry(
+        "Stops Windows Search background indexing to reduce disk/CPU overhead.",
+        "Windows Service Control Manager (WSearch service)",
+        "Medium risk: disables system-wide file content indexing.",
+        "Outlook/Start deep file content indexing is disabled until re-enabled.",
+        "service_start_type",
+        "Verified WSearch Start=4 via HKLM Services and sc.exe config.",
+    ),
+}

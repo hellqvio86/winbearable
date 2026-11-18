@@ -193,3 +193,86 @@ def test_catalog_non_registry_evidence_metadata() -> None:
             assert tweak.provenance is not None
             assert tweak.provenance.review_evidence.strip()
             assert tweak.provenance.evidence_type in valid_types
+
+
+def test_architectural_layer_boundaries() -> None:
+    """Enforce the 7-layer acyclic dependency DAG across src/winbearable modules."""
+    import ast
+
+    layer_map: dict[str, int] = {
+        "const": 0,
+        "models": 1,
+        "backends": 2,
+        "hyperv_firewall": 2,
+        "packages": 3,
+        "tweaks": 3,
+        "wsl": 3,
+        "operations": 3,
+        "profiles": 4,
+        "state": 4,
+        "engine": 5,
+        "audit": 5,
+        "uac": 6,
+        "tui": 6,
+        "cli": 6,
+    }
+    pkg_root = Path(__file__).resolve().parent.parent / "winbearable"
+    violations: list[str] = []
+
+    for py_file in sorted(pkg_root.rglob("*.py")):
+        rel = py_file.relative_to(pkg_root)
+        if rel.parts == ("__init__.py",) or rel.parts == ("__main__.py",):
+            continue
+        top_pkg = rel.parts[0].removesuffix(".py")
+        src_layer = layer_map.get(top_pkg)
+        assert src_layer is not None, f"Unregistered architectural layer for {rel}"
+
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            imported_tops: list[str] = []
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("winbearable."):
+                        imported_tops.append(alias.name.split(".")[1])
+            elif isinstance(node, ast.ImportFrom):
+                if node.level > 0:
+                    # Relative import: resolve target package relative to py_file
+                    cur_dir = py_file.parent
+                    for _ in range(node.level - 1):
+                        cur_dir = cur_dir.parent
+                    if cur_dir == pkg_root and node.module:
+                        imported_tops.append(node.module.split(".")[0])
+                    elif cur_dir != pkg_root:
+                        rel_target = cur_dir.relative_to(pkg_root)
+                        imported_tops.append(rel_target.parts[0])
+                elif node.module and node.module.startswith("winbearable."):
+                    imported_tops.append(node.module.split(".")[1])
+
+            for dst_pkg in imported_tops:
+                dst_layer = layer_map.get(dst_pkg)
+                if dst_layer is not None and dst_layer > src_layer:
+                    violations.append(f"{rel} (layer {src_layer}: {top_pkg}) imports {dst_pkg} (layer {dst_layer})")
+
+    assert not violations, "Architectural layer boundary violations:\n" + "\n".join(violations)
+
+
+def test_no_cross_module_private_imports() -> None:
+    """Enforce that non-facade modules never import _private symbols from other modules."""
+    import ast
+
+    pkg_root = Path(__file__).resolve().parent.parent / "winbearable"
+    facade_files = {"__init__.py", "registry.py", "system.py", "catalog.py", "provenance.py"}
+    violations: list[str] = []
+
+    for py_file in sorted(pkg_root.rglob("*.py")):
+        if py_file.name in facade_files:
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.level > 0 or (node.module or "").startswith("winbearable")):
+                for alias in node.names:
+                    if alias.name.startswith("_") and not alias.name.startswith("__"):
+                        rel = py_file.relative_to(pkg_root)
+                        violations.append(f"{rel}:{node.lineno} imports private '{alias.name}' from '{node.module}'")
+
+    assert not violations, "Cross-module private imports (make public instead):\n" + "\n".join(violations)

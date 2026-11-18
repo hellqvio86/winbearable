@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 JSON_SCHEMA_VERSION = "1.0"
 STATE_SCHEMA_VERSION = 2
 PROFILE_SCHEMA_VERSION = 2
@@ -63,43 +63,15 @@ BUNDLED_PROFILES_DIR = PACKAGE_DIR / "profiles"
 
 # Windows Registry Detection Paths
 NT_CURRENT_VERSION_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-TCPIP_PARAMS_KEY = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-CLOUD_DOMAIN_JOIN_KEY = r"SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo"
-MDM_ENROLLMENTS_KEY = r"SOFTWARE\Microsoft\Enrollments"
 DEFENDER_KEY = r"SOFTWARE\Microsoft\Windows Defender"
 DEFENDER_FEATURES_KEY = r"SOFTWARE\Microsoft\Windows Defender\Features"
-SECURE_BOOT_KEY = r"SYSTEM\CurrentControlSet\Control\SecureBoot\State"
 BITLOCKER_STATUS_KEY = r"SYSTEM\CurrentControlSet\Control\BitLockerStatus"
-APPLOCKER_POLICIES_KEY = r"SOFTWARE\Policies\Microsoft\Windows\SrpV2"
 WDAC_POLICIES_KEY = r"SYSTEM\CurrentControlSet\Control\CI\Policy"
 WSL_POLICIES_KEY = r"SOFTWARE\Policies\Microsoft\WSL"
 WSL_VM_CREATOR_ID = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
 
-# Known EDR / endpoint management service names (registry Services\<name> inspection only, no WMI/processes).
-# Verified against vendor documentation:
-# - Sense / MsSense: Microsoft Defender for Endpoint (https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-onboarding)
-# - CSFalconService: CrowdStrike Falcon Sensor (https://falcon.crowdstrike.com/documentation)
-# - SentinelAgent: SentinelOne Singularity Agent
-# - CbDefense: VMware Carbon Black Cloud Sensor
-# - CylanceSvc: BlackBerry CylancePROTECT
-# - xagt: Trellix / FireEye Endpoint Agent
-KNOWN_EDR_SERVICES: tuple[tuple[str, str], ...] = (
-    ("Sense", "Microsoft Defender for Endpoint"),
-    ("MsSense", "Microsoft Defender for Endpoint"),
-    ("CSFalconService", "CrowdStrike Falcon"),
-    ("SentinelAgent", "SentinelOne"),
-    ("CbDefense", "Carbon Black Cloud"),
-    ("CylanceSvc", "CylancePROTECT"),
-    ("xagt", "Trellix Endpoint Agent"),
-)
-
-# OneDrive CLSID and Paths
-ONEDRIVE_CLSID = "{018D5C66-4533-4307-9B53-224DE2ED1FE6}"
+# OneDrive Process Name
 ONEDRIVE_PROCESS_NAME = "OneDrive.exe"
-ONEDRIVE_SETUP_CANDIDATES: tuple[str, ...] = (
-    r"C:\Windows\SysWOW64\OneDriveSetup.exe",
-    r"C:\Windows\System32\OneDriveSetup.exe",
-)
 
 # Opinionated Windows-Side App Constants (VS Code + Remote-WSL)
 VSCODE_WINGET_ID = "Microsoft.VisualStudioCode"
@@ -110,26 +82,12 @@ WSL_MODES: tuple[str, ...] = ("convenient", "strict")
 DEFAULT_WSL_MODE = "convenient"
 DEFAULT_WSL_NETWORKING_MODE = "mirrored"
 DEFAULT_WSL_DISTRO = "Ubuntu"
-MIN_RECOMMENDED_WSL_VERSION = "2.3.0"
-WSL_MIN_VERSION_BY_OPTION: dict[str, str] = {
-    "networkingMode": "2.0.0",
-    "dnsTunneling": "2.0.0",
-    "firewall": "2.0.0",
-    "autoProxy": "2.0.0",
-    "autoMemoryReclaim": "2.0.0",
-    "sparseVhd": "2.0.0",
-    "hostAddressLoopback": "2.0.0",
-    "ignoredPorts": "2.0.0",
-    "bestEffortDnsParsing": "2.0.0",
-}
 
 # Subprocess Timeout & Output Bounds
 ENV_CMD_TIMEOUT = "WB_CMD_TIMEOUT"
-DEFAULT_CMD_TIMEOUT = 60.0
 DEFAULT_WINGET_TIMEOUT = 300.0
 DEFAULT_WSL_TIMEOUT = 600.0
 MAX_CMD_OUTPUT_CHARS = 1_048_576
-MAX_DIAGNOSTIC_CHARS = 4_096
 
 # Stable CLI Exit Codes
 EXIT_SUCCESS = 0
@@ -138,14 +96,8 @@ EXIT_PENDING_CHANGES = 2
 EXIT_BLOCKED = 3
 EXIT_UNSUPPORTED_PLATFORM = 4
 
-# Win32 UAC Elevation Constants
-SEE_MASK_NOCLOSEPROCESS = 0x00000040
-SW_HIDE = 0
+# Win32 UAC Constants shared with tests
 ERROR_CANCELLED = 1223
 WAIT_OBJECT_0 = 0x00000000
 WAIT_TIMEOUT = 0x00000102
 WAIT_FAILED = 0xFFFFFFFF
-DEFAULT_UAC_TIMEOUT_MS = 1_800_000
-ENV_UAC_TIMEOUT_MS = "WINBEARABLE_UAC_TIMEOUT_MS"
-DEFAULT_UAC_TERMINATE_GRACE_MS = 5_000
-MAX_UAC_OUTPUT_BYTES = 1_048_576

@@ -2,6 +2,17 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.15.0] - 2026-11-18
+
+### Changed
+
+- **Modular Architecture & Layer Boundaries:**
+  - Refactored oversized monoliths into cohesive subpackages with backwards-compatible `__init__.py` facades: `models/` (`enums`, `specs`, `results`, `snapshots`), `backends/` (`consts`, `posture`, `registry_*`, `system_*`), `tweaks/` (`consts`, `helpers`, `categories/`), `operations/` (`base`, `mergers`, `adapters`), `wsl/` (`consts`, `ini`, `config`, `audit`, `lifecycle`), `profiles/` (`schema_migration`, `loader`, `generator`), `engine/` (`params`, `evaluate`, `apply`, `rollback`, `scoring`), `audit/` (`models`, `win32_checks`, `registry_checks`, `runner`), and `cli/` (`parser`, `render`, `handlers`).
+  - Moved single-module constants into package-local `consts.py` modules (`backends/consts.py`, `wsl/consts.py`, `tweaks/consts.py`) and promoted cross-module helpers to public names.
+  - Added `test_architectural_layer_boundaries` (7-layer acyclic DAG) and `test_no_cross_module_private_imports` AST lint gates in `src/tests/test_catalog_lint.py`.
+- **Developer Comfort Profile:**
+  - Enabled `dev.install_nerd_font_user` (`DEVCOM.JetBrainsMonoNerdFont` per-user via winget) in `profiles/dev-comfort.toml`.
+
 ## [0.14.0] - 2026-11-18
 
 ### Fixed

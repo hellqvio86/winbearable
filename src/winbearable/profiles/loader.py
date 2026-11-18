@@ -1,45 +1,30 @@
-"""TOML and JSON profile loading, inheritance resolution, migration, validation, and generation."""
+"""Profile path resolution, validation, inheritance resolution, and loading."""
 
-import json
+from __future__ import annotations
+
 import os
-import tomllib
+import sys
 import warnings
 from pathlib import Path
 from typing import Any
 
-from .const import (
+from ..const import (
     BUNDLED_PROFILES_DIR,
-    DEFAULT_WSL_MODE,
     DEFAULT_WSL_NETWORKING_MODE,
     ENV_CONFIG_PATH,
     ENV_PROFILE_DIR,
-    PROFILE_SCHEMA_VERSION,
     REPO_PROFILES_DIR,
     WSL_MODES,
 )
-from .models import EnvironmentInfo, ProfileSpec, WslConfigSpec
-from .packages import PACKAGE_CATALOG, PACKAGE_PRESETS
-from .tweaks import TWEAK_CATALOG, TWEAK_ID_ALIASES, resolve_tweak_id
-
-
-class ProfileValidationError(ValueError):
-    """Raised when a TOML profile is missing, malformed, or references invalid settings."""
-
-
-def _find_key_line(content: str, key: str) -> int | None:
-    """Return the 1-based line number where `key =` or `[...key...]` first appears."""
-    for idx, line in enumerate(content.splitlines(), 1):
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        if (
-            stripped.startswith(f"{key} ")
-            or stripped.startswith(f"{key}=")
-            or f".{key}" in stripped
-            or f"[{key}" in stripped
-        ):
-            return idx
-    return None
+from ..models import ProfileSpec, WslConfigSpec
+from ..packages import PACKAGE_CATALOG, PACKAGE_PRESETS
+from ..tweaks import TWEAK_CATALOG, TWEAK_ID_ALIASES, resolve_tweak_id
+from .schema_migration import (
+    ProfileValidationError,
+    find_key_line,
+    migrate_profile_payload,
+    parse_profile_content,
+)
 
 
 def get_builtin_profiles_dir() -> Path:
@@ -47,8 +32,10 @@ def get_builtin_profiles_dir() -> Path:
     override = os.environ.get(ENV_PROFILE_DIR)
     if override:
         return Path(override)
-    if REPO_PROFILES_DIR.is_dir():
-        return REPO_PROFILES_DIR
+    pkg_mod = sys.modules.get("winbearable.profiles")
+    repo_dir = getattr(pkg_mod, "REPO_PROFILES_DIR", REPO_PROFILES_DIR) if pkg_mod is not None else REPO_PROFILES_DIR
+    if repo_dir.is_dir():
+        return repo_dir
     return BUNDLED_PROFILES_DIR
 
 
@@ -135,7 +122,7 @@ def _parse_wsl_section(
     unknown_wsl = set(raw_wsl.keys()) - allowed_wsl_keys
     if unknown_wsl:
         first = sorted(unknown_wsl)[0]
-        ln = _find_key_line(content, first)
+        ln = find_key_line(content, first)
         ln_hint = f" (line {ln})" if ln else ""
         raise ProfileValidationError(f"Unknown [wsl] keys{ln_hint}: {', '.join(sorted(unknown_wsl))}")
 
@@ -221,143 +208,7 @@ def _parse_wsl_section(
     )
 
 
-def _parse_profile_version(raw_version: Any, source_label: str) -> int:
-    """Parse a profile schema_version integer (or legacy string like '1.0'); None defaults to 1."""
-    if raw_version is None:
-        return 1
-    if isinstance(raw_version, bool):
-        raise ProfileValidationError(f"Profile '{source_label}' 'schema_version' must be an integer, got bool.")
-    if isinstance(raw_version, int):
-        return raw_version
-    if isinstance(raw_version, str):
-        stripped = raw_version.strip()
-        if stripped.isdigit():
-            return int(stripped)
-        if stripped.endswith(".0") and stripped[:-2].isdigit():
-            return int(stripped[:-2])
-    raise ProfileValidationError(f"Profile '{source_label}' has invalid schema_version {raw_version!r}.")
-
-
-def _parse_profile_content(content: str, profile_path: Path) -> tuple[dict[str, Any], str]:
-    """Parse profile text from JSON or TOML based on extension (or content sniffing)."""
-    suffix = profile_path.suffix.lower()
-    if suffix == ".json":
-        try:
-            raw_data = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ProfileValidationError(f"Failed to parse JSON profile {profile_path}: {exc}") from exc
-        if not isinstance(raw_data, dict):
-            raise ProfileValidationError(f"JSON profile {profile_path} must be a JSON object.")
-        return raw_data, "json"
-
-    if suffix == ".toml":
-        try:
-            raw_data = tomllib.loads(content)
-        except tomllib.TOMLDecodeError as exc:
-            raise ProfileValidationError(f"Failed to parse TOML profile {profile_path}: {exc}") from exc
-        return raw_data, "toml"
-
-    if content.lstrip().startswith("{"):
-        try:
-            raw_data = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ProfileValidationError(f"Failed to parse JSON profile {profile_path}: {exc}") from exc
-        if not isinstance(raw_data, dict):
-            raise ProfileValidationError(f"JSON profile {profile_path} must be a JSON object.")
-        return raw_data, "json"
-
-    try:
-        raw_data = tomllib.loads(content)
-    except tomllib.TOMLDecodeError as exc:
-        raise ProfileValidationError(f"Failed to parse TOML profile {profile_path}: {exc}") from exc
-    return raw_data, "toml"
-
-
-def migrate_profile_payload(
-    raw_data: dict[str, Any],
-    *,
-    source_label: str = "<profile>",
-) -> tuple[dict[str, Any], int, bool]:
-    """Migrate a parsed TOML or JSON profile dictionary up to PROFILE_SCHEMA_VERSION."""
-    raw_ver = raw_data.get("schema_version", raw_data.get("version"))
-    orig_version = _parse_profile_version(raw_ver, source_label)
-    if orig_version < 1 or orig_version > PROFILE_SCHEMA_VERSION:
-        raise ProfileValidationError(
-            f"Profile '{source_label}' has unsupported schema_version {raw_ver!r} "
-            f"(supported <= {PROFILE_SCHEMA_VERSION})."
-        )
-
-    migrated = dict(raw_data)
-    transformed = False
-
-    if "version" in migrated:
-        migrated.pop("version", None)
-        transformed = True
-
-    # Legacy v1 -> v2: support flat tweak lists (tweak_ids / enabled_tweaks)
-    for legacy_list_key in ("tweak_ids", "enabled_tweaks"):
-        if legacy_list_key in migrated:
-            legacy_list = migrated.pop(legacy_list_key)
-            if not isinstance(legacy_list, list):
-                raise ProfileValidationError(f"Profile '{source_label}' '{legacy_list_key}' must be a list.")
-            tweaks_map = dict(migrated.get("tweaks", {})) if isinstance(migrated.get("tweaks", {}), dict) else {}
-            for tid in legacy_list:
-                tweaks_map.setdefault(str(tid), True)
-            migrated["tweaks"] = tweaks_map
-            transformed = True
-
-    # Legacy v1 -> v2: support single-string 'include'
-    if isinstance(migrated.get("include"), str):
-        migrated["include"] = [migrated["include"]]
-        transformed = True
-
-    # Legacy v1 -> v2: support flat list 'packages' -> {'install': [...]}
-    if isinstance(migrated.get("packages"), list):
-        migrated["packages"] = {"install": list(migrated["packages"])}
-        transformed = True
-
-    # Legacy v1 -> v2: support top-level wsl_enabled / wsl_mode
-    if "wsl_enabled" in migrated or "wsl_mode" in migrated:
-        wsl_map = dict(migrated.get("wsl", {})) if isinstance(migrated.get("wsl", {}), dict) else {}
-        if "wsl_enabled" in migrated:
-            wsl_map.setdefault("enabled", migrated.pop("wsl_enabled"))
-        if "wsl_mode" in migrated:
-            wsl_map.setdefault("mode", migrated.pop("wsl_mode"))
-        migrated["wsl"] = wsl_map
-        transformed = True
-
-    # Canonicalize deprecated tweak IDs in tweaks and params (explicit canonical keys take precedence)
-    if isinstance(migrated.get("tweaks"), dict):
-        raw_t = migrated["tweaks"]
-        new_tweaks: dict[str, Any] = {str(k): v for k, v in raw_t.items() if str(k) not in TWEAK_ID_ALIASES}
-        for tid, val in raw_t.items():
-            if str(tid) in TWEAK_ID_ALIASES:
-                canonical = resolve_tweak_id(str(tid))
-                warnings.warn(
-                    f"Profile '{source_label}' uses deprecated tweak ID '{tid}'; use '{canonical}' instead.",
-                    DeprecationWarning,
-                    stacklevel=3,
-                )
-                transformed = True
-                new_tweaks.setdefault(canonical, val)
-        migrated["tweaks"] = new_tweaks
-
-    if isinstance(migrated.get("params"), dict):
-        raw_p = migrated["params"]
-        new_params: dict[str, Any] = {str(k): v for k, v in raw_p.items() if str(k) not in TWEAK_ID_ALIASES}
-        for tid, val in raw_p.items():
-            if str(tid) in TWEAK_ID_ALIASES:
-                canonical = resolve_tweak_id(str(tid))
-                transformed = True
-                new_params.setdefault(canonical, val)
-        migrated["params"] = new_params
-
-    migrated["schema_version"] = PROFILE_SCHEMA_VERSION
-    was_migrated = orig_version != PROFILE_SCHEMA_VERSION or transformed or raw_ver is None
-    return migrated, orig_version, was_migrated
-
-
-def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: str = "") -> None:
+def validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: str = "") -> None:
     allowed_top_keys = {
         "schema_version",
         "name",
@@ -372,7 +223,7 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
     unknown_top = set(raw_data.keys()) - allowed_top_keys
     if unknown_top:
         first = sorted(unknown_top)[0]
-        ln = _find_key_line(content, first)
+        ln = find_key_line(content, first)
         ln_hint = f" (line {ln})" if ln else ""
         raise ProfileValidationError(
             f"Profile '{source_label}' contains unknown top-level keys{ln_hint}: {', '.join(sorted(unknown_top))}"
@@ -407,7 +258,7 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
                 stacklevel=3,
             )
         if canonical_id not in TWEAK_CATALOG:
-            ln = _find_key_line(content, tweak_id)
+            ln = find_key_line(content, tweak_id)
             ln_hint = f" (line {ln})" if ln else ""
             raise ProfileValidationError(f"Profile '{source_label}' references unknown tweak ID '{tweak_id}'{ln_hint}.")
         if not isinstance(enabled, bool):
@@ -422,7 +273,7 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
     unknown_pkg = set(raw_packages.keys()) - allowed_pkg_keys
     if unknown_pkg:
         first = sorted(unknown_pkg)[0]
-        ln = _find_key_line(content, first)
+        ln = find_key_line(content, first)
         ln_hint = f" (line {ln})" if ln else ""
         raise ProfileValidationError(
             f"Profile '{source_label}' unknown [packages] keys{ln_hint}: {', '.join(sorted(unknown_pkg))}"
@@ -488,10 +339,10 @@ def load_profile(
     path_visited = visited | {profile_path}
 
     content = profile_path.read_text(encoding="utf-8")
-    parsed_data, _ = _parse_profile_content(content, profile_path)
+    parsed_data, _ = parse_profile_content(content, profile_path)
     raw_data, _, _ = migrate_profile_payload(parsed_data, source_label=str(profile_path))
 
-    _validate_raw_profile(raw_data, str(profile_path), content=content)
+    validate_raw_profile(raw_data, str(profile_path), content=content)
 
     extends_ref = raw_data.get("extends")
     base_profile: ProfileSpec | None = None
@@ -592,197 +443,3 @@ def get_default_user_profile_path() -> Path:
     if json_path.is_file() and not toml_path.is_file():
         return json_path
     return toml_path
-
-
-def _build_init_profile_dict(env: EnvironmentInfo) -> dict[str, Any]:
-    """Build the recommended profile dictionary tailored to the detected host environment."""
-    # Only recommend the privileged owner profile when MDM is confirmed absent (never when unknown/None).
-    mdm_confirmed_absent = env.mdm_enrolled is False
-    recommended_base = "owner" if env.is_admin and mdm_confirmed_absent else "user-only"
-    tweaks: dict[str, bool] = {
-        "apps.install_vscode": True,
-        "onedrive.disable_tray_autorun": True,
-        "onedrive.unpin_explorer": True,
-        "search.disable_bing": True,
-        "explorer.classic_context_menu": True,
-        "explorer.show_file_extensions": True,
-        "explorer.show_hidden_files": True,
-    }
-    if env.is_admin and mdm_confirmed_absent:
-        tweaks["onedrive.disable_policy"] = True
-
-    return {
-        "schema_version": PROFILE_SCHEMA_VERSION,
-        "name": "local",
-        "extends": recommended_base,
-        "description": "Local winbearable profile generated from host environment",
-        "wsl": {
-            "enabled": env.wsl_installed,
-            "mode": DEFAULT_WSL_MODE,
-            "networking_mode": "mirrored",
-            "dns_tunneling": True,
-            "firewall": True,
-            "auto_proxy": True,
-            "systemd": True,
-        },
-        "tweaks": tweaks,
-    }
-
-
-def generate_init_profile_json(env: EnvironmentInfo) -> str:
-    """Generate a recommended JSON profile tailored to the detected host environment."""
-    return json.dumps(_build_init_profile_dict(env), indent=2) + "\n"
-
-
-def _toml_scalar(val: Any) -> str:
-    if isinstance(val, bool):
-        return "true" if val else "false"
-    if isinstance(val, int):
-        return str(val)
-    if isinstance(val, str):
-        return json.dumps(val)
-    if isinstance(val, list):
-        return "[" + ", ".join(_toml_scalar(item) for item in val) + "]"
-    return json.dumps(val)
-
-
-def _toml_key_part(key: str) -> str:
-    if key.isidentifier() or all(ch.isalnum() or ch in ("_", "-") for ch in key):
-        return key
-    return json.dumps(key)
-
-
-def _emit_toml_table(lines: list[str], header_parts: tuple[str, ...], table: dict[str, Any]) -> None:
-    lines.append("")
-    lines.append(f"[{'.'.join(_toml_key_part(p) for p in header_parts)}]")
-    nested: list[tuple[str, dict[str, Any]]] = []
-    for k, v in table.items():
-        if v is None:
-            continue
-        if isinstance(v, dict):
-            nested.append((str(k), v))
-        else:
-            lines.append(f"{_toml_key_part(str(k))} = {_toml_scalar(v)}")
-    for sub_name, sub_dict in nested:
-        _emit_toml_table(lines, (*header_parts, sub_name), sub_dict)
-
-
-def _dict_to_toml(data: dict[str, Any]) -> str:
-    """Serialize a validated profile dictionary to clean TOML."""
-    lines: list[str] = []
-    scalar_keys = ("schema_version", "name", "extends", "description", "include")
-    for key in scalar_keys:
-        if key in data and data[key] is not None:
-            lines.append(f"{key} = {_toml_scalar(data[key])}")
-
-    for section in ("wsl", "tweaks", "packages", "params"):
-        sec_val = data.get(section)
-        if isinstance(sec_val, dict) and sec_val:
-            _emit_toml_table(lines, (section,), sec_val)
-    return "\n".join(lines) + "\n"
-
-
-def migrate_profile_file(
-    source_path: Path,
-    *,
-    output_path: Path | None = None,
-    output_format: str | None = None,
-    dry_run: bool = True,
-) -> dict[str, Any]:
-    """Read an old TOML or JSON config/profile file, migrate to PROFILE_SCHEMA_VERSION, and optionally write."""
-    if not source_path.is_file():
-        raise ProfileValidationError(f"Profile file not found: {source_path}")
-
-    content = source_path.read_text(encoding="utf-8")
-    parsed_data, detected_format = _parse_profile_content(content, source_path)
-    migrated, orig_version, was_migrated = migrate_profile_payload(parsed_data, source_label=str(source_path))
-    _validate_raw_profile(migrated, str(source_path), content=content)
-
-    target_path = output_path or source_path
-    if output_format is not None:
-        target_format = output_format.lower()
-    elif target_path.suffix.lower() == ".json":
-        target_format = "json"
-    elif target_path.suffix.lower() == ".toml":
-        target_format = "toml"
-    else:
-        target_format = detected_format
-
-    if target_format not in {"json", "toml"}:
-        raise ProfileValidationError(f"Unsupported output format '{target_format}'. Must be 'json' or 'toml'.")
-
-    rendered = (json.dumps(migrated, indent=2) + "\n") if target_format == "json" else _dict_to_toml(migrated)
-    if target_format == "json":
-        json.loads(rendered)
-    else:
-        tomllib.loads(rendered)
-
-    format_changed = target_format != detected_format or target_path.resolve() != source_path.resolve()
-    needs_write = was_migrated or format_changed
-
-    if not dry_run and needs_write:
-        import tempfile
-
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_str = tempfile.mkstemp(prefix=f"{target_path.name}.", dir=str(target_path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(rendered)
-                fh.flush()
-            os.replace(tmp_str, target_path)
-        except Exception:
-            if os.path.exists(tmp_str):
-                os.unlink(tmp_str)
-            raise
-
-    return {
-        "source_path": str(source_path),
-        "output_path": str(target_path),
-        "source_format": detected_format,
-        "output_format": target_format,
-        "from_version": orig_version,
-        "to_version": PROFILE_SCHEMA_VERSION,
-        "migrated": was_migrated,
-        "changed": needs_write,
-        "dry_run": dry_run,
-        "content": rendered,
-    }
-
-
-def generate_init_profile_toml(env: EnvironmentInfo) -> str:
-    """Generate a recommended TOML profile tailored to the detected host environment."""
-    # Only recommend the privileged owner profile when MDM is confirmed absent (never when unknown/None).
-    mdm_confirmed_absent = env.mdm_enrolled is False
-    recommended_base = "owner" if env.is_admin and mdm_confirmed_absent else "user-only"
-    mdm_label = "unknown" if env.mdm_enrolled is None else str(env.mdm_enrolled).lower()
-    wsl_mode = DEFAULT_WSL_MODE
-    lines = [
-        "# Generated by `wb init`",
-        f"# Detected OS: {env.os_name} (Build {env.windows_build}, Edition: {env.edition})",
-        f"# Admin: {str(env.is_admin).lower()} | MDM Enrolled: {mdm_label}",
-        "",
-        'name = "local"',
-        f'extends = "{recommended_base}"',
-        'description = "Local winbearable profile generated from host environment"',
-        "",
-        "[wsl]",
-        f"enabled = {str(env.wsl_installed).lower()}",
-        f'mode = "{wsl_mode}"',
-        'networking_mode = "mirrored"',
-        "dns_tunneling = true",
-        "firewall = true",
-        "auto_proxy = true",
-        "systemd = true",
-        "",
-        "[tweaks]",
-        '"apps.install_vscode" = true',
-        '"onedrive.disable_tray_autorun" = true',
-        '"onedrive.unpin_explorer" = true',
-        '"search.disable_bing" = true',
-        '"explorer.classic_context_menu" = true',
-        '"explorer.show_file_extensions" = true',
-        '"explorer.show_hidden_files" = true',
-    ]
-    if env.is_admin and mdm_confirmed_absent:
-        lines.append('"onedrive.disable_policy" = true')
-    return "\n".join(lines) + "\n"

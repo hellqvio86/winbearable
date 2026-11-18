@@ -300,3 +300,112 @@ Pass 2 fixes landed real improvements (idempotent `matches_pre` check on registr
 3. **Batch 3 — P1 Rollback, File/Registry Atomicity & WSL (`P3-09`, `P3-10`, `P3-12`..`P3-16`, `P3-22`):**
    - Resolve single-conflict `FAILED` deadlock (`P3-09`), WSL `.wslconfig` rollback & `PermissionError` compensation (`P3-10`), `_communicate_bounded` timeout race & UTF-16LE truncation (`P3-12`), `apply_file_spec` `_atomic_write_bytes` (`P3-13`), pre-apply backup checks (`P3-14`), `restore_snapshot` `key_existed` cleanup (`P3-15`), and `WingetOperationAdapter`/`ServiceOperationAdapter` drift detection (`P3-16`).
 4. **Batch 4 — P1 UAC, Profiles, CLI, TUI, Audit & Catalog (`P3-11`, `P3-17`..`P3-21`, `P3-23`..`P3-29`).**
+
+---
+
+## 6. Modularization & Software Architecture Roadmap (Breaking Up >1,000-Line Monoliths)
+
+### Why This Matters
+Nine production modules (`catalog.py` 3,468 LOC, `backends/system.py` 2,225 LOC, `engine.py` 2,116 LOC, `cli.py` 1,513 LOC, `wsl.py` 1,386 LOC, `audit.py` 1,295 LOC, `models.py` 1,175 LOC, `provenance.py` 1,071 LOC, `backends/registry.py` 1,020 LOC) and three test files (`test_system_uac_and_recovery.py` 2,237 LOC, `test_backends_and_coverage.py` 1,853 LOC, `test_new_features.py` 1,207 LOC) exceed 1,000 lines. Several Pass-2 and Pass-3 bugs (`P3-02`, `P3-04`, `P3-13`, `P3-14`, `P3-21`) were direct consequences of splitting cohesive concepts across parallel giant files (e.g. `catalog.py` vs `provenance.py`, or `operations.py` only owning `inspect()` while `engine.py` duplicates per-operation loops across `_collect_pre_apply_snapshots`, `_execute_tweak_mutations`, and `_compensate_run_record`).
+
+### Core Software Engineering Principles & Invariants
+
+1. **Bounded Module Size & Single Responsibility (SRP):**
+   - Target **300–500 lines** per module, with a hard ceiling of **800 lines** (enforced by a repository lint test).
+   - Each module owns one cohesive domain concept or one vertical slice.
+2. **Strict Acyclic Layered Dependency Graph (DAG):**
+   - **Layer 0 (`const.py`):** Constants and version metadata only (zero internal imports).
+   - **Layer 1 (`models/`):** Immutable dataclasses, enums, specs, snapshots, and pure serialization helpers (zero I/O, subprocess, or backend imports).
+   - **Layer 2 (`backends/`):** OS boundary abstractions (`Protocol`s), Win32 `ctypes` bindings, `winreg` / `wsl.exe` / native CLI wrappers, and deterministic in-memory test doubles.
+   - **Layer 3 (`operations/`, `tweaks/`, `wsl/`):** Declarative catalog definitions, file/INI/TOML mergers, and full-lifecycle operation adapters.
+   - **Layer 4 (`state.py`, `profiles/`):** Journal persistence, schema migrations, and TOML/JSON profile resolution.
+   - **Layer 5 (`engine/`, `audit/`):** Transaction orchestration, drift evaluation, rollback/recovery state machine, hardening scoring, and read-only posture checks.
+   - **Layer 6 (`cli/`, `tui.py`, `uac.py`):** Argument parsing, user interaction, Markdown/JSON rendering, and UAC elevation relay.
+3. **Symmetrical Full-Lifecycle `OperationAdapter` Protocol (Open-Closed Principle):**
+   - Extend `OperationAdapter` from a 1-method (`inspect`) protocol into a 4-method lifecycle contract (`inspect`, `snapshot`, `apply`, `compensate`).
+   - Adding or modifying an operation kind (e.g., `service`, `icacls`, `file_config`, `firewall_group`) happens inside a single adapter class rather than four separate 200-line `for`-loop blocks across `operations.py` and `engine.py`.
+4. **Colocated Tweak Definitions & Provenance (High Cohesion):**
+   - Colocate each tweak's `TweakDefinition` and `TweakProvenance` in per-category modules (`tweaks/categories/*.py`) so specs and provenance descriptions never drift apart (`P3-21`).
+5. **Backwards-Compatible Package Facades:**
+   - Package `__init__.py` files (`winbearable.engine`, `winbearable.models`, `winbearable.backends`, `winbearable.tweaks`, `winbearable.wsl`, `winbearable.audit`, `winbearable.cli`) re-export existing public symbols (`__all__`) so external callers and existing imports remain unbroken during and after refactoring.
+
+---
+
+### Concrete Refactoring Tasks (`MOD-01`..`MOD-10`)
+
+#### MOD-01 · P2 · Split `tweaks/catalog.py` (3,468 LOC) + `tweaks/provenance.py` (1,071 LOC) into `tweaks/categories/` — [RESOLVED]
+- **Structure:**
+  - `src/winbearable/tweaks/categories/{apps,onedrive,search,start,taskbar,explorer,ai,privacy,bloat,telemetry,hardening,dev,power,services,edge,input,terminal}.py`
+  - `src/winbearable/tweaks/catalog.py`: ~100-line registry assembling `TWEAK_CATALOG`, `TWEAK_ID_ALIASES`, `get_tweak`, `get_all_tweaks`, `resolve_tweak_id`.
+- **Design:** Define each tweak with its `provenance=TweakProvenance(...)` inline (or adjacent in the same category module), eliminating the fragile cross-file runtime attachment loop in `catalog.py`.
+- **Done when:** No file in `src/winbearable/tweaks/` exceeds 600 lines; `validate_catalog(TWEAK_CATALOG) == []`; all existing imports from `winbearable.tweaks` work unchanged.
+
+#### MOD-02 · P2 · Refactor `operations.py` (958 LOC) + `engine.py` (2,116 LOC) into Focused Submodules — [RESOLVED]
+- **Structure:**
+  - `src/winbearable/operations/base.py`: `OperationAdapter` protocol (`inspect`, `snapshot`, `apply`, `compensate`).
+  - `src/winbearable/operations/mergers.py`: JSON/JSONC/INI/TOML content mergers (`merge_file_content`, `_deep_merge_dicts`, `_merge_toml_top_level`), `_atomic_write_bytes`, `snapshot_file_spec`, `apply_file_spec`, `restore_file_snapshot`.
+  - `src/winbearable/operations/adapters.py`: Concrete adapters (`RegistryOperationAdapter`, `ServiceOperationAdapter`, `TaskOperationAdapter`, `FeatureOperationAdapter`, `WingetOperationAdapter`, `AuditpolOperationAdapter`, `WevtutilOperationAdapter`, `FirewallGroupOperationAdapter`, `FsutilOperationAdapter`, `PowercfgOperationAdapter`, `GitConfigOperationAdapter`, `IcaclsOperationAdapter`, `FileConfigOperationAdapter`).
+  - `src/winbearable/engine/`:
+    - `params.py`: `resolve_tweak_params` and parameter validators.
+    - `evaluate.py`: `detect_tweak`, `evaluate_profile`.
+    - `apply.py`: `apply_profile`, `_apply_profile_locked`, `_execute_tweak_mutations`, `_collect_pre_apply_snapshots`.
+    - `rollback.py`: `rollback_runs`, `recover_incomplete_runs`, `_compensate_run_record`.
+    - `scoring.py`: `calculate_hardening_score`, `_summarize_dimension`.
+- **Done when:** No module in `operations/` or `engine/` exceeds 600 lines, and `engine/apply.py` + `engine/rollback.py` delegate per-operation work through the adapter registry.
+
+#### MOD-03 · P2 · Split `backends/system.py` (2,225 LOC) and `backends/registry.py` (1,020 LOC) — [RESOLVED]
+- **Structure:**
+  - `src/winbearable/backends/win32_ctypes.py`: Centralized, typed `ctypes` structures (`_PROCESSENTRY32W`, etc.) and pre-configured `WinDLL` function signatures (`argtypes`/`restype`) shared by `backends/` and `audit/`.
+  - `src/winbearable/backends/posture.py`: Read-only environment & security posture probes (`_observe_defender`, `_observe_tamper_protection`, `_observe_vbs_hvci`, `_observe_bitlocker`, `_observe_secure_boot`, `_observe_edr`, `_observe_mdm`, `_observe_domain`, `_observe_applocker`, `_observe_wdac`).
+  - `src/winbearable/backends/system_protocol.py`: `SystemBackend` protocol and `CommandResult`.
+  - `src/winbearable/backends/system_memory.py`: `InMemorySystemBackend` test double.
+  - `src/winbearable/backends/system_native.py`: `NativeSystemBackend` (subprocess execution, services, tasks, features, winget/vscode, auditpol, wevtutil, firewall, fsutil, powercfg, git, icacls).
+  - `src/winbearable/backends/registry_memory.py`, `registry_winreg.py`, `registry_wsl.py`: Separate `InMemoryRegistryBackend`, `WinregBackend`, and `WslInteropRegistryBackend`.
+- **Done when:** `backends/system.py` and `backends/registry.py` are replaced by focused submodules (< 650 lines each) re-exported cleanly from `winbearable.backends`.
+
+#### MOD-04 · P2 · Split `models.py` (1,175 LOC) into Domain Submodules — [RESOLVED]
+- **Structure:**
+  - `src/winbearable/models/enums.py`: `RiskLevel`, `TweakStatus`, `TransactionState`, `AuditDimension`, `ObservationState`, `ObservationConfidence`, `OperationStatus`, `RegistryView`.
+  - `src/winbearable/models/specs.py`: `RegistrySpec`, `ServiceSpec`, `ScheduledTaskSpec`, `OptionalFeatureSpec`, `WingetSpec`, `AuditpolSpec`, `WevtutilSpec`, `FirewallGroupSpec`, `FsutilCaseSensitiveSpec`, `PowercfgHibernateSpec`, `GitConfigSpec`, `IcaclsUserOnlySpec`, `FileSpec`, `TweakProvenance`, `CisControlMapping`, `TweakDefinition`, `WslConfigSpec`, `ProfileSpec`.
+  - `src/winbearable/models/snapshots.py`: All `*Snapshot` dataclasses, `RunRecord`, and `_encode_registry_data` / `_decode_registry_data`.
+  - `src/winbearable/models/results.py`: `OperationOutcome`, `PostureObservation`, `EnvironmentInfo`, `RegistryChangeDetail`, `PlannedOperation`, `TweakCheckResult`.
+- **Done when:** Every submodule in `models/` is < 450 lines and `from winbearable.models import ...` re-exports all symbols.
+
+#### MOD-05 · P2 · Split `wsl.py` (1,386 LOC) into `wsl/` Package — [RESOLVED]
+- **Structure:**
+  - `src/winbearable/wsl/ini.py`: `merge_ini_preserving_comments`, `lint_wsl_conf_lf`, `_parse_ini_sections`, `_atomic_write_text`.
+  - `src/winbearable/wsl/config.py`: `build_wslconfig_sections`, `build_distro_wsl_conf_sections`, `prepare_wsl_plan`, `apply_wslconfig_target`, `apply_distro_wsl_conf`, `plan_or_apply_wsl`.
+  - `src/winbearable/wsl/audit.py`: `audit_wsl`, `deep_audit_wsl_distro`, `detect_wsl_policies`, `detect_default_wsl_distro`.
+  - `src/winbearable/wsl/lifecycle.py`: `install_wsl_distro`, `export_wsl_distro`, `import_wsl_distro`, `set_default_wsl_distro`, `set_wsl_distro_sparse`, `update_wsl`, `apply_wsl_linux_baseline`.
+- **Done when:** No module in `wsl/` exceeds 450 lines and `winbearable.wsl` re-exports the public API.
+
+#### MOD-06 · P2 · Split `audit.py` (1,295 LOC) into `audit/` Package — [RESOLVED]
+- **Structure:**
+  - `src/winbearable/audit/models.py`: `AuditFinding` and shared registry/observation helpers (`_safe_val`, `_obs_from_reg`).
+  - `src/winbearable/audit/win32_checks.py`: `_check_local_admins`, `_check_guest_account`, `_check_listening_ports`, `_check_open_shares` (using `backends/win32_ctypes.py`).
+  - `src/winbearable/audit/registry_checks.py`: Firewall, SMB, TLS, LLMNR/NetBIOS/WPAD, UAC, LSA/Credential Guard, Defender/ASR/Exclusions, Autostart, Unquoted service paths, PowerShell/EventLog, Pending reboot.
+  - `src/winbearable/audit/runner.py`: `run_security_audit` and `detect_environment_blockers`.
+- **Done when:** No module in `audit/` exceeds 500 lines.
+
+#### MOD-07 · P2 · Split `cli.py` (1,513 LOC) into `cli/` Package — [RESOLVED]
+- **Structure:**
+  - `src/winbearable/cli/parser.py`: `build_parser`, `_JSON_SCHEMAS`, `_parse_id_list`.
+  - `src/winbearable/cli/render.py`: `_print_json`, `_format_summary_markdown`, `_escape_md_cell`, `_compute_exit_code`.
+  - `src/winbearable/cli/handlers.py`: Per-command handler functions (`handle_doctor`, `handle_status_plan_apply`, `handle_rollback_recover`, `handle_init`, `handle_list_show`, `handle_migrate`, `handle_wsl`).
+  - `src/winbearable/cli/__init__.py`: `run_cli`, `main`, `_relay_elevated_uac`, `_absolutize_elevated_argv`.
+- **Done when:** `cli/__init__.py` and all submodules are < 500 lines each, replacing the 900-line `if/elif` chain in `_run_cli_body` with a command dispatch table.
+
+#### MOD-08 · P3 · Split `profiles.py` (788 LOC) into `profiles/` or Focused Helpers — [RESOLVED]
+- **Structure:** Separate `profiles/schema_migration.py` (`migrate_profile_payload`, `migrate_profile_file`, `_dict_to_toml`), `profiles/loader.py` (`resolve_profile_path`, `load_profile`, `_validate_raw_profile`, `_parse_wsl_section`), and `profiles/generator.py` (`generate_init_profile_toml`, `generate_init_profile_json`).
+- **Done when:** Each file is < 350 lines.
+
+#### MOD-09 · P3 · Split Oversized Catch-All Test Files (>1,200 LOC) by Domain Subject
+- **Problem:** `test_system_uac_and_recovery.py` (2,237 LOC), `test_backends_and_coverage.py` (1,853 LOC), and `test_new_features.py` (1,207 LOC) are chronological grab-bags mixing UAC, WSL, registry, audit, TUI, and engine tests.
+- **Structure:** Organize `src/tests/` by domain module under test:
+  - `test_registry_backends.py`, `test_system_backend.py`, `test_uac.py`, `test_state_and_journal.py`, `test_engine_apply_and_rollback.py`, `test_wsl_config_and_lifecycle.py`, `test_audit_checks.py`, `test_profiles_and_migration.py`, `test_cli_and_tui.py`.
+- **Done when:** No test file exceeds 750 lines, and test filenames directly reflect the module/behavior under test.
+
+#### MOD-10 · P3 · Add Layer-Boundary Lint Gate in `test_catalog_lint.py` — [RESOLVED]
+- **Rule:** Add a fast AST import-layer test (`test_architectural_layer_boundaries`) in `test_catalog_lint.py` enforcing the 7-layer acyclic dependency DAG (`const` -> `models` -> `backends` -> `packages`/`tweaks`/`wsl`/`operations` -> `profiles`/`state` -> `engine`/`audit` -> `uac`/`tui`/`cli`) without enforcing brittle hard file-length limits.
+- **Done when:** `test_architectural_layer_boundaries` is active in `pytest` and `.githooks/pre-commit`.
+
