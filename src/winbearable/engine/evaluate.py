@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-from typing import Any
-
 from ..backends.registry import RegistryBackend, expand_registry_spec
 from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
@@ -27,11 +24,6 @@ from .params import (
     make_check_result,
     resolve_tweak_params,
 )
-
-
-def _eng_expand(name: str, default_fn: Any) -> Any:
-    pkg_mod = sys.modules.get("winbearable.engine")
-    return getattr(pkg_mod, name, default_fn) if pkg_mod is not None else default_fn
 
 
 def _inspect_registry_specs(

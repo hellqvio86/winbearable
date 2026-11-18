@@ -213,6 +213,13 @@ def validate_catalog(catalog: dict[str, TweakDefinition]) -> list[str]:
             errors.append(f"{tweak.tweak_id}: max_build {tweak.max_build} < min_build {tweak.min_build}")
         if not tweak.tested_builds:
             errors.append(f"{tweak.tweak_id}: tested_builds must be non-empty")
+        elif any(b < MIN_SUPPORTED_BUILD for b in tweak.tested_builds):
+            errors.append(f"{tweak.tweak_id}: tested_builds contains unsupported build < {MIN_SUPPORTED_BUILD}")
+        if "." in tweak.tweak_id and tweak.tweak_id.split(".", 1)[0] != tweak.category:
+            errors.append(
+                f"{tweak.tweak_id}: tweak_id prefix {tweak.tweak_id.split('.', 1)[0]!r} "
+                f"does not match category {tweak.category!r}"
+            )
 
         _validate_provenance(tweak, errors)
         _validate_operations(tweak, errors, seen_reg, seen_svc, seen_tasks, seen_features)

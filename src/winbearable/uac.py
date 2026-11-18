@@ -9,6 +9,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+if sys.platform == "win32":
+    import msvcrt
+else:
+    msvcrt = None  # type: ignore[assignment]
+
 from .const import ERROR_CANCELLED as ERROR_CANCELLED
 from .const import (
     WAIT_FAILED,
@@ -56,6 +61,17 @@ class _ShellExecuteInfoW(ctypes.Structure):
     ]
 
 
+def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
+    """Remove Python import/runtime injection variables in an elevated child environment."""
+    target_env = env if env is not None else os.environ
+    removed: list[str] = []
+    for var in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP"):
+        if var in target_env:
+            del target_env[var]
+            removed.append(var)
+    return removed
+
+
 def build_elevated_cmdline_args(argv: list[str], uac_output_path: Path) -> list[str]:
     """Strip --elevate / prior --uac-output flags and append the capture output path."""
     cleaned: list[str] = []
@@ -98,6 +114,19 @@ def _configure_win32_signatures(shell32: Any, kernel32: Any) -> None:
     kernel32.SetConsoleTitleW.argtypes = [ctypes.c_wchar_p]
     kernel32.SetConsoleTitleW.restype = ctypes.c_int
 
+    if hasattr(kernel32, "GetSystemDirectoryW"):
+        kernel32.GetSystemDirectoryW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+        kernel32.GetSystemDirectoryW.restype = ctypes.c_uint
+
+    if hasattr(kernel32, "GetFinalPathNameByHandleW"):
+        kernel32.GetFinalPathNameByHandleW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        kernel32.GetFinalPathNameByHandleW.restype = ctypes.c_ulong
+
 
 def _get_win32_dlls(windll_override: Any = None) -> tuple[Any, Any]:
     if windll_override is not None:
@@ -137,6 +166,14 @@ def _is_wb_launcher(path: Path) -> bool:
     return path.name.lower() in {"wb.exe", "winbearable.exe", "wb", "winbearable"}
 
 
+def _validate_elevation_executable(path: Path) -> Path:
+    """Resolve *path* and reject symlinks/reparse points on the target or its ancestors."""
+    resolved = path.resolve()
+    if _is_reparse_or_symlink(path) or any(_is_reparse_or_symlink(p) for p in path.parents):
+        raise UacElevationError(f"Refusing elevation target with symlink or reparse point: {path}")
+    return resolved
+
+
 def resolve_elevation_target(
     elevated_args: list[str],
     executable: str | None = None,
@@ -148,12 +185,12 @@ def resolve_elevation_target(
     so Windows UAC displays `wb.exe` / `winbearable` instead of `Python`.
     """
     if executable is not None:
-        target = Path(executable).resolve()
+        target = _validate_elevation_executable(Path(executable))
         args = elevated_args if _is_wb_launcher(target) else ["-I", "-m", "winbearable", *elevated_args]
         return str(target), args
 
     if getattr(sys, "frozen", False):
-        return str(Path(sys.executable).resolve()), elevated_args
+        return str(_validate_elevation_executable(Path(sys.executable))), elevated_args
 
     raw_argv0 = argv0 if argv0 is not None else (sys.argv[0] if sys.argv else "")
     if raw_argv0:
@@ -163,13 +200,13 @@ def resolve_elevation_target(
             and argv0_path.name.lower() in {"wb.exe", "winbearable.exe"}
             and argv0_path.is_file()
         ):
-            return str(argv0_path.resolve()), elevated_args
+            return str(_validate_elevation_executable(argv0_path)), elevated_args
 
     sibling_wb = Path(sys.executable).resolve().with_name("wb.exe")
     if sibling_wb.is_file():
-        return str(sibling_wb), elevated_args
+        return str(_validate_elevation_executable(sibling_wb)), elevated_args
 
-    return str(Path(sys.executable).resolve()), ["-I", "-m", "winbearable", *elevated_args]
+    return str(_validate_elevation_executable(Path(sys.executable))), ["-I", "-m", "winbearable", *elevated_args]
 
 
 def set_console_title(title: str = "winbearable", windll_override: Any = None) -> bool:
@@ -198,8 +235,48 @@ def _is_reparse_or_symlink(path: Path) -> bool:
     return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
+def _verify_opened_handle_path(fd: int, expected_path: Path) -> None:
+    """Verify via GetFinalPathNameByHandleW on Windows that *fd* was not redirected via TOCTOU."""
+    if sys.platform != "win32" or msvcrt is None:
+        return
+    windll_factory = getattr(ctypes, "WinDLL", None)
+    if windll_factory is None:
+        return
+    kernel32 = windll_factory("kernel32", use_last_error=True)
+    if not hasattr(kernel32, "GetFinalPathNameByHandleW"):
+        return
+    kernel32.GetFinalPathNameByHandleW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    kernel32.GetFinalPathNameByHandleW.restype = ctypes.c_ulong
+    handle = msvcrt.get_osfhandle(fd)
+    buf = ctypes.create_unicode_buffer(1024)
+    length = int(kernel32.GetFinalPathNameByHandleW(handle, buf, len(buf), 0))
+    if length == 0 or length >= len(buf):
+        raise UacElevationError(f"Failed to verify opened UAC output handle for {expected_path}.")
+    final_path = buf.value.removeprefix("\\\\?\\")
+    if os.path.normcase(final_path) != os.path.normcase(str(expected_path.resolve())):
+        raise UacElevationError(
+            f"UAC output handle path mismatch (possible TOCTOU): expected {expected_path}, got {final_path}"
+        )
+
+
+def _resolve_trusted_system32(kernel32: Any) -> str:
+    """Resolve System32 using Win32 GetSystemDirectoryW with environment fallback."""
+    if hasattr(kernel32, "GetSystemDirectoryW"):
+        buf = ctypes.create_unicode_buffer(260)
+        length = int(kernel32.GetSystemDirectoryW(buf, len(buf)))
+        if 0 < length < len(buf) and buf.value:
+            return buf.value
+    sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+    return f"{sys_root.rstrip('/\\')}\\System32"
+
+
 def write_uac_output_safe(out_path: Path, text: str) -> None:
-    """Safely create and write elevated child output using O_EXCL and full ancestor reparse-point checks."""
+    """Safely create and write elevated child output using O_EXCL, ancestor reparse checks, and handle verification."""
     if not out_path.parent.name.startswith("wb-uac-") or out_path.name != "uac-output.txt":
         raise UacElevationError(f"Refusing untrusted UAC output path: {out_path}")
     if _is_reparse_or_symlink(out_path) or any(_is_reparse_or_symlink(p) for p in out_path.parents):
@@ -207,6 +284,7 @@ def write_uac_output_safe(out_path: Path, text: str) -> None:
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     fd = os.open(str(out_path), flags, 0o600)
     try:
+        _verify_opened_handle_path(fd, out_path)
         with os.fdopen(fd, "wb") as handle:
             handle.write(text.encode("utf-8"))
             handle.flush()
@@ -249,9 +327,7 @@ def run_elevated_wb(
         sei.lpVerb = "runas"
         sei.lpFile = resolved_exe
         sei.lpParameters = params
-        sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
-        default_dir = f"{sys_root.rstrip('/\\')}\\System32"
-        sei.lpDirectory = cwd or default_dir
+        sei.lpDirectory = cwd or _resolve_trusted_system32(kernel32)
         sei.nShow = SW_HIDE
 
         ok = shell32.ShellExecuteExW(ctypes.byref(sei))

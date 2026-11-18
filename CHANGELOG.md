@@ -2,6 +2,27 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.16.0] - 2026-11-18
+
+### Added & Changed
+
+- **Full-Lifecycle Operation Adapters & Conflict-Aware Rollback:**
+  - Extended `OperationAdapter` from an inspect-only protocol to a full 5-method lifecycle (`inspect`, `snapshot`, `apply`, `verify`, `compensate`) with `OPERATION_ADAPTER_MAP` and `get_operation_adapter()` (failing explicitly on unknown operation kinds).
+  - Implemented `RegistryOperationAdapter`, `HypervFirewallOperationAdapter`, and full lifecycle methods across all system, package, and file adapters, eliminating duplicated per-operation orchestration loops in `engine/apply.py`.
+  - Added post-apply state tracking (`post_*`) across all mutable snapshot types (`ServiceSnapshot`, `ScheduledTaskSnapshot`, `OptionalFeatureSnapshot`, `AuditpolSnapshot`, `WevtutilSnapshot`, `FirewallGroupSnapshot`, `FsutilSnapshot`, `PowercfgSnapshot`, `GitConfigSnapshot`, `RegistryKeySnapshot`, `WslDistroSnapshot`, `wslconfig_post_sha256`, `HypervFirewallSnapshot`) for conflict-aware rollback by default (`force=True` to override).
+- **Transaction State Machine, OCC, Canonical Identity & Typed Errors:**
+  - Added `models/state_machine.py` (`validate_transaction_transition`, `validate_run_record_invariants`) enforced in `StateStore.upsert_run`.
+  - Added `models/errors.py` typed error taxonomy (`WinbearableError` and subclasses including `ExternalDriftError`, `InvalidStateTransitionError`, `UnsupportedTargetError`, `RollbackConflictError`).
+  - Added `operations/identity.py` pure canonical target identity functions and `OperationJournalEntry` structured per-operation journaling (`outcome`, `pre_fingerprint`, `post_fingerprint`, timestamps, verification status).
+  - Added optimistic concurrency precondition fingerprint verification (`expected_fingerprints`) in `apply_profile` and shared CLI/TUI command service `run_profile_command`.
+- **UAC, Win32 & Filesystem Security Hardening:**
+  - Hardened `uac.py` with `GetFinalPathNameByHandleW` TOCTOU verification, `GetSystemDirectoryW` trusted directory resolution, `sanitize_elevated_python_env()`, and symlink/reparse-point rejection on elevation targets.
+  - Moved Win32 `ReplaceFileW` into `backends/win32_fs.py` with fail-closed error handling (never silently clobbering custom DACLs via `os.replace`), preserved CRLF line endings in `merge_file_content`, and added `PlannedOperation.scope` / `requires_elevation` metadata with `summarize_elevation_requirements()`.
+  - Updated `check_listening_ports` to report partial collection (`MEDIUM` confidence) or `UNKNOWN` when `iphlpapi` queries fail.
+- **Catalog, Test Suite & CI Integrity:**
+  - Split `tweaks/categories/hardening.py` into `tweaks/categories/hardening/{credentials,defender_asr,network,execution_policy}.py`, enforced `assemble_catalog()` validation at startup, and split oversized test files by domain.
+  - Added static AST lint gates for domain OS-import isolation (`subprocess`/`ctypes`/`winreg` forbidden in domain/engine modules) and Win32 `ctypes` signature checks, plus release tag/hash verification in `.github/workflows/ci.yml`.
+
 ## [0.15.1] - 2026-11-18
 
 ### Security & Fixed

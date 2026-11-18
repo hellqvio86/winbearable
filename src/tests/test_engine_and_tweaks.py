@@ -290,14 +290,10 @@ def test_every_catalog_tweak_apply_and_revert_cycle(
     state_store: StateStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every tweak in TWEAK_CATALOG transitions DRIFTED -> APPLIED -> DRIFTED across apply/rollback."""
-    monkeypatch.setattr(
-        "winbearable.engine.expand_file_spec_path",
-        lambda tpl: tmp_path / tpl.replace("%", "").replace("\\", "_"),
-    )
-    monkeypatch.setattr(
-        "winbearable.operations.expand_file_spec_path",
-        lambda tpl: tmp_path / tpl.replace("%", "").replace("\\", "_"),
-    )
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "userprofile"))
+    monkeypatch.setenv("HOME", str(tmp_path / "userprofile"))
     registry = InMemoryRegistryBackend(
         initial_values={
             (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive"): (
@@ -414,12 +410,12 @@ def test_write_ahead_journal_and_compensation_on_failure(state_store: StateStore
     # Earlier registry mutation was compensated back to original value
     assert registry.get_value(HIVE_HKCU, run_key, "OneDrive") == ("OneDrive.exe", REG_SZ)
 
-    # Journal retains the FAILED record when compensation itself also fails
+    # Journal retains the ROLLED_BACK record when earlier registry mutation is compensated cleanly
     runs = state_store.load_runs()
     assert len(runs) == 1
-    assert runs[0].state == TransactionState.FAILED
+    assert runs[0].state == TransactionState.ROLLED_BACK
     assert runs[0].error is not None
-    assert len(state_store.get_incomplete_runs()) == 1
+    assert state_store.get_incomplete_runs() == []
 
 
 def test_irreversible_guard_and_graceful_process_stop(state_store: StateStore) -> None:

@@ -285,19 +285,19 @@ jobs:
         shell: bash
         run: |
           PKG_VER=$(PYTHONPATH=src python -c "from winbearable.const import __version__; print(__version__)")
-          if [ "${{ github.event_name }}" = "release" ]; then
-            if [ "${{ github.ref_type }}" != "tag" ]; then
-              echo "Publishing release requires a git tag ref (got ref_type=${{ github.ref_type }})"
-              exit 1
-            fi
-            if [ "${{ github.ref_name }}" != "v${PKG_VER}" ]; then
-              echo "Tag '${{ github.ref_name }}' does not match const.__version__ 'v${PKG_VER}'"
-              exit 1
-            fi
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "Publishing release requires a git tag ref (got ref_type=${{ github.ref_type }})"
+            exit 1
+          fi
+          if [ "${{ github.ref_name }}" != "v${PKG_VER}" ]; then
+            echo "Tag '${{ github.ref_name }}' does not match const.__version__ 'v${PKG_VER}'"
+            exit 1
           fi
 
-      - name: Build package
-        run: uv build
+      - name: Build and hash package
+        run: |
+          uv build
+          (cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
 
       - name: Generate SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -355,8 +355,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Build Winget portable zip
-        run: uv run --group release --frozen python bin/build_winget.py
+      - name: Build and verify Winget portable zip
+        run: |
+          uv run --group release --frozen python bin/build_winget.py
+          sha256sum -c dist/winbearable-*.zip.sha256
 
       - name: Upload Winget zip to release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3

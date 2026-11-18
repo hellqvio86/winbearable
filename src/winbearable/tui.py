@@ -8,7 +8,7 @@ from typing import Any
 
 from .backends.registry import RegistryBackend
 from .backends.system import SystemBackend
-from .engine import ApplySummary, apply_profile, evaluate_profile
+from .engine import ApplySummary, evaluate_profile, run_profile_command
 from .models import (
     EnvironmentInfo,
     ProfileSpec,
@@ -57,7 +57,7 @@ def apply_from_tui(
         raise UnsupportedPlatformError(
             f"Applying tweaks from the TUI is only supported on Windows (current OS: {env.os_name})."
         )
-    return apply_profile(
+    return run_profile_command(
         profile=profile,
         env=env,
         registry=registry,

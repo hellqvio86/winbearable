@@ -1,29 +1,29 @@
-"""Transactional pre-apply snapshots, mutation execution, compensation, and apply_profile."""
+"""Transactional pre-apply snapshots, adapter-driven mutation execution, compensation, and apply_profile."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
-import sys
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..backends.registry import RegistryBackend, expand_registry_spec
+from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
-from ..const import ACTION_DELETE, ACTION_DELETE_KEY, HIVE_HKLM
 from ..models import (
     AuditpolSnapshot,
     EnvironmentInfo,
+    ExternalDriftError,
     FileSnapshot,
     FirewallGroupSnapshot,
     FsutilSnapshot,
     GitConfigSnapshot,
     IcaclsSnapshot,
+    OperationJournalEntry,
     OperationOutcome,
     OperationStatus,
     OptionalFeatureSnapshot,
@@ -45,12 +45,13 @@ from ..models import (
     WslDistroSnapshot,
 )
 from ..operations import (
-    apply_file_spec,
+    OPERATION_ADAPTERS,
+    OperationAdapter,
+    OperationApplyContext,
     atomic_write_bytes,
-    expand_file_spec_path,
-    restore_file_snapshot,
-    snapshot_file_spec,
+    get_operation_adapter,
 )
+from ..operations.package_and_file_adapters import FileConfigOperationAdapter
 from ..state import StateStore
 from ..tweaks import get_tweak
 from ..wsl import (
@@ -58,7 +59,6 @@ from ..wsl import (
     apply_distro_wsl_conf,
     apply_wslconfig_target,
     get_wsl_distro_guid,
-    plan_or_apply_wsl,
     prepare_wsl_plan,
 )
 from .evaluate import detect_tweak, evaluate_profile
@@ -71,11 +71,6 @@ from .params import (
     capture_failure_outcome,
     resolve_tweak_params,
 )
-
-
-def _eng_attr(name: str, default_fn: Any) -> Any:
-    pkg_mod = sys.modules.get("winbearable.engine")
-    return getattr(pkg_mod, name, default_fn) if pkg_mod is not None else default_fn
 
 
 @dataclass(frozen=True)
@@ -101,8 +96,10 @@ def _collect_pre_apply_snapshots(
     system: SystemBackend,
     backup_dir: Path | None = None,
     profile_params: dict[str, dict[str, Any]] | None = None,
+    *,
+    expand_fn: Callable[[str], Path] | None = None,
 ) -> _PreApplySnapshots:
-    """Capture all pre-change snapshots for drifted tweaks before any mutation occurs."""
+    """Capture all pre-change snapshots for drifted tweaks via OperationAdapters."""
     reg_snapshots: list[RegistryValueSnapshot] = []
     reg_key_snapshots: list[RegistryKeySnapshot] = []
     svc_snapshots: list[ServiceSnapshot] = []
@@ -117,20 +114,13 @@ def _collect_pre_apply_snapshots(
     icacls_snapshots: list[IcaclsSnapshot] = []
     file_snapshots: list[FileSnapshot] = []
 
-    seen_reg_keys: set[tuple[str, str, str, str]] = set()
-    seen_del_keys: set[tuple[str, str, str]] = set()
-    seen_services: set[str] = set()
-    seen_tasks: set[str] = set()
-    seen_features: set[str] = set()
-    seen_auditpol: set[str] = set()
-    seen_wevtutil: set[str] = set()
-    seen_fw: set[str] = set()
-    seen_fsutil: set[str] = set()
-    seen_powercfg = False
-    seen_git: set[str] = set()
-    seen_files: set[str] = set()
-    auditpol_backed_up = False
-    fw_exported = False
+    seen_ids: set[str] = set()
+    adapters: list[OperationAdapter] = [
+        FileConfigOperationAdapter(expand_fn=expand_fn)
+        if isinstance(a, FileConfigOperationAdapter) and expand_fn is not None
+        else a
+        for a in OPERATION_ADAPTERS
+    ]
 
     for res in evaluations:
         if res.status != TweakStatus.DRIFTED:
@@ -139,128 +129,34 @@ def _collect_pre_apply_snapshots(
             get_tweak(res.tweak_id),
             profile_params.get(res.tweak_id) if profile_params else None,
         )
-        for raw_spec in tweak.registry_specs:
-            for reg_spec in expand_registry_spec(raw_spec, registry):
-                if reg_spec.action == ACTION_DELETE_KEY:
-                    del_id = (reg_spec.hive, reg_spec.key_path, str(reg_spec.view))
-                    if del_id not in seen_del_keys:
-                        reg_key_snapshots.append(
-                            registry.snapshot_key(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)
-                        )
-                        seen_del_keys.add(del_id)
-                else:
-                    reg_id = (reg_spec.hive, reg_spec.key_path, reg_spec.value_name, str(reg_spec.view))
-                    if reg_id not in seen_reg_keys:
-                        reg_snapshots.append(
-                            registry.snapshot_value(
-                                reg_spec.hive, reg_spec.key_path, reg_spec.value_name, view=reg_spec.view
-                            )
-                        )
-                        seen_reg_keys.add(reg_id)
-        for svc_spec in tweak.service_specs:
-            if svc_spec.service_name not in seen_services:
-                svc_state, prev_start = system.get_service_state(registry, svc_spec.service_name)
-                if svc_state == "absent":
-                    seen_services.add(svc_spec.service_name)
-                    continue
-                if svc_state == "unreadable":
-                    raise RuntimeError(f"Service '{svc_spec.service_name}' has unreadable Start type.")
-                svc_snapshots.append(
-                    ServiceSnapshot(service_name=svc_spec.service_name, previous_start_type=prev_start)
-                )
-                seen_services.add(svc_spec.service_name)
-        for task_spec in tweak.task_specs:
-            if task_spec.task_path not in seen_tasks:
-                prev_enabled = system.is_scheduled_task_enabled(task_spec.task_path)
-                task_snapshots.append(
-                    ScheduledTaskSnapshot(task_path=task_spec.task_path, previous_enabled=prev_enabled)
-                )
-                seen_tasks.add(task_spec.task_path)
-        for feat_spec in tweak.feature_specs:
-            if feat_spec.feature_name not in seen_features:
-                prev_feat = system.is_optional_feature_enabled(feat_spec.feature_name)
-                feat_snapshots.append(
-                    OptionalFeatureSnapshot(feature_name=feat_spec.feature_name, previous_enabled=prev_feat)
-                )
-                seen_features.add(feat_spec.feature_name)
-        for ap_spec in tweak.auditpol_specs:
-            if ap_spec.subcategory_guid not in seen_auditpol:
-                bak_csv: str | None = str(backup_dir / "auditpol_backup.csv") if backup_dir is not None else None
-                if bak_csv is not None and not auditpol_backed_up:
-                    if not system.backup_auditpol(Path(bak_csv)):
-                        bak_csv = None
-                    else:
-                        auditpol_backed_up = True
-                elif bak_csv is not None and not Path(bak_csv).is_file():
-                    bak_csv = None
-                prev_ap = system.get_auditpol_subcategory(ap_spec.subcategory_guid)
-                auditpol_snapshots.append(
-                    AuditpolSnapshot(
-                        subcategory_guid=ap_spec.subcategory_guid,
-                        previous_setting=prev_ap,
-                        backup_csv_path=bak_csv,
-                    )
-                )
-                seen_auditpol.add(ap_spec.subcategory_guid)
-        for w_spec in tweak.wevtutil_specs:
-            if w_spec.channel not in seen_wevtutil:
-                prev_en, prev_sz = system.get_event_log_config(w_spec.channel)
-                wevtutil_snapshots.append(
-                    WevtutilSnapshot(
-                        channel=w_spec.channel,
-                        previous_enabled=prev_en,
-                        previous_max_size_bytes=prev_sz,
-                    )
-                )
-                seen_wevtutil.add(w_spec.channel)
-        for fw_spec in tweak.firewall_group_specs:
-            if fw_spec.group_resource_id not in seen_fw:
-                wfw_path: str | None = str(backup_dir / "firewall_backup.wfw") if backup_dir is not None else None
-                if wfw_path is not None and not fw_exported:
-                    if not system.export_firewall_policy(Path(wfw_path)):
-                        wfw_path = None
-                    else:
-                        fw_exported = True
-                elif wfw_path is not None and not Path(wfw_path).is_file():
-                    wfw_path = None
-                prev_fw = system.is_firewall_group_enabled(registry, fw_spec.group_resource_id)
-                fw_snapshots.append(
-                    FirewallGroupSnapshot(
-                        group_resource_id=fw_spec.group_resource_id,
-                        previous_enabled=prev_fw,
-                        export_wfw_path=wfw_path,
-                    )
-                )
-                seen_fw.add(fw_spec.group_resource_id)
-        for fs_spec in tweak.fsutil_specs:
-            if fs_spec.directory not in seen_fsutil:
-                prev_cs = system.is_dir_case_sensitive(fs_spec.directory)
-                fsutil_snapshots.append(FsutilSnapshot(directory=fs_spec.directory, previous_enabled=prev_cs))
-                seen_fsutil.add(fs_spec.directory)
-        if tweak.powercfg_specs and not seen_powercfg:
-            prev_hib = system.is_hibernate_enabled(registry)
-            powercfg_snapshots.append(PowercfgSnapshot(previous_enabled=prev_hib))
-            seen_powercfg = True
-        for git_spec in tweak.git_config_specs:
-            if git_spec.key not in seen_git:
-                prev_git = system.get_git_global_config(git_spec.key)
-                git_snapshots.append(
-                    GitConfigSnapshot(key=git_spec.key, existed=prev_git is not None, previous_value=prev_git)
-                )
-                seen_git.add(git_spec.key)
-        for f_spec in tweak.file_specs:
-            expanded = str(_eng_attr("expand_file_spec_path", expand_file_spec_path)(f_spec.path_template))
-            if expanded not in seen_files:
-                file_snapshots.append(snapshot_file_spec(f_spec))
-                seen_files.add(expanded)
-        for ic_idx, ic_spec in enumerate(tweak.icacls_specs):
-            if not any(snap.path_template == ic_spec.path_template for snap in icacls_snapshots):
-                acl_bak: str | None = (
-                    str(backup_dir / f"icacls_{len(icacls_snapshots)}_{ic_idx}.acl") if backup_dir else None
-                )
-                if acl_bak is not None and not system.backup_acl(ic_spec.path_template, Path(acl_bak)):
-                    raise RuntimeError(f"Failed to back up ACL for '{ic_spec.path_template}'.")
-                icacls_snapshots.append(IcaclsSnapshot(path_template=ic_spec.path_template, backup_acl_path=acl_bak))
+        for adapter in adapters:
+            for snap in adapter.snapshot(tweak, registry, system, backup_dir, seen_ids):
+                if isinstance(snap, RegistryValueSnapshot):
+                    reg_snapshots.append(snap)
+                elif isinstance(snap, RegistryKeySnapshot):
+                    reg_key_snapshots.append(snap)
+                elif isinstance(snap, ServiceSnapshot):
+                    svc_snapshots.append(snap)
+                elif isinstance(snap, ScheduledTaskSnapshot):
+                    task_snapshots.append(snap)
+                elif isinstance(snap, OptionalFeatureSnapshot):
+                    feat_snapshots.append(snap)
+                elif isinstance(snap, AuditpolSnapshot):
+                    auditpol_snapshots.append(snap)
+                elif isinstance(snap, WevtutilSnapshot):
+                    wevtutil_snapshots.append(snap)
+                elif isinstance(snap, FirewallGroupSnapshot):
+                    fw_snapshots.append(snap)
+                elif isinstance(snap, FsutilSnapshot):
+                    fsutil_snapshots.append(snap)
+                elif isinstance(snap, PowercfgSnapshot):
+                    powercfg_snapshots.append(snap)
+                elif isinstance(snap, GitConfigSnapshot):
+                    git_snapshots.append(snap)
+                elif isinstance(snap, IcaclsSnapshot):
+                    icacls_snapshots.append(snap)
+                elif isinstance(snap, FileSnapshot):
+                    file_snapshots.append(snap)
 
     return _PreApplySnapshots(
         registry=reg_snapshots,
@@ -279,6 +175,22 @@ def _collect_pre_apply_snapshots(
     )
 
 
+def _compute_snapshot_fingerprints(snaps: _PreApplySnapshots) -> dict[str, str]:
+    """Build a pure precondition fingerprint map for optimistic concurrency verification."""
+    fp: dict[str, str] = {}
+    for rs in snaps.registry:
+        fp[f"reg:{rs.hive}\\{rs.key_path}|{rs.view}|{rs.value_name}"] = (
+            f"{rs.previous_type}:{rs.previous_data!r}" if rs.value_existed else "absent"
+        )
+    for ks in snaps.registry_keys:
+        fp[f"regkey:{ks.hive}\\{ks.key_path}|{ks.view}"] = "present" if ks.existed else "absent"
+    for fs in snaps.files:
+        fp[f"file:{fs.path}"] = fs.sha256 or "absent"
+    for ss in snaps.services:
+        fp[f"svc:{ss.service_name}"] = str(ss.previous_start_type)
+    return fp
+
+
 def compensate_run_record(
     run_record: RunRecord,
     registry: RegistryBackend,
@@ -287,147 +199,40 @@ def compensate_run_record(
     force_rollback: bool = False,
     skip_package_uninstall: bool = False,
 ) -> list[str]:
-    """Execute compensating rollback for a RunRecord and return any error messages."""
+    """Execute conflict-aware compensating rollback for a RunRecord via OperationAdapters."""
     errors: list[str] = []
-    for reg_snap in reversed(run_record.registry_snapshots):
-        try:
-            if not force_rollback and reg_snap.post_existed is not None:
-                cur_val = registry.get_value(reg_snap.hive, reg_snap.key_path, reg_snap.value_name, view=reg_snap.view)
-                matches_post = (
-                    (cur_val is not None and cur_val[0] == reg_snap.post_data and cur_val[1] == reg_snap.post_type)
-                    if reg_snap.post_existed
-                    else (cur_val is None)
-                )
-                matches_pre = (
-                    (
-                        cur_val is not None
-                        and cur_val[0] == reg_snap.previous_data
-                        and cur_val[1] == reg_snap.previous_type
-                    )
-                    if reg_snap.value_existed
-                    else (cur_val is None)
-                )
-                if matches_pre and not matches_post:
-                    continue
-                if not matches_post:
-                    errors.append(f"restore_conflict registry {reg_snap.full_key_path} [{reg_snap.display_value_name}]")
-                    continue
-            registry.restore_snapshot(reg_snap)
-        except Exception as exc:
-            errors.append(f"registry {reg_snap.full_key_path} [{reg_snap.display_value_name}]: {exc}")
-    for key_snap in reversed(run_record.registry_key_snapshots):
-        try:
-            registry.restore_key_snapshot(key_snap)
-        except Exception as exc:
-            errors.append(f"registry_key {key_snap.hive}\\{key_snap.key_path}: {exc}")
-    for svc_snap in reversed(run_record.service_snapshots):
-        try:
-            if svc_snap.previous_start_type is not None:
-                if not system.set_service_start_type(registry, svc_snap.service_name, svc_snap.previous_start_type):
-                    errors.append(f"service {svc_snap.service_name}")
-            elif getattr(svc_snap, "created_by_run", False):
-                registry.delete_value(
-                    HIVE_HKLM, f"SYSTEM\\CurrentControlSet\\Services\\{svc_snap.service_name}", "Start"
-                )
-            else:
-                errors.append(
-                    f"service {svc_snap.service_name}: missing/unreadable previous Start type; refusing to delete"
-                )
-        except Exception as exc:
-            errors.append(f"service {svc_snap.service_name}: {exc}")
-    for task_snap in reversed(run_record.task_snapshots):
-        if task_snap.previous_enabled is not None and not system.set_scheduled_task_enabled(
-            task_snap.task_path, task_snap.previous_enabled
-        ):
-            errors.append(f"task {task_snap.task_path}")
-    for feat_snap in reversed(run_record.feature_snapshots):
-        if feat_snap.previous_enabled is not None and not system.set_optional_feature_enabled(
-            feat_snap.feature_name, feat_snap.previous_enabled
-        ):
-            errors.append(f"feature {feat_snap.feature_name}")
+    if run_record.state == TransactionState.PLANNED and not run_record.completed_operations:
+        return errors
 
-    restored_auditpol_csv: set[str] = set()
-    for ap_snap in reversed(run_record.auditpol_snapshots):
-        if restore_full_policy and ap_snap.backup_csv_path and Path(ap_snap.backup_csv_path).is_file():
-            if ap_snap.backup_csv_path not in restored_auditpol_csv:
-                if not system.restore_auditpol(Path(ap_snap.backup_csv_path)):
-                    errors.append(f"auditpol restore {ap_snap.backup_csv_path}")
-                restored_auditpol_csv.add(ap_snap.backup_csv_path)
-        elif ap_snap.previous_setting is not None:
-            low = ap_snap.previous_setting.lower()
-            if not system.set_auditpol_subcategory(ap_snap.subcategory_guid, "success" in low, "failure" in low):
-                errors.append(f"auditpol {ap_snap.subcategory_guid}")
-
-    for w_snap in reversed(run_record.wevtutil_snapshots):
-        if (w_snap.previous_enabled is not None or w_snap.previous_max_size_bytes is not None) and not (
-            system.set_event_log_config(
-                w_snap.channel,
-                enabled=w_snap.previous_enabled,
-                max_size_bytes=w_snap.previous_max_size_bytes,
+    adapter_batches: list[tuple[str, list[Any]]] = [
+        ("registry", list(run_record.registry_snapshots)),
+        ("registry", list(run_record.registry_key_snapshots)),
+        ("service", list(run_record.service_snapshots)),
+        ("scheduled_task", list(run_record.task_snapshots)),
+        ("optional_feature", list(run_record.feature_snapshots)),
+        ("auditpol", list(run_record.auditpol_snapshots)),
+        ("wevtutil", list(run_record.wevtutil_snapshots)),
+        ("firewall_group", list(run_record.firewall_group_snapshots)),
+        ("fsutil_case_sensitive", list(run_record.fsutil_snapshots)),
+        ("powercfg_hibernate", list(run_record.powercfg_snapshots)),
+        ("git_config", list(run_record.git_config_snapshots)),
+        ("icacls_acl", list(run_record.icacls_snapshots)),
+        ("hyperv_firewall", list(run_record.hyperv_firewall_snapshots)),
+        ("file_config", list(run_record.file_snapshots)),
+    ]
+    for kind, batch in adapter_batches:
+        if batch:
+            adapter = get_operation_adapter(kind)
+            errors.extend(
+                adapter.compensate(
+                    batch,
+                    registry,
+                    system,
+                    force=force_rollback,
+                    restore_full_policy=restore_full_policy,
+                    skip_package_uninstall=skip_package_uninstall,
+                )
             )
-        ):
-            errors.append(f"wevtutil {w_snap.channel}")
-
-    restored_wfw: set[str] = set()
-    for fw_snap in reversed(run_record.firewall_group_snapshots):
-        if restore_full_policy and fw_snap.export_wfw_path and Path(fw_snap.export_wfw_path).is_file():
-            if fw_snap.export_wfw_path not in restored_wfw:
-                if not system.import_firewall_policy(Path(fw_snap.export_wfw_path)):
-                    errors.append(f"firewall import {fw_snap.export_wfw_path}")
-                restored_wfw.add(fw_snap.export_wfw_path)
-        elif fw_snap.previous_enabled is not None and not system.set_firewall_group_enabled(
-            fw_snap.group_resource_id, fw_snap.previous_enabled
-        ):
-            errors.append(f"firewall_group {fw_snap.group_resource_id}")
-
-    for fs_snap in reversed(run_record.fsutil_snapshots):
-        if fs_snap.previous_enabled is not None and not system.set_dir_case_sensitive(
-            fs_snap.directory, fs_snap.previous_enabled
-        ):
-            errors.append(f"fsutil {fs_snap.directory}")
-
-    for p_snap in reversed(run_record.powercfg_snapshots):
-        if p_snap.previous_enabled is not None and not system.set_hibernate_enabled(registry, p_snap.previous_enabled):
-            errors.append("powercfg hibernate")
-
-    for g_snap in reversed(run_record.git_config_snapshots):
-        target_val = g_snap.previous_value if g_snap.existed else None
-        if not system.set_git_global_config(g_snap.key, target_val):
-            errors.append(f"git_config {g_snap.key}")
-
-    for ic_snap in reversed(run_record.icacls_snapshots):
-        if not ic_snap.backup_acl_path or not Path(ic_snap.backup_acl_path).is_file():
-            errors.append(f"icacls restore {ic_snap.path_template}: missing ACL backup")
-        elif not system.restore_acl(ic_snap.path_template, Path(ic_snap.backup_acl_path)):
-            errors.append(f"icacls restore {ic_snap.path_template}")
-
-    for hv_snap in reversed(run_record.hyperv_firewall_snapshots):
-        from ..hyperv_firewall import set_wsl_hyperv_firewall_setting
-
-        if hv_snap.previous_enabled is not None:
-            hv_res = set_wsl_hyperv_firewall_setting(
-                enabled=hv_snap.previous_enabled,
-                default_inbound=hv_snap.previous_inbound or "NotConfigured",
-                default_outbound=hv_snap.previous_outbound or "NotConfigured",
-                dry_run=False,
-            )
-            if hv_res.get("returncode", 1) != 0:
-                errors.append(f"hyperv_firewall restore {hv_snap.vm_creator_id}: {hv_res.get('error')}")
-
-    for f_snap in reversed(run_record.file_snapshots):
-        try:
-            if not force_rollback and f_snap.post_sha256 is not None:
-                cur_path = Path(f_snap.path)
-                cur_sha = hashlib.sha256(cur_path.read_bytes()).hexdigest() if cur_path.is_file() else None
-                matches_pre_file = (cur_sha == f_snap.sha256) if f_snap.existed else (not cur_path.is_file())
-                if matches_pre_file and cur_sha != f_snap.post_sha256:
-                    continue
-                if cur_sha != f_snap.post_sha256:
-                    errors.append(f"restore_conflict file {f_snap.path}")
-                    continue
-            restore_file_snapshot(f_snap)
-        except Exception as exc:
-            errors.append(f"file {f_snap.path}: {exc}")
 
     if not skip_package_uninstall:
         for ext_id in reversed(run_record.installed_vscode_extensions):
@@ -436,17 +241,32 @@ def compensate_run_record(
         for pkg_id in reversed(run_record.installed_winget_packages):
             if not system.uninstall_winget_package(pkg_id) or system.is_winget_package_installed(pkg_id):
                 errors.append(f"winget {pkg_id}")
+
     if run_record.wslconfig_path:
         try:
             target_cfg = Path(run_record.wslconfig_path)
-            if run_record.wslconfig_existed is False:
-                target_cfg.unlink(missing_ok=True)
-            elif run_record.wsl_backup_path:
-                bak = Path(run_record.wsl_backup_path)
-                if bak.is_file():
-                    atomic_write_bytes(target_cfg, bak.read_bytes())
+            has_conflict = False
+            if not force_rollback and run_record.wslconfig_post_sha256 is not None:
+                cur_sha = hashlib.sha256(target_cfg.read_bytes()).hexdigest() if target_cfg.is_file() else None
+                pre_sha: str | None = None
+                if run_record.wslconfig_existed and run_record.wsl_backup_path:
+                    bak = Path(run_record.wsl_backup_path)
+                    if bak.is_file():
+                        pre_sha = hashlib.sha256(bak.read_bytes()).hexdigest()
+                matches_pre = (cur_sha is None) if run_record.wslconfig_existed is False else (cur_sha == pre_sha)
+                if not matches_pre and cur_sha != run_record.wslconfig_post_sha256:
+                    errors.append(f"restore_conflict wslconfig {run_record.wslconfig_path}")
+                    has_conflict = True
+            if not has_conflict:
+                if run_record.wslconfig_existed is False:
+                    target_cfg.unlink(missing_ok=True)
+                elif run_record.wsl_backup_path:
+                    bak = Path(run_record.wsl_backup_path)
+                    if bak.is_file():
+                        atomic_write_bytes(target_cfg, bak.read_bytes())
         except OSError as exc:
             errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
+
     for d_snap in reversed(run_record.wsl_distro_snapshots):
         if d_snap.distro_guid is not None:
             cur_guid = get_wsl_distro_guid(d_snap.distro, registry)
@@ -455,6 +275,19 @@ def compensate_run_record(
                     f"wsl distro '{d_snap.distro}' identity mismatch (expected {d_snap.distro_guid}, got {cur_guid})"
                 )
                 continue
+        if not force_rollback and d_snap.post_sha256 is not None:
+            probe = system.run_wsl_command(["-d", d_snap.distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
+            if probe.returncode == 0:
+                cur_content = probe.stdout
+                cur_sha = hashlib.sha256(cur_content.encode("utf-8")).hexdigest()
+                pre_sha = (
+                    hashlib.sha256(d_snap.previous_content.encode("utf-8")).hexdigest() if d_snap.existed else None
+                )
+                if cur_sha == pre_sha and cur_sha != d_snap.post_sha256:
+                    continue
+                if cur_sha != d_snap.post_sha256:
+                    errors.append(f"restore_conflict wsl_distro {d_snap.distro}")
+                    continue
         if d_snap.existed:
             res = system.run_wsl_command(
                 ["-d", d_snap.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
@@ -483,221 +316,54 @@ def execute_tweak_mutations(
     file_hashes: dict[str, str | None] | None = None,
     file_exists: dict[str, bool] | None = None,
     allow_managed: bool = True,
-) -> None:
-    """Apply all operations for a single tweak, raising RuntimeError on any failure."""
+    *,
+    expand_fn: Callable[[str], Path] | None = None,
+    journal_cb: Callable[[OperationJournalEntry], None] | None = None,
+) -> list[OperationJournalEntry]:
+    """Apply all operations for a single tweak through registered OperationAdapters."""
+    ctx = OperationApplyContext(
+        backup_dir=backup_dir,
+        exported_subtrees=exported_subtrees,
+        newly_installed_winget=newly_installed_winget,
+        newly_installed_extensions=newly_installed_extensions,
+        force_kill_processes=force_kill_processes,
+        allow_managed=allow_managed,
+        file_hashes=dict(file_hashes) if file_hashes else {},
+        file_exists=dict(file_exists) if file_exists else {},
+        checkpoint_cb=checkpoint_cb,
+        journal_cb=journal_cb,
+    )
+    ordered_kinds = (
+        "process_stop",
+        "registry",
+        "service",
+        "scheduled_task",
+        "optional_feature",
+        "winget_package",
+        "auditpol",
+        "wevtutil",
+        "firewall_group",
+        "fsutil_case_sensitive",
+        "powercfg_hibernate",
+        "git_config",
+        "icacls_acl",
+        "file_config",
+        "onedrive_uninstall",
+    )
+    entries: list[OperationJournalEntry] = []
+    for kind in ordered_kinds:
+        adapter: OperationAdapter = get_operation_adapter(kind)
+        if kind == "file_config" and expand_fn is not None:
+            adapter = FileConfigOperationAdapter(expand_fn=expand_fn)
+        try:
+            entries.extend(adapter.apply(tweak, env, registry, system, ctx))
+        except Exception as exc:
+            outcome = capture_failure_outcome(system, str(exc))
+            raise TweakMutationError(outcome) from exc
 
-    def _ckpt(op_desc: str) -> None:
-        if checkpoint_cb is not None:
-            checkpoint_cb(op_desc)
-
-    for proc_name in tweak.stop_processes:
-        if system.is_process_running(proc_name) and not system.stop_process(proc_name, force=force_kill_processes):
-            raise TweakMutationError(
-                capture_failure_outcome(
-                    system,
-                    f"Failed to stop process '{proc_name}' gracefully (pass --force-kill to force termination).",
-                )
-            )
-        _ckpt(f"{tweak.tweak_id}:process_stop:{proc_name}")
-
-    for raw_spec in tweak.registry_specs:
-        for reg_spec in expand_registry_spec(raw_spec, registry):
-            subtree = (reg_spec.hive, reg_spec.key_path, reg_spec.view)
-            if (
-                tweak.requires_admin
-                and subtree not in exported_subtrees
-                and registry.key_exists(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)
-            ):
-                sanitized = re.sub(r'[\\/:*?"<>|]+', "_", reg_spec.key_path).strip("_")
-                if len(sanitized) > 100:
-                    key_digest = hashlib.sha256(reg_spec.key_path.encode("utf-8")).hexdigest()[:8]
-                    sanitized = f"{sanitized[:90]}_{key_digest}"
-                view_tag = f"_{reg_spec.view}" if reg_spec.view != RegistryView.DEFAULT else ""
-                if not system.export_registry_backup(
-                    reg_spec.hive,
-                    reg_spec.key_path,
-                    backup_dir / f"{reg_spec.hive}_{sanitized}{view_tag}.reg",
-                    view=reg_spec.view,
-                ):
-                    raise TweakMutationError(
-                        capture_failure_outcome(
-                            system,
-                            f"Failed to export registry backup for {reg_spec.hive}\\{reg_spec.key_path}.",
-                        )
-                    )
-                exported_subtrees.add(subtree)
-
-            if reg_spec.action == ACTION_DELETE_KEY:
-                registry.delete_key(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)
-                _ckpt(f"{tweak.tweak_id}:registry_key_delete:{reg_spec.hive}\\{reg_spec.key_path}")
-            elif reg_spec.action == ACTION_DELETE:
-                registry.delete_value(reg_spec.hive, reg_spec.key_path, reg_spec.value_name, view=reg_spec.view)
-                _ckpt(f"{tweak.tweak_id}:registry:{reg_spec.hive}\\{reg_spec.key_path}\\{reg_spec.value_name}")
-            else:
-                registry.set_value(
-                    hive=reg_spec.hive,
-                    key_path=reg_spec.key_path,
-                    value_name=reg_spec.value_name,
-                    value_data=reg_spec.value_data,
-                    value_type=reg_spec.value_type,
-                    view=reg_spec.view,
-                )
-                _ckpt(f"{tweak.tweak_id}:registry:{reg_spec.hive}\\{reg_spec.key_path}\\{reg_spec.value_name}")
-
-    for svc_spec in tweak.service_specs:
-        svc_state, _ = system.get_service_state(registry, svc_spec.service_name)
-        if svc_state == "absent":
-            _ckpt(f"{tweak.tweak_id}:service_skip_absent:{svc_spec.service_name}")
-            continue
-        if not system.set_service_start_type(registry, svc_spec.service_name, svc_spec.start_type):
-            raise TweakMutationError(
-                capture_failure_outcome(
-                    system,
-                    f"Failed to configure service '{svc_spec.service_name}' start_type={svc_spec.start_type}.",
-                )
-            )
-        _ckpt(f"{tweak.tweak_id}:service:{svc_spec.service_name}")
-
-    for task_spec in tweak.task_specs:
-        if not system.set_scheduled_task_enabled(task_spec.task_path, task_spec.enabled):
-            raise TweakMutationError(
-                capture_failure_outcome(
-                    system,
-                    f"Failed to set scheduled task '{task_spec.task_path}' enabled={task_spec.enabled}.",
-                )
-            )
-        _ckpt(f"{tweak.tweak_id}:task:{task_spec.task_path}")
-
-    for feat_spec in tweak.feature_specs:
-        if not system.set_optional_feature_enabled(feat_spec.feature_name, feat_spec.enabled):
-            raise TweakMutationError(
-                capture_failure_outcome(
-                    system,
-                    f"Failed to set optional feature '{feat_spec.feature_name}' enabled={feat_spec.enabled}.",
-                )
-            )
-        _ckpt(f"{tweak.tweak_id}:feature:{feat_spec.feature_name}")
-
-    ext_skipped_elevated = False
-    for winget_spec in tweak.winget_specs:
-        if winget_spec.action == "uninstall":
-            if system.is_winget_package_installed(winget_spec.package_id):
-                if not system.uninstall_winget_package(winget_spec.package_id):
-                    raise TweakMutationError(
-                        capture_failure_outcome(
-                            system, f"Failed to uninstall winget package '{winget_spec.package_id}'."
-                        )
-                    )
-                _ckpt(f"{tweak.tweak_id}:winget_uninstall:{winget_spec.package_id}")
-            continue
-        if not system.is_winget_package_installed(winget_spec.package_id):
-            if not system.install_winget_package(
-                package_id=winget_spec.package_id,
-                scope=winget_spec.scope,
-                vscode_extensions=(),
-            ):
-                raise TweakMutationError(
-                    capture_failure_outcome(system, f"Failed to install winget package '{winget_spec.package_id}'.")
-                )
-            newly_installed_winget.append(winget_spec.package_id)
-            _ckpt(f"{tweak.tweak_id}:winget:{winget_spec.package_id}")
-        for ext in winget_spec.vscode_extensions:
-            if not system.is_vscode_extension_installed(ext):
-                if not system.install_vscode_extension(ext):
-                    last_out = getattr(system, "last_outcome", None)
-                    if (
-                        last_out is not None
-                        and last_out.status == OperationStatus.ACCESS_DENIED
-                        and "user-writable" in last_out.message
-                    ):
-                        ext_skipped_elevated = True
-                        _ckpt(f"{tweak.tweak_id}:vscode_ext:{ext}:skipped_elevated")
-                        continue
-                    raise TweakMutationError(
-                        capture_failure_outcome(
-                            system,
-                            f"Failed to install VS Code extension '{ext}' for '{winget_spec.package_id}'.",
-                        )
-                    )
-                newly_installed_extensions.append(ext)
-                _ckpt(f"{tweak.tweak_id}:vscode_ext:{ext}")
-
-    for ap_spec in tweak.auditpol_specs:
-        if not system.set_auditpol_subcategory(ap_spec.subcategory_guid, ap_spec.success, ap_spec.failure):
-            raise TweakMutationError(
-                capture_failure_outcome(system, f"Failed to set auditpol subcategory {ap_spec.subcategory_guid}.")
-            )
-        _ckpt(f"{tweak.tweak_id}:auditpol:{ap_spec.subcategory_guid}")
-
-    for w_spec in tweak.wevtutil_specs:
-        if not system.set_event_log_config(
-            w_spec.channel,
-            enabled=w_spec.enabled,
-            max_size_bytes=w_spec.max_size_bytes,
-        ):
-            raise TweakMutationError(
-                capture_failure_outcome(system, f"Failed to configure event log '{w_spec.channel}'.")
-            )
-        _ckpt(f"{tweak.tweak_id}:wevtutil:{w_spec.channel}")
-
-    for fw_spec in tweak.firewall_group_specs:
-        if not system.set_firewall_group_enabled(fw_spec.group_resource_id, fw_spec.enabled):
-            raise TweakMutationError(
-                capture_failure_outcome(
-                    system,
-                    f"Failed to set firewall group '{fw_spec.group_resource_id}' enabled={fw_spec.enabled}.",
-                )
-            )
-        _ckpt(f"{tweak.tweak_id}:firewall_group:{fw_spec.group_resource_id}")
-
-    for fs_spec in tweak.fsutil_specs:
-        if not system.set_dir_case_sensitive(fs_spec.directory, fs_spec.enabled):
-            raise TweakMutationError(
-                capture_failure_outcome(
-                    system,
-                    f"Failed to set NTFS case sensitivity on '{fs_spec.directory}' to {fs_spec.enabled}.",
-                )
-            )
-        _ckpt(f"{tweak.tweak_id}:fsutil:{fs_spec.directory}")
-
-    for p_spec in tweak.powercfg_specs:
-        if not system.set_hibernate_enabled(registry, p_spec.enabled):
-            raise TweakMutationError(
-                capture_failure_outcome(system, f"Failed to set hibernation enabled={p_spec.enabled}.")
-            )
-        _ckpt(f"{tweak.tweak_id}:powercfg:hibernate={p_spec.enabled}")
-
-    if tweak.git_config_specs and system.git_installed:
-        for g_spec in tweak.git_config_specs:
-            if not system.set_git_global_config(g_spec.key, g_spec.value):
-                raise TweakMutationError(
-                    capture_failure_outcome(system, f"Failed to set git config --global {g_spec.key}.")
-                )
-            _ckpt(f"{tweak.tweak_id}:git_config:{g_spec.key}")
-
-    for ic_spec in tweak.icacls_specs:
-        if not system.restrict_acl_to_current_user(ic_spec.path_template):
-            raise TweakMutationError(
-                capture_failure_outcome(system, f"Failed to restrict ACL on '{ic_spec.path_template}'.")
-            )
-        _ckpt(f"{tweak.tweak_id}:icacls:{ic_spec.path_template}")
-
-    for f_spec in tweak.file_specs:
-        target_str = str(_eng_attr("expand_file_spec_path", expand_file_spec_path)(f_spec.path_template))
-        expected_sha = file_hashes.get(target_str) if file_hashes is not None else None
-        expected_existed = file_exists.get(target_str) if file_exists is not None else None
-        apply_file_spec(f_spec, expected_sha256=expected_sha, expected_existed=expected_existed)
-        _ckpt(f"{tweak.tweak_id}:file_config:{target_str}")
-
-    if tweak.uninstall_onedrive:
-        if not system.uninstall_onedrive_client():
-            raise TweakMutationError(capture_failure_outcome(system, "Failed to uninstall OneDrive client."))
-        _ckpt(f"{tweak.tweak_id}:onedrive_uninstall")
-
+    ext_skipped_elevated = any(e.operation_type == "vscode_extension" and e.outcome == "skipped" for e in entries)
     post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
-    if post_check.status != TweakStatus.APPLIED and not (
-        tweak.winget_specs and "ext_skipped_elevated" in locals() and locals()["ext_skipped_elevated"]
-    ):
+    if post_check.status != TweakStatus.APPLIED and not (tweak.winget_specs and ext_skipped_elevated):
         raise TweakMutationError(
             OperationOutcome(
                 status=OperationStatus.UNKNOWN,
@@ -706,6 +372,7 @@ def execute_tweak_mutations(
                 ),
             )
         )
+    return entries
 
 
 def require_native_backends(
@@ -738,10 +405,13 @@ def apply_profile(
     only_ids: set[str] | None = None,
     skip_ids: set[str] | None = None,
     category_filter: str | None = None,
+    *,
+    expected_fingerprints: dict[str, str] | None = None,
+    expand_fn: Callable[[str], Path] | None = None,
+    wsl_planner: Callable[..., Any] | None = None,
+    wsl_applier: Callable[..., Any] | None = None,
 ) -> ApplySummary:
     """Plan or apply a profile with a write-ahead transaction journal and rollback on failure."""
-    from contextlib import nullcontext
-
     if not dry_run:
         if not env.is_windows:
             raise UnsupportedPlatformError(f"Applying tweaks is only supported on Windows (current OS: {env.os_name}).")
@@ -764,6 +434,10 @@ def apply_profile(
             only_ids=only_ids,
             skip_ids=skip_ids,
             category_filter=category_filter,
+            expected_fingerprints=expected_fingerprints,
+            expand_fn=expand_fn,
+            wsl_planner=wsl_planner,
+            wsl_applier=wsl_applier,
         )
 
 
@@ -782,6 +456,11 @@ def _apply_profile_locked(
     only_ids: set[str] | None = None,
     skip_ids: set[str] | None = None,
     category_filter: str | None = None,
+    *,
+    expected_fingerprints: dict[str, str] | None = None,
+    expand_fn: Callable[[str], Path] | None = None,
+    wsl_planner: Callable[..., Any] | None = None,
+    wsl_applier: Callable[..., Any] | None = None,
 ) -> ApplySummary:
     if not dry_run:
         incomplete = state_store.get_incomplete_runs()
@@ -854,338 +533,427 @@ def _apply_profile_locked(
     run_id: str | None = None
     wsl_result: dict[str, Any] | None = None
     if not dry_run and (drifted_indices or (profile.wsl.enabled and env.wsl_installed)):
-        from contextlib import nullcontext
+        run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+        backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
+        snaps = _collect_pre_apply_snapshots(
+            evaluations,
+            registry,
+            system,
+            backup_dir=backup_dir,
+            profile_params=profile.params,
+            expand_fn=expand_fn,
+        )
+        live_fingerprints = _compute_snapshot_fingerprints(snaps)
+        if expected_fingerprints is not None:
+            for key, expected_fp in expected_fingerprints.items():
+                if key in live_fingerprints and live_fingerprints[key] != expected_fp:
+                    raise ExternalDriftError(
+                        f"Precondition drift detected before apply for '{key}': "
+                        f"expected {expected_fp!r}, got {live_fingerprints[key]!r}. Re-run `wb plan`.",
+                        context={"target_id": key, "expected": expected_fp, "actual": live_fingerprints[key]},
+                    )
 
-        with nullcontext():  # transaction_lock already held by apply_profile
-            run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
-            backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
-            snaps = _collect_pre_apply_snapshots(
-                evaluations, registry, system, backup_dir=backup_dir, profile_params=profile.params
+        file_hashes = {fs.path: fs.sha256 for fs in snaps.files}
+        file_exists = {fs.path: fs.existed for fs in snaps.files}
+        newly_installed_winget: list[str] = []
+        newly_installed_extensions: list[str] = []
+        completed_ops: list[str] = []
+        failure_outcomes: list[dict[str, Any]] = []
+        journal_entries: list[OperationJournalEntry] = [
+            OperationJournalEntry(
+                target_id=f"{res.tweak_id}:{op.operation_type}:{op.target}",
+                operation_type=op.operation_type,
+                tweak_id=res.tweak_id,
+                action=op.action,
+                outcome="planned",
+                pre_fingerprint=op.before_state,
+                post_fingerprint=op.after_state,
             )
-            file_hashes = {fs.path: fs.sha256 for fs in snaps.files}
-            file_exists = {fs.path: fs.existed for fs in snaps.files}
-            newly_installed_winget: list[str] = []
-            newly_installed_extensions: list[str] = []
-            completed_ops: list[str] = []
-            failure_outcomes: list[dict[str, Any]] = []
-            wsl_backup_path: str | None = None
-            wsl_target_path: str | None = None
-            wslconfig_existed: bool | None = None
-            wsl_distro_snapshots: list[WslDistroSnapshot] = []
-            planned_ids = tuple(evaluations[idx].tweak_id for idx in drifted_indices)
-            exported_subtrees: set[tuple[str, str, RegistryView]] = set()
-            now_iso = datetime.now(tz=UTC).isoformat()
+            for idx in drifted_indices
+            for res in (evaluations[idx],)
+            for op in res.operations
+        ]
+        wsl_backup_path: str | None = None
+        wsl_target_path: str | None = None
+        wslconfig_existed: bool | None = None
+        wslconfig_post_sha256: str | None = None
+        wsl_distro_snapshots: list[WslDistroSnapshot] = []
+        planned_ids = tuple(evaluations[idx].tweak_id for idx in drifted_indices)
+        exported_subtrees: set[tuple[str, str, RegistryView]] = set()
+        now_iso = datetime.now(tz=UTC).isoformat()
 
-            def _populate_post_apply_states() -> None:
-                for i, rs in enumerate(snaps.registry):
-                    try:
-                        cur = registry.get_value(rs.hive, rs.key_path, rs.value_name, view=rs.view)
-                    except OSError:
-                        continue
-                    snaps.registry[i] = replace(
-                        rs,
-                        post_existed=cur is not None,
-                        post_data=cur[0] if cur is not None else None,
-                        post_type=cur[1] if cur is not None else None,
-                    )
-                for i, fs in enumerate(snaps.files):
-                    try:
-                        p = Path(fs.path)
-                        post_sha = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
-                    except OSError:
-                        continue
-                    snaps.files[i] = replace(fs, post_sha256=post_sha)
-
-            def _make_record(state: TransactionState, error: str | None = None) -> RunRecord:
-                if state == TransactionState.COMMITTED:
-                    _populate_post_apply_states()
-                return RunRecord(
-                    run_id=run_id_candidate,
-                    timestamp=now_iso,
-                    profile_name=profile.name,
-                    applied_tweaks=tuple(applied_ids),
-                    planned_tweaks=planned_ids,
-                    registry_snapshots=tuple(snaps.registry),
-                    registry_key_snapshots=tuple(snaps.registry_keys),
-                    service_snapshots=tuple(snaps.services),
-                    task_snapshots=tuple(snaps.tasks),
-                    feature_snapshots=tuple(snaps.features),
-                    auditpol_snapshots=tuple(snaps.auditpol),
-                    wevtutil_snapshots=tuple(snaps.wevtutil),
-                    firewall_group_snapshots=tuple(snaps.firewall_groups),
-                    fsutil_snapshots=tuple(snaps.fsutil),
-                    powercfg_snapshots=tuple(snaps.powercfg),
-                    git_config_snapshots=tuple(snaps.git_config),
-                    icacls_snapshots=tuple(snaps.icacls),
-                    file_snapshots=tuple(snaps.files),
-                    installed_winget_packages=tuple(newly_installed_winget),
-                    installed_vscode_extensions=tuple(newly_installed_extensions),
-                    completed_operations=tuple(completed_ops),
-                    failure_outcomes=tuple(failure_outcomes),
-                    wsl_backup_path=wsl_backup_path,
-                    wslconfig_path=wsl_target_path,
-                    wslconfig_existed=wslconfig_existed,
-                    wsl_distro_snapshots=tuple(wsl_distro_snapshots),
-                    state=state,
-                    error=error,
-                )
-
-            def _record_op_checkpoint(op_desc: str) -> None:
-                # Full pre-mutation snapshots are already persisted in PLANNED/APPLYING;
-                # batch completed_ops in memory and flush once per tweak to avoid write amplification.
-                completed_ops.append(op_desc)
-
-            # Write-ahead journal: persist full pre-change snapshots before any mutation.
-            if drifted_indices:
-                state_store.upsert_run(_make_record(TransactionState.PLANNED))
-                state_store.upsert_run(_make_record(TransactionState.APPLYING))
-
-            for idx in drifted_indices:
-                res = evaluations[idx]
-                tweak = resolve_tweak_params(get_tweak(res.tweak_id), profile.params.get(res.tweak_id))
+        def _populate_post_apply_states() -> None:
+            for i, rs in enumerate(snaps.registry):
                 try:
-                    execute_tweak_mutations(
-                        tweak=tweak,
-                        env=env,
-                        registry=registry,
-                        system=system,
+                    cur = registry.get_value(rs.hive, rs.key_path, rs.value_name, view=rs.view)
+                except OSError:
+                    continue
+                snaps.registry[i] = replace(
+                    rs,
+                    post_existed=cur is not None,
+                    post_data=cur[0] if cur is not None else None,
+                    post_type=cur[1] if cur is not None else None,
+                )
+            for i, fs in enumerate(snaps.files):
+                try:
+                    p = Path(fs.path)
+                    post_sha = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+                except OSError:
+                    continue
+                snaps.files[i] = replace(fs, post_sha256=post_sha)
+
+        def _make_record(state: TransactionState, error: str | None = None) -> RunRecord:
+            if state == TransactionState.COMMITTED:
+                _populate_post_apply_states()
+            return RunRecord(
+                run_id=run_id_candidate,
+                timestamp=now_iso,
+                profile_name=profile.name,
+                applied_tweaks=tuple(applied_ids),
+                planned_tweaks=planned_ids,
+                registry_snapshots=tuple(snaps.registry),
+                registry_key_snapshots=tuple(snaps.registry_keys),
+                service_snapshots=tuple(snaps.services),
+                task_snapshots=tuple(snaps.tasks),
+                feature_snapshots=tuple(snaps.features),
+                auditpol_snapshots=tuple(snaps.auditpol),
+                wevtutil_snapshots=tuple(snaps.wevtutil),
+                firewall_group_snapshots=tuple(snaps.firewall_groups),
+                fsutil_snapshots=tuple(snaps.fsutil),
+                powercfg_snapshots=tuple(snaps.powercfg),
+                git_config_snapshots=tuple(snaps.git_config),
+                icacls_snapshots=tuple(snaps.icacls),
+                file_snapshots=tuple(snaps.files),
+                installed_winget_packages=tuple(newly_installed_winget),
+                installed_vscode_extensions=tuple(newly_installed_extensions),
+                completed_operations=tuple(completed_ops),
+                failure_outcomes=tuple(failure_outcomes),
+                operation_journal=tuple(journal_entries),
+                precondition_fingerprints=live_fingerprints,
+                wsl_backup_path=wsl_backup_path,
+                wslconfig_path=wsl_target_path,
+                wslconfig_existed=wslconfig_existed,
+                wslconfig_post_sha256=wslconfig_post_sha256,
+                wsl_distro_snapshots=tuple(wsl_distro_snapshots),
+                state=state,
+                error=error,
+            )
+
+        def _record_op_checkpoint(op_desc: str) -> None:
+            completed_ops.append(op_desc)
+
+        def _record_journal_entry(entry: OperationJournalEntry) -> None:
+            for i, existing in enumerate(journal_entries):
+                if (
+                    existing.tweak_id == entry.tweak_id
+                    and existing.operation_type == entry.operation_type
+                    and existing.outcome == "planned"
+                ):
+                    journal_entries[i] = entry
+                    return
+            journal_entries.append(entry)
+
+        if drifted_indices:
+            state_store.upsert_run(_make_record(TransactionState.PLANNED))
+            state_store.upsert_run(_make_record(TransactionState.APPLYING))
+
+        for idx in drifted_indices:
+            res = evaluations[idx]
+            tweak = resolve_tweak_params(get_tweak(res.tweak_id), profile.params.get(res.tweak_id))
+            try:
+                execute_tweak_mutations(
+                    tweak=tweak,
+                    env=env,
+                    registry=registry,
+                    system=system,
+                    backup_dir=backup_dir,
+                    exported_subtrees=exported_subtrees,
+                    newly_installed_winget=newly_installed_winget,
+                    newly_installed_extensions=newly_installed_extensions,
+                    force_kill_processes=force_kill_processes,
+                    checkpoint_cb=_record_op_checkpoint,
+                    file_hashes=file_hashes,
+                    file_exists=file_exists,
+                    allow_managed=allow_managed,
+                    expand_fn=expand_fn,
+                    journal_cb=_record_journal_entry,
+                )
+            except Exception as exc:
+                err_msg = str(exc)
+                outcome = (
+                    exc.outcome if isinstance(exc, TweakMutationError) else capture_failure_outcome(system, err_msg)
+                )
+                failed_ids.append(res.tweak_id)
+                failure_outcomes.append({"tweak_id": res.tweak_id, **outcome.to_dict()})
+                journal_entries.append(
+                    OperationJournalEntry(
+                        target_id=f"{res.tweak_id}:tweak",
+                        operation_type="tweak",
+                        tweak_id=res.tweak_id,
+                        action="apply",
+                        outcome="failed",
+                        error_category=str(outcome.status),
+                        error_message=err_msg,
+                        started_at=now_iso,
+                        ended_at=datetime.now(tz=UTC).isoformat(),
+                    )
+                )
+                final_results[idx] = replace(
+                    res,
+                    status=TweakStatus.ERROR,
+                    detail=err_msg,
+                    outcome=outcome,
+                )
+                comp_errors = compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
+                rolled_back_ids.extend(applied_ids)
+                applied_ids.clear()
+                irrev_notes = [
+                    tid
+                    for tid in rolled_back_ids
+                    if (tw := get_tweak(tid)) and (tw.irreversible or tw.uninstall_onedrive or tw.stop_processes)
+                ]
+                note = f" (irreversible ops cannot be undone: {', '.join(irrev_notes)})" if irrev_notes else ""
+                full_error = (
+                    f"{err_msg}{note}"
+                    if not comp_errors
+                    else f"{err_msg}{note} (rollback errors: {'; '.join(comp_errors)})"
+                )
+                final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+                state_store.upsert_run(_make_record(final_state, error=full_error))
+                run_id = run_id_candidate
+                break
+
+            applied_ids.append(res.tweak_id)
+            final_results[idx] = replace(res, status=TweakStatus.APPLIED, detail="Applied successfully")
+            state_store.upsert_run(_make_record(TransactionState.APPLYING))
+        else:
+            if profile.wsl.enabled and env.wsl_installed:
+                wsl_changed = False
+                planner = wsl_planner or prepare_wsl_plan
+                applier = wsl_applier or apply_wslconfig_target
+                try:
+                    distros = tuple(env.wsl_distros)
+                    prepared_wsl = planner(
+                        profile.wsl,
+                        system,
+                        wslconfig_path=wslconfig_path,
+                        distros=distros,
+                        create_host_backup=True,
                         backup_dir=backup_dir,
-                        exported_subtrees=exported_subtrees,
-                        newly_installed_winget=newly_installed_winget,
-                        newly_installed_extensions=newly_installed_extensions,
-                        force_kill_processes=force_kill_processes,
-                        checkpoint_cb=_record_op_checkpoint,
-                        file_hashes=file_hashes,
-                        file_exists=file_exists,
-                        allow_managed=allow_managed,
+                        installed_wsl_version=env.wsl_version,
                     )
-                except Exception as exc:
-                    err_msg = str(exc)
-                    outcome = (
-                        exc.outcome if isinstance(exc, TweakMutationError) else capture_failure_outcome(system, err_msg)
-                    )
-                    failed_ids.append(res.tweak_id)
-                    failure_outcomes.append({"tweak_id": res.tweak_id, **outcome.to_dict()})
-                    final_results[idx] = replace(
-                        res,
-                        status=TweakStatus.ERROR,
-                        detail=err_msg,
-                        outcome=outcome,
-                    )
-                    comp_errors = compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
-                    rolled_back_ids.extend(applied_ids)
-                    applied_ids.clear()
-                    irrev_notes = [
-                        tid
-                        for tid in rolled_back_ids
-                        if (tw := get_tweak(tid)) and (tw.irreversible or tw.uninstall_onedrive or tw.stop_processes)
-                    ]
-                    note = f" (irreversible ops cannot be undone: {', '.join(irrev_notes)})" if irrev_notes else ""
-                    full_error = (
-                        f"{err_msg}{note}"
-                        if not comp_errors
-                        else f"{err_msg}{note} (rollback errors: {'; '.join(comp_errors)})"
-                    )
-                    final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-                    state_store.upsert_run(_make_record(final_state, error=full_error))
-                    run_id = run_id_candidate
-                    break
-
-                applied_ids.append(res.tweak_id)
-                final_results[idx] = replace(res, status=TweakStatus.APPLIED, detail="Applied successfully")
-                state_store.upsert_run(_make_record(TransactionState.APPLYING))
-            else:
-                if profile.wsl.enabled and env.wsl_installed:
-                    wsl_changed = False
-                    try:
-                        distros = tuple(env.wsl_distros)
-                        prepared_wsl = _eng_attr("prepare_wsl_plan", prepare_wsl_plan)(
-                            profile.wsl,
-                            system,
-                            wslconfig_path=wslconfig_path,
-                            distros=distros,
-                            create_host_backup=True,
-                            backup_dir=backup_dir,
-                            installed_wsl_version=env.wsl_version,
-                        )
-                        wsl_backup_path = (
-                            str(prepared_wsl.backup_path) if prepared_wsl.backup_path is not None else None
-                        )
-                        if prepared_wsl.wslconfig_changed:
-                            wsl_target_path = str(prepared_wsl.target_wslconfig)
-                            wslconfig_existed = prepared_wsl.target_wslconfig.is_file()
-                        for d_plan in prepared_wsl.distro_plans:
-                            if d_plan.changed:
-                                wsl_distro_snapshots.append(
-                                    WslDistroSnapshot(
-                                        distro=d_plan.distro,
-                                        existed=d_plan.probe.status == "exists",
-                                        previous_content=d_plan.probe.content,
-                                        distro_guid=get_wsl_distro_guid(d_plan.distro, registry),
-                                    )
-                                )
-                        wsl_changed = prepared_wsl.wslconfig_changed or bool(wsl_distro_snapshots)
-                        if wsl_changed:
-                            state_store.upsert_run(_make_record(TransactionState.APPLYING))
-
-                        _eng_attr("apply_wslconfig_target", apply_wslconfig_target)(prepared_wsl)
-                        if prepared_wsl.wslconfig_changed:
-                            state_store.upsert_run(_make_record(TransactionState.APPLYING))
-
-                        distro_results: list[dict[str, Any]] = []
-                        for d_plan in prepared_wsl.distro_plans:
-                            apply_distro_wsl_conf(d_plan, system)
-                            if d_plan.changed:
-                                state_store.upsert_run(_make_record(TransactionState.APPLYING))
-                            distro_results.append(
-                                {
-                                    "distro": d_plan.distro,
-                                    "distro_changed": d_plan.changed,
-                                    "distro_read_status": d_plan.probe.status,
-                                    "distro_read_evidence": d_plan.probe.evidence,
-                                }
-                            )
-
-                        wsl_result = {
-                            "dry_run": False,
-                            "mode": profile.wsl.mode,
-                            "host_memory_bytes": prepared_wsl.host_memory_bytes,
-                            "host_memory_gib": prepared_wsl.host_memory_gib,
-                            "memory_limit_gib": prepared_wsl.memory_limit_gib,
-                            "wslconfig_path": wsl_target_path,
-                            "wslconfig_backup_path": wsl_backup_path,
-                            "wslconfig_changed": prepared_wsl.wslconfig_changed,
-                            "wslconfig_content": prepared_wsl.merged_wslconfig,
-                            "distro": distros[0] if distros else None,
-                            "distro_changed": any(d.changed for d in prepared_wsl.distro_plans),
-                            "distro_restart_required": any(d.changed for d in prepared_wsl.distro_plans),
-                            "warnings": list(prepared_wsl.warnings),
-                            "distros_applied": distro_results,
-                        }
-                        if drifted_indices or wsl_changed:
-                            state_store.upsert_run(_make_record(TransactionState.COMMITTED))
-                            run_id = run_id_candidate
-                    except PermissionError as exc:
-                        if wslconfig_path is not None:
-                            comp_errors = compensate_run_record(
-                                _make_record(TransactionState.ROLLING_BACK), registry, system
-                            )
-                            rolled_back_ids.extend(applied_ids)
-                            applied_ids.clear()
-                            if drifted_indices or wsl_changed:
-                                final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-                                state_store.upsert_run(_make_record(final_st, error=f"WSL PermissionError: {exc}"))
-                            raise
-                        wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
-                        if wsl_changed:
-                            comp_errors = compensate_run_record(
-                                _make_record(TransactionState.ROLLING_BACK), registry, system
-                            )
-                            rolled_back_ids.extend(applied_ids)
-                            applied_ids.clear()
-                            final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-                            state_store.upsert_run(
-                                _make_record(
-                                    final_st,
-                                    error=f"WSL skipped due to PermissionError: {exc}",
+                    wsl_backup_path = str(prepared_wsl.backup_path) if prepared_wsl.backup_path is not None else None
+                    if prepared_wsl.wslconfig_changed:
+                        wsl_target_path = str(prepared_wsl.target_wslconfig)
+                        wslconfig_existed = prepared_wsl.target_wslconfig.is_file()
+                        wslconfig_post_sha256 = hashlib.sha256(
+                            prepared_wsl.merged_wslconfig.encode("utf-8")
+                        ).hexdigest()
+                    for d_plan in prepared_wsl.distro_plans:
+                        if d_plan.changed:
+                            wsl_distro_snapshots.append(
+                                WslDistroSnapshot(
+                                    distro=d_plan.distro,
+                                    existed=d_plan.probe.status == "exists",
+                                    previous_content=d_plan.probe.content,
+                                    distro_guid=get_wsl_distro_guid(d_plan.distro, registry),
+                                    post_sha256=hashlib.sha256(d_plan.merged_content.encode("utf-8")).hexdigest(),
                                 )
                             )
-                            run_id = run_id_candidate
-                        elif drifted_indices:
-                            state_store.upsert_run(_make_record(TransactionState.COMMITTED))
-                            run_id = run_id_candidate
-                    except (WslOperationError, OSError) as exc:
-                        err_msg = str(exc)
-                        failed_ids.append("wsl")
-                        wsl_outcome = OperationOutcome(status=OperationStatus.UNKNOWN, message=err_msg)
-                        failure_outcomes.append({"tweak_id": "wsl", **wsl_outcome.to_dict()})
-                        wsl_result = {"enabled": True, "error": err_msg, "outcome": wsl_outcome.to_dict()}
+                    wsl_changed = prepared_wsl.wslconfig_changed or bool(wsl_distro_snapshots)
+                    if wsl_changed:
+                        if not drifted_indices:
+                            state_store.upsert_run(_make_record(TransactionState.PLANNED))
+                        state_store.upsert_run(_make_record(TransactionState.APPLYING))
+
+                    applier(prepared_wsl)
+                    if prepared_wsl.wslconfig_changed:
+                        state_store.upsert_run(_make_record(TransactionState.APPLYING))
+
+                    distro_results: list[dict[str, Any]] = []
+                    for d_plan in prepared_wsl.distro_plans:
+                        apply_distro_wsl_conf(d_plan, system)
+                        if d_plan.changed:
+                            state_store.upsert_run(_make_record(TransactionState.APPLYING))
+                        distro_results.append(
+                            {
+                                "distro": d_plan.distro,
+                                "distro_changed": d_plan.changed,
+                                "distro_read_status": d_plan.probe.status,
+                                "distro_read_evidence": d_plan.probe.evidence,
+                            }
+                        )
+
+                    wsl_result = {
+                        "dry_run": False,
+                        "mode": profile.wsl.mode,
+                        "host_memory_bytes": prepared_wsl.host_memory_bytes,
+                        "host_memory_gib": prepared_wsl.host_memory_gib,
+                        "memory_limit_gib": prepared_wsl.memory_limit_gib,
+                        "wslconfig_path": wsl_target_path,
+                        "wslconfig_backup_path": wsl_backup_path,
+                        "wslconfig_changed": prepared_wsl.wslconfig_changed,
+                        "wslconfig_content": prepared_wsl.merged_wslconfig,
+                        "distro": distros[0] if distros else None,
+                        "distro_changed": any(d.changed for d in prepared_wsl.distro_plans),
+                        "distro_restart_required": any(d.changed for d in prepared_wsl.distro_plans),
+                        "warnings": list(prepared_wsl.warnings),
+                        "distros_applied": distro_results,
+                    }
+                    if drifted_indices or wsl_changed:
+                        state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                        run_id = run_id_candidate
+                except PermissionError as exc:
+                    if wslconfig_path is not None:
                         comp_errors = compensate_run_record(
                             _make_record(TransactionState.ROLLING_BACK), registry, system
                         )
                         rolled_back_ids.extend(applied_ids)
                         applied_ids.clear()
-                        full_error = (
-                            err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
+                        if drifted_indices or wsl_changed:
+                            final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+                            state_store.upsert_run(_make_record(final_st, error=f"WSL PermissionError: {exc}"))
+                        raise
+                    wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
+                    if wsl_changed:
+                        comp_errors = compensate_run_record(
+                            _make_record(TransactionState.ROLLING_BACK), registry, system
                         )
-                        final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-                        state_store.upsert_run(_make_record(final_state, error=full_error))
+                        rolled_back_ids.extend(applied_ids)
+                        applied_ids.clear()
+                        final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+                        state_store.upsert_run(
+                            _make_record(
+                                final_st,
+                                error=f"WSL skipped due to PermissionError: {exc}",
+                            )
+                        )
                         run_id = run_id_candidate
-                else:
-                    if drifted_indices:
+                    elif drifted_indices:
                         state_store.upsert_run(_make_record(TransactionState.COMMITTED))
                         run_id = run_id_candidate
+                except (WslOperationError, OSError) as exc:
+                    err_msg = str(exc)
+                    failed_ids.append("wsl")
+                    wsl_outcome = OperationOutcome(status=OperationStatus.UNKNOWN, message=err_msg)
+                    failure_outcomes.append({"tweak_id": "wsl", **wsl_outcome.to_dict()})
+                    wsl_result = {"enabled": True, "error": err_msg, "outcome": wsl_outcome.to_dict()}
+                    comp_errors = compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
+                    rolled_back_ids.extend(applied_ids)
+                    applied_ids.clear()
+                    full_error = (
+                        err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
+                    )
+                    final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+                    state_store.upsert_run(_make_record(final_state, error=full_error))
+                    run_id = run_id_candidate
+            else:
+                if drifted_indices:
+                    state_store.upsert_run(_make_record(TransactionState.COMMITTED))
+                    run_id = run_id_candidate
 
     if wsl_result is None and profile.wsl.enabled and not failed_ids:
         if not env.wsl_installed:
-            wsl_result = {"enabled": True, "skipped": True, "reason": "WSL2 is not installed on host."}
-        else:
-            try:
-                dry_distros = list(env.wsl_distros)
-                if dry_distros:
-                    dry_distro_results: list[dict[str, Any]] = []
-                    first_res = plan_or_apply_wsl(
-                        spec=profile.wsl,
-                        system=system,
-                        distro=dry_distros[0],
-                        wslconfig_path=wslconfig_path,
-                        dry_run=dry_run,
-                    )
-                    dry_distro_results.append({"distro": dry_distros[0], "distro_changed": first_res["distro_changed"]})
-                    for extra_distro in dry_distros[1:]:
-                        extra_res = plan_or_apply_wsl(
-                            spec=profile.wsl,
-                            system=system,
-                            distro=extra_distro,
-                            wslconfig_path=wslconfig_path,
-                            dry_run=dry_run,
-                        )
-                        dry_distro_results.append(
-                            {"distro": extra_distro, "distro_changed": extra_res["distro_changed"]}
-                        )
-                    wsl_result = {**first_res, "distros_applied": dry_distro_results}
-                else:
-                    wsl_result = plan_or_apply_wsl(
-                        spec=profile.wsl,
-                        system=system,
-                        wslconfig_path=wslconfig_path,
-                        dry_run=dry_run,
-                    )
-            except PermissionError as exc:
-                if wslconfig_path is not None:
-                    raise
-                wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
-            except (WslOperationError, OSError) as exc:
-                failed_ids.append("wsl")
-                wsl_result = {"enabled": True, "error": str(exc)}
+            wsl_result = {"enabled": True, "skipped": True, "reason": "WSL2 is not installed on this host."}
+        elif dry_run:
+            planner = wsl_planner or prepare_wsl_plan
+            prepared_wsl = planner(
+                profile.wsl,
+                system,
+                wslconfig_path=wslconfig_path,
+                distros=tuple(env.wsl_distros),
+                create_host_backup=False,
+                installed_wsl_version=env.wsl_version,
+            )
+            wsl_result = {
+                "dry_run": True,
+                "mode": profile.wsl.mode,
+                "host_memory_bytes": prepared_wsl.host_memory_bytes,
+                "host_memory_gib": prepared_wsl.host_memory_gib,
+                "memory_limit_gib": prepared_wsl.memory_limit_gib,
+                "wslconfig_path": str(prepared_wsl.target_wslconfig),
+                "wslconfig_changed": prepared_wsl.wslconfig_changed,
+                "wslconfig_content": prepared_wsl.merged_wslconfig,
+                "distro": env.wsl_distros[0] if env.wsl_distros else None,
+                "distro_changed": any(d.changed for d in prepared_wsl.distro_plans),
+                "distro_restart_required": any(d.changed for d in prepared_wsl.distro_plans),
+                "warnings": list(prepared_wsl.warnings),
+                "distros_applied": [
+                    {
+                        "distro": d.distro,
+                        "distro_changed": d.changed,
+                        "distro_read_status": d.probe.status,
+                        "distro_read_evidence": d.probe.evidence,
+                    }
+                    for d in prepared_wsl.distro_plans
+                ],
+            }
 
     digest_payload = json.dumps(
-        [
-            {
-                "tweak_id": r.tweak_id,
-                "status": str(r.status),
-                "operations": [op.to_dict() for op in r.operations],
-            }
-            for r in final_results
-        ],
+        {
+            "profile": profile.name,
+            "dry_run": dry_run,
+            "applied": applied_ids,
+            "results": [(r.tweak_id, str(r.status)) for r in final_results],
+            "wsl": wsl_result,
+        },
         sort_keys=True,
-    ).encode("utf-8")
-    plan_digest = hashlib.sha256(digest_payload).hexdigest()[:16]
-
+        default=str,
+    )
+    plan_digest = hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()[:16]
     return ApplySummary(
         profile_name=profile.name,
         dry_run=dry_run,
         run_id=run_id,
-        results=tuple(final_results),
+        plan_digest=plan_digest,
         applied_ids=tuple(applied_ids),
+        rolled_back_ids=tuple(rolled_back_ids),
+        already_applied_ids=tuple(already_applied_ids),
         skipped_policy_ids=tuple(skipped_policy_ids),
         skipped_admin_ids=tuple(skipped_admin_ids),
         skipped_build_ids=tuple(skipped_build_ids),
         skipped_edition_ids=tuple(skipped_edition_ids),
         skipped_managed_ids=tuple(skipped_managed_ids),
-        already_applied_ids=tuple(already_applied_ids),
         failed_ids=tuple(failed_ids),
-        rolled_back_ids=tuple(rolled_back_ids),
+        results=tuple(final_results),
         wsl_result=wsl_result,
-        plan_digest=plan_digest,
+    )
+
+
+def run_profile_command(
+    *,
+    profile: ProfileSpec,
+    env: EnvironmentInfo,
+    registry: RegistryBackend,
+    system: SystemBackend,
+    state_store: StateStore | None = None,
+    dry_run: bool = True,
+    allow_high_risk: bool = False,
+    allow_irreversible: bool = False,
+    force_kill_processes: bool = False,
+    wslconfig_path: Path | None = None,
+    allow_simulated: bool = False,
+    allow_managed: bool = False,
+    only_ids: set[str] | None = None,
+    skip_ids: set[str] | None = None,
+    category_filter: str | None = None,
+) -> ApplySummary:
+    """Shared validated command service for both CLI (`wb plan/apply`) and TUI (`wb tui`)."""
+    store = state_store if state_store is not None else StateStore()
+    return apply_profile(
+        profile=profile,
+        env=env,
+        registry=registry,
+        system=system,
+        state_store=store,
+        dry_run=dry_run,
+        allow_high_risk=allow_high_risk,
+        allow_irreversible=allow_irreversible,
+        force_kill_processes=force_kill_processes,
+        wslconfig_path=wslconfig_path,
+        allow_simulated=allow_simulated,
+        allow_managed=allow_managed,
+        only_ids=only_ids,
+        skip_ids=skip_ids,
+        category_filter=category_filter,
     )

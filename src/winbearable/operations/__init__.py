@@ -1,6 +1,9 @@
 """Operation adapter abstraction decoupling the domain engine from concrete OS side effects."""
 
+from winbearable.operations import identity
 from winbearable.operations.adapters import (
+    NON_REGISTRY_ADAPTERS,
+    OPERATION_ADAPTER_MAP,
     OPERATION_ADAPTERS,
     AuditpolOperationAdapter,
     FeatureOperationAdapter,
@@ -8,17 +11,20 @@ from winbearable.operations.adapters import (
     FirewallGroupOperationAdapter,
     FsutilOperationAdapter,
     GitConfigOperationAdapter,
+    HypervFirewallOperationAdapter,
     IcaclsOperationAdapter,
     OneDriveOperationAdapter,
     PowercfgOperationAdapter,
     ProcessStopOperationAdapter,
+    RegistryOperationAdapter,
     ServiceOperationAdapter,
     TaskOperationAdapter,
     WevtutilOperationAdapter,
     WingetOperationAdapter,
+    get_operation_adapter,
     inspect_non_registry_operations,
 )
-from winbearable.operations.base import OperationAdapter, format_registry_op
+from winbearable.operations.base import OperationAdapter, OperationApplyContext, format_registry_op
 from winbearable.operations.mergers import (
     MAX_FILE_SNAPSHOT_BYTES,
     _deep_merge_dicts,
@@ -36,18 +42,23 @@ from winbearable.operations.mergers import (
 
 __all__ = [
     "MAX_FILE_SNAPSHOT_BYTES",
+    "NON_REGISTRY_ADAPTERS",
     "OPERATION_ADAPTERS",
+    "OPERATION_ADAPTER_MAP",
     "AuditpolOperationAdapter",
     "FeatureOperationAdapter",
     "FileConfigOperationAdapter",
     "FirewallGroupOperationAdapter",
     "FsutilOperationAdapter",
     "GitConfigOperationAdapter",
+    "HypervFirewallOperationAdapter",
     "IcaclsOperationAdapter",
     "OneDriveOperationAdapter",
     "OperationAdapter",
+    "OperationApplyContext",
     "PowercfgOperationAdapter",
     "ProcessStopOperationAdapter",
+    "RegistryOperationAdapter",
     "ServiceOperationAdapter",
     "TaskOperationAdapter",
     "WevtutilOperationAdapter",
@@ -60,7 +71,9 @@ __all__ = [
     "apply_file_spec",
     "expand_file_spec_path",
     "format_registry_op",
+    "get_operation_adapter",
     "has_jsonc_comments",
+    "identity",
     "inspect_non_registry_operations",
     "merge_file_content",
     "restore_file_snapshot",

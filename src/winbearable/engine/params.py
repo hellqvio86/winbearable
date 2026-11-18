@@ -329,3 +329,26 @@ def resolve_tweak_params(tweak: TweakDefinition, params: dict[str, Any] | None) 
         )
         return replace(tweak, registry_specs=updated_specs)
     return tweak
+
+
+def summarize_elevation_requirements(evaluations: list[TweakCheckResult]) -> dict[str, Any]:
+    """Summarize machine vs user privilege requirements across evaluated tweaks before elevation."""
+    admin_tweaks = [
+        r.tweak_id
+        for r in evaluations
+        if r.requires_admin and r.status in {TweakStatus.DRIFTED, TweakStatus.REQUIRES_ADMIN}
+    ]
+    user_scope_ops: list[str] = []
+    for r in evaluations:
+        if r.status not in {TweakStatus.DRIFTED, TweakStatus.REQUIRES_ADMIN}:
+            continue
+        for op in r.operations:
+            if op.scope == "user" and not op.requires_elevation:
+                user_scope_ops.append(f"{r.tweak_id}:{op.operation_type}:{op.target}")
+    mixed_privilege = bool(admin_tweaks and user_scope_ops)
+    return {
+        "requires_elevation": bool(admin_tweaks),
+        "admin_tweaks": admin_tweaks,
+        "user_scope_operations": user_scope_ops,
+        "mixed_privilege": mixed_privilege,
+    }

@@ -300,11 +300,11 @@ def check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
                 ]
                 tbl_fn.restype = ctypes.c_ulong
 
-        def _query_table(fn: Any, af: int, table_cls: int, stride: int, port_off: int) -> tuple[int, list[int]]:
+        def _query_table(fn: Any, af: int, table_cls: int, stride: int, port_off: int) -> tuple[int, list[int], int]:
             sz = ctypes.c_ulong(0)
-            fn(None, ctypes.byref(sz), False, af, table_cls, 0)
+            rc_init = int(fn(None, ctypes.byref(sz), False, af, table_cls, 0))
             if sz.value == 0:
-                return 0, []
+                return 0, [], (0 if rc_init == 0 else rc_init)
             buf = (ctypes.c_ubyte * sz.value)()
             for _ in range(3):
                 rc = int(fn(buf, ctypes.byref(sz), False, af, table_cls, 0))
@@ -313,29 +313,47 @@ def check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
                 if rc == 122 and sz.value > 0:  # ERROR_INSUFFICIENT_BUFFER
                     buf = (ctypes.c_ubyte * sz.value)()
                     continue
-                return 0, []
+                return 0, [], rc
             else:
-                return 0, []
+                return 0, [], 122
             count = int.from_bytes(bytes(buf[:4]), "little")
             found: list[int] = []
             for idx in range(min(count, 200)):
                 off = 4 + idx * stride
                 if off + port_off + 2 <= len(buf):
                     found.append(int.from_bytes(bytes(buf[off + port_off : off + port_off + 2]), "big"))
-            return count, found
+            return count, found, 0
 
         # AF_INET=2, AF_INET6=23; TCP_TABLE_OWNER_PID_LISTENER=3, UDP_TABLE_OWNER_PID=1
-        tcp4_n, tcp4_ports = _query_table(iphlpapi.GetExtendedTcpTable, 2, 3, 24, 8)
-        tcp6_n, tcp6_ports = _query_table(iphlpapi.GetExtendedTcpTable, 23, 3, 56, 24)
-        udp4_n, udp4_ports = _query_table(iphlpapi.GetExtendedUdpTable, 2, 1, 12, 4)
-        udp6_n, udp6_ports = _query_table(iphlpapi.GetExtendedUdpTable, 23, 1, 28, 20)
+        tcp4_n, tcp4_ports, rc_t4 = _query_table(iphlpapi.GetExtendedTcpTable, 2, 3, 24, 8)
+        tcp6_n, tcp6_ports, rc_t6 = _query_table(iphlpapi.GetExtendedTcpTable, 23, 3, 56, 24)
+        udp4_n, udp4_ports, rc_u4 = _query_table(iphlpapi.GetExtendedUdpTable, 2, 1, 12, 4)
+        udp6_n, udp6_ports, rc_u6 = _query_table(iphlpapi.GetExtendedUdpTable, 23, 1, 28, 20)
+        table_errors = [
+            f"{lbl}={rc}" for lbl, rc in (("TCP4", rc_t4), ("TCP6", rc_t6), ("UDP4", rc_u4), ("UDP6", rc_u6)) if rc != 0
+        ]
         all_ports = sorted(set(tcp4_ports + tcp6_ports + udp4_ports + udp6_ports))
+        if len(table_errors) == 4:
+            obs = PostureObservation(
+                ObservationState.UNKNOWN,
+                "win32:GetExtendedTcpTable+GetExtendedUdpTable",
+                ObservationConfidence.NONE,
+                f"API errors: {', '.join(table_errors)}",
+                "All IPv4/IPv6 TCP/UDP table queries failed.",
+            )
+            return AuditFinding("chk.listening_ports", "network", "Listening TCP/UDP Ports", "info", obs)
+        conf = ObservationConfidence.MEDIUM if table_errors else ObservationConfidence.HIGH
+        reason = (
+            f"Partial collection ({', '.join(table_errors)} failed); enumerated remaining IPv4/IPv6 endpoints."
+            if table_errors
+            else "Enumerated IPv4/IPv6 TCP listeners and UDP endpoints via iphlpapi."
+        )
         obs = PostureObservation(
             ObservationState.ENABLED,
             "win32:GetExtendedTcpTable+GetExtendedUdpTable",
-            ObservationConfidence.HIGH,
+            conf,
             f"TCP4={tcp4_n}, TCP6={tcp6_n}, UDP4={udp4_n}, UDP6={udp6_n}; sample ports={all_ports[:15]}",
-            "Enumerated IPv4/IPv6 TCP listeners and UDP endpoints via iphlpapi.",
+            reason,
         )
         return AuditFinding("chk.listening_ports", "network", "Listening TCP/UDP Ports", "info", obs)
     except Exception as exc:
