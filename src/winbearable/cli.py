@@ -61,10 +61,12 @@ from .models import (
 )
 from .profiles import (
     ProfileValidationError,
+    generate_init_profile_json,
     generate_init_profile_toml,
     get_builtin_profiles_dir,
     get_default_user_profile_path,
     load_profile,
+    migrate_profile_file,
 )
 from .state import StateStore, StateStoreError
 from .tui import launch_tui
@@ -206,10 +208,11 @@ def _add_selection_args(p: argparse.ArgumentParser) -> None:
 _JSON_SCHEMAS: dict[str, dict[str, Any]] = {
     "profile": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "winbearable TOML Profile v2",
+        "title": "winbearable Profile (JSON / TOML) v2",
         "type": "object",
         "required": ["name"],
         "properties": {
+            "schema_version": {"type": "integer", "minimum": 1},
             "name": {"type": "string"},
             "description": {"type": "string"},
             "extends": {"type": "string"},
@@ -364,13 +367,19 @@ def build_parser() -> argparse.ArgumentParser:
     recover_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb init
-    init_parser = subparsers.add_parser("init", help="Generate a TOML profile from the detected environment")
+    init_parser = subparsers.add_parser("init", help="Generate a TOML or JSON profile from the detected environment")
     init_parser.add_argument(
         "--output",
         default=None,
-        help="Write to file instead of ~/.config/winbearable/profile.toml",
+        help="Write to file instead of ~/.config/winbearable/profile.toml (or profile.json)",
     )
-    init_parser.add_argument("--stdout", action="store_true", help="Print generated TOML to stdout")
+    init_parser.add_argument(
+        "--format",
+        choices=("toml", "json"),
+        default=None,
+        help="Profile output format (default: inferred from --output suffix, or toml)",
+    )
+    init_parser.add_argument("--stdout", action="store_true", help="Print generated profile to stdout")
     init_parser.add_argument(
         "--no-admin",
         action="store_true",
@@ -395,6 +404,29 @@ def build_parser() -> argparse.ArgumentParser:
     # wb schema
     schema_parser = subparsers.add_parser("schema", help="Print JSON Schema for winbearable contracts")
     schema_parser.add_argument("target", choices=tuple(_JSON_SCHEMAS.keys()), help="Schema target")
+
+    # wb migrate
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Migrate legacy config/profile or state.json files to the latest schema version",
+    )
+    migrate_sub = migrate_parser.add_subparsers(dest="migrate_target", required=True)
+
+    mig_state_p = migrate_sub.add_parser("state", help="Migrate state.json to the latest schema version")
+    mig_state_p.add_argument("--apply", action="store_true", help="Write migrated state.json (dry-run by default)")
+    mig_state_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    mig_cfg_p = migrate_sub.add_parser("config", help="Migrate a TOML/JSON profile/config file to latest version")
+    mig_cfg_p.add_argument("path", help="Path to existing TOML or JSON config/profile file")
+    mig_cfg_p.add_argument("--output", default=None, help="Output file path (default: update input path)")
+    mig_cfg_p.add_argument(
+        "--format",
+        choices=("json", "toml"),
+        default=None,
+        help="Output format (default: inferred from --output or source format)",
+    )
+    mig_cfg_p.add_argument("--apply", action="store_true", help="Write migrated file (dry-run by default)")
+    mig_cfg_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb audit
     audit_parser = subparsers.add_parser("audit", help="Run read-only native security & posture checks")
@@ -974,19 +1006,25 @@ def _run_cli_body(
             return 0
 
         if args.command == "init":
-            if getattr(args, "no_admin", False):
-                from dataclasses import replace as _dc_replace
+            from dataclasses import replace as _dc_replace
 
-                env_no_admin = _dc_replace(env, is_admin=False)
-                toml_text = generate_init_profile_toml(env_no_admin)
-            else:
-                toml_text = generate_init_profile_toml(env)
+            target_env = _dc_replace(env, is_admin=False) if getattr(args, "no_admin", False) else env
+            fmt = getattr(args, "format", None)
+            if fmt is None:
+                fmt = "json" if args.output and str(args.output).lower().endswith(".json") else "toml"
+            profile_text = (
+                generate_init_profile_json(target_env) if fmt == "json" else generate_init_profile_toml(target_env)
+            )
             if args.stdout:
-                sys.stdout.write(toml_text)
+                sys.stdout.write(profile_text)
                 return 0
-            out_path = Path(args.output) if args.output else get_default_user_profile_path()
+            if args.output:
+                out_path = Path(args.output)
+            else:
+                default_path = get_default_user_profile_path()
+                out_path = default_path.with_suffix(f".{fmt}")
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(toml_text, encoding="utf-8")
+            out_path.write_text(profile_text, encoding="utf-8")
             sys.stdout.write(f"Generated profile at {out_path}\n")
             if getattr(args, "no_admin", False):
                 sys.stdout.write(
@@ -1045,7 +1083,8 @@ def _run_cli_body(
             memberships: list[str] = []
             p_dir = get_builtin_profiles_dir()
             if p_dir.is_dir():
-                for p_file in sorted(p_dir.glob("*.toml")):
+                profile_files = sorted([*p_dir.glob("*.toml"), *p_dir.glob("*.json")])
+                for p_file in profile_files:
                     loaded = load_profile(str(p_file))
                     if loaded.tweaks.get(tweak.tweak_id):
                         memberships.append(loaded.name)
@@ -1090,6 +1129,60 @@ def _run_cli_body(
         if args.command == "schema":
             sys.stdout.write(json.dumps(_JSON_SCHEMAS[args.target], indent=2, sort_keys=True) + "\n")
             return 0
+
+        if args.command == "migrate":
+            if args.migrate_target == "state":
+                report = store.migrate(dry_run=not args.apply)
+                if args.json:
+                    _print_json(report)
+                else:
+                    if not report["exists"]:
+                        sys.stdout.write(f"No state file found at {report['state_path']}.\n")
+                    elif not report["migrated"]:
+                        sys.stdout.write(
+                            f"State file {report['state_path']} is already at schema v{report['to_version']} "
+                            f"({report['run_count']} runs).\n"
+                        )
+                    elif report["dry_run"]:
+                        sys.stdout.write(
+                            f"Dry-run: {report['state_path']} would be migrated from v{report['from_version']} "
+                            f"to v{report['to_version']} ({report['run_count']} runs). Pass --apply to write.\n"
+                        )
+                    else:
+                        sys.stdout.write(
+                            f"Migrated {report['state_path']} from v{report['from_version']} "
+                            f"to v{report['to_version']} ({report['run_count']} runs).\n"
+                        )
+                return 0
+
+            if args.migrate_target == "config":
+                out_p = Path(args.output) if args.output else None
+                report = migrate_profile_file(
+                    Path(args.path),
+                    output_path=out_p,
+                    output_format=args.format,
+                    dry_run=not args.apply,
+                )
+                if args.json:
+                    _print_json(report)
+                else:
+                    if not report["changed"]:
+                        sys.stdout.write(
+                            f"Config {report['source_path']} is already at schema v{report['to_version']} "
+                            f"({report['output_format']}).\n"
+                        )
+                    elif report["dry_run"]:
+                        sys.stdout.write(
+                            f"Dry-run: {report['source_path']} (v{report['from_version']}, {report['source_format']}) "
+                            f"-> {report['output_path']} (v{report['to_version']}, {report['output_format']}). "
+                            "Pass --apply to write.\n"
+                        )
+                    else:
+                        sys.stdout.write(
+                            f"Migrated {report['source_path']} -> {report['output_path']} "
+                            f"(v{report['from_version']} -> v{report['to_version']}, {report['output_format']}).\n"
+                        )
+                return 0
 
         if args.command == "audit":
             wsl_info = audit_wsl(env, system=sys_backend, registry=reg_backend)

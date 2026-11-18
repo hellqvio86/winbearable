@@ -33,8 +33,15 @@ from .models import (
     TweakStatus,
     WslConfigSpec,
 )
-from .profiles import ProfileValidationError, generate_init_profile_toml, load_profile
-from .state import StateStore
+from .profiles import (
+    ProfileValidationError,
+    generate_init_profile_json,
+    generate_init_profile_toml,
+    load_profile,
+    migrate_profile_file,
+    migrate_profile_payload,
+)
+from .state import StateStore, migrate_state_payload
 from .tweaks import TWEAK_CATALOG, get_all_tweaks, get_tweak
 from .wsl import (
     apply_wsl_linux_baseline,
@@ -83,6 +90,7 @@ __all__ = [
     "evaluate_profile",
     "export_wsl_distro",
     "format_host_memory_gib",
+    "generate_init_profile_json",
     "generate_init_profile_toml",
     "get_all_tweaks",
     "get_tweak",
@@ -90,6 +98,9 @@ __all__ = [
     "install_wsl_distro",
     "load_profile",
     "merge_ini_preserving_comments",
+    "migrate_profile_file",
+    "migrate_profile_payload",
+    "migrate_state_payload",
     "plan_or_apply_wsl",
     "rollback_runs",
 ]

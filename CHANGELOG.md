@@ -2,6 +2,13 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.13.0] - 2026-11-18
+
+### Added
+
+- **JSON Profile/Config Format Support:** `resolve_profile_path`, `load_profile`, `get_default_user_profile_path`, `wb init --format json`, and `wb show` now support `.json` profiles alongside `.toml` (including mixed `.json`/`.toml` `extends` and `include` inheritance).
+- **Backwards-Compatible Config & State Migration:** Added `PROFILE_SCHEMA_VERSION = 2` and `STATE_SCHEMA_VERSION = 2` with `migrate_profile_payload`, `migrate_profile_file`, `migrate_state_payload`, `StateStore.migrate()`, and `wb migrate {state,config}` (dry-run by default) to read and upgrade legacy v0/v1 state and config files up to the latest schema.
+
 ## [0.12.2] - 2026-11-18
 
 ### Fixed

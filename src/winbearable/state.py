@@ -12,16 +12,99 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
-from .const import APP_NAME, ENV_STATE_PATH
+from .const import APP_NAME, ENV_STATE_PATH, STATE_SCHEMA_VERSION
 from .models import RunRecord, TransactionState
+from .tweaks import resolve_tweak_id
 
-STATE_SCHEMA_VERSION = 1
 DEFAULT_MAX_RUN_HISTORY = 100
 DEFAULT_MAX_BACKUP_DIRS = DEFAULT_MAX_RUN_HISTORY
 
 
 class StateStoreError(ValueError):
     """Raised when state.json is corrupted, unreadable, or has an unsupported schema version."""
+
+
+def _parse_state_version(raw_version: Any, source_label: str) -> int:
+    """Parse a state schema version integer (or legacy string like '1.0'); None maps to 0."""
+    if raw_version is None:
+        return 0
+    if isinstance(raw_version, bool):
+        raise StateStoreError(f"Unsupported state schema version {raw_version!r} in {source_label}.")
+    if isinstance(raw_version, int):
+        return raw_version
+    if isinstance(raw_version, str):
+        stripped = raw_version.strip()
+        if stripped.isdigit():
+            return int(stripped)
+        if stripped.endswith(".0") and stripped[:-2].isdigit():
+            return int(stripped[:-2])
+    raise StateStoreError(f"Unsupported state schema version {raw_version!r} in {source_label}.")
+
+
+def migrate_state_payload(payload: Any, *, source_label: str = "state.json") -> tuple[dict[str, Any], int, bool]:
+    """Migrate a parsed state.json dictionary from any older version up to STATE_SCHEMA_VERSION."""
+    if not isinstance(payload, dict):
+        raise StateStoreError(f"Invalid state file at {source_label}: top-level JSON must be an object.")
+
+    raw_ver = payload.get("version", payload.get("schema_version"))
+    orig_version = _parse_state_version(raw_ver, source_label)
+    if orig_version < 0 or orig_version > STATE_SCHEMA_VERSION:
+        raise StateStoreError(
+            f"Unsupported state schema version {raw_ver!r} in {source_label} (supported <= {STATE_SCHEMA_VERSION})."
+        )
+
+    migrated = dict(payload)
+    ver = orig_version
+
+    # v0 (unversioned / legacy) -> v1
+    if ver == 0:
+        runs_raw = migrated.get("runs")
+        if runs_raw is None and "history" in migrated:
+            runs_raw = migrated.pop("history")
+        if not isinstance(runs_raw, list):
+            raise StateStoreError(f"Invalid state file at {source_label}: 'runs' must be a list.")
+        normalized_runs: list[Any] = []
+        for item in runs_raw:
+            if isinstance(item, dict):
+                entry = dict(item)
+                entry.setdefault("applied_tweaks", [])
+                entry.setdefault("planned_tweaks", [])
+                entry.setdefault("state", str(TransactionState.COMMITTED))
+                normalized_runs.append(entry)
+            else:
+                normalized_runs.append(item)
+        migrated["runs"] = normalized_runs
+        migrated["version"] = 1
+        ver = 1
+
+    # v1 -> v2: resolve deprecated tweak ID aliases and normalize version field
+    if ver == 1:
+        runs_raw = migrated.get("runs")
+        if not isinstance(runs_raw, list):
+            raise StateStoreError(f"Invalid state file at {source_label}: 'runs' must be a list.")
+        upgraded_runs: list[Any] = []
+        for item in runs_raw:
+            if isinstance(item, dict):
+                entry = dict(item)
+                if isinstance(entry.get("applied_tweaks"), list):
+                    entry["applied_tweaks"] = [resolve_tweak_id(str(t)) for t in entry["applied_tweaks"]]
+                if isinstance(entry.get("planned_tweaks"), list):
+                    entry["planned_tweaks"] = [resolve_tweak_id(str(t)) for t in entry["planned_tweaks"]]
+                else:
+                    entry["planned_tweaks"] = []
+                upgraded_runs.append(entry)
+            else:
+                upgraded_runs.append(item)
+        migrated["runs"] = upgraded_runs
+        migrated.pop("schema_version", None)
+        migrated["version"] = 2
+        ver = 2
+
+    if not isinstance(migrated.get("runs"), list):
+        raise StateStoreError(f"Invalid state file at {source_label}: 'runs' must be a list.")
+
+    was_migrated = orig_version != STATE_SCHEMA_VERSION or payload.get("version") != STATE_SCHEMA_VERSION
+    return migrated, orig_version, was_migrated
 
 
 def resolve_state_path() -> Path:
@@ -103,18 +186,8 @@ class StateStore:
                 f"Check {self.state_path.with_suffix('.json.bak')} for recovery."
             ) from exc
 
-        if not isinstance(payload, dict):
-            raise StateStoreError(f"Invalid state file at {self.state_path}: top-level JSON must be an object.")
-
-        version = payload.get("version")
-        if version != STATE_SCHEMA_VERSION:
-            raise StateStoreError(
-                f"Unsupported state schema version {version!r} in {self.state_path} (expected {STATE_SCHEMA_VERSION})."
-            )
-
-        runs_raw = payload.get("runs")
-        if not isinstance(runs_raw, list):
-            raise StateStoreError(f"Invalid state file at {self.state_path}: 'runs' must be a list.")
+        migrated, _, _ = migrate_state_payload(payload, source_label=str(self.state_path))
+        runs_raw = migrated["runs"]
 
         try:
             return [RunRecord.from_dict(item) for item in runs_raw]
@@ -247,12 +320,15 @@ class StateStore:
         with self._locked():
             raw_text = bak_path.read_text(encoding="utf-8")
             payload: Any = json.loads(raw_text)
-            if not isinstance(payload, dict) or payload.get("version") != STATE_SCHEMA_VERSION:
+            if not isinstance(payload, dict):
                 raise StateStoreError(f"Backup file at {bak_path} has invalid schema or version.")
-            runs_raw = payload.get("runs")
-            if not isinstance(runs_raw, list):
-                raise StateStoreError(f"Backup file at {bak_path} has invalid 'runs' list.")
-            runs = [RunRecord.from_dict(item) for item in runs_raw]
+            try:
+                migrated, _, _ = migrate_state_payload(payload, source_label=str(bak_path))
+            except StateStoreError as exc:
+                if "'runs' must be a list" in str(exc):
+                    raise StateStoreError(f"Backup file at {bak_path} has invalid 'runs' list.") from exc
+                raise StateStoreError(f"Backup file at {bak_path} has invalid schema or version: {exc}") from exc
+            runs = [RunRecord.from_dict(item) for item in migrated["runs"]]
             if self.state_path.is_file():
                 corrupt_copy = self.state_path.with_suffix(".json.corrupt")
                 shutil.copy2(self.state_path, corrupt_copy)
@@ -260,6 +336,41 @@ class StateStore:
             # Re-open and validate restored state.json
             self._load_runs_unlocked()
             return True
+
+    def migrate(self, *, dry_run: bool = True) -> dict[str, Any]:
+        """Inspect and optionally migrate state.json on disk to STATE_SCHEMA_VERSION."""
+        with self._locked():
+            if not self.state_path.is_file():
+                return {
+                    "state_path": str(self.state_path),
+                    "exists": False,
+                    "migrated": False,
+                    "from_version": None,
+                    "to_version": STATE_SCHEMA_VERSION,
+                    "run_count": 0,
+                    "dry_run": dry_run,
+                }
+            try:
+                raw_text = self.state_path.read_text(encoding="utf-8")
+                payload: Any = json.loads(raw_text)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise StateStoreError(f"Corrupted state file at {self.state_path}: {exc}") from exc
+            migrated, orig_version, was_migrated = migrate_state_payload(payload, source_label=str(self.state_path))
+            try:
+                runs = [RunRecord.from_dict(item) for item in migrated["runs"]]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StateStoreError(f"Malformed run record in {self.state_path}: {exc}") from exc
+            if was_migrated and not dry_run:
+                self._save_runs_unlocked(runs)
+            return {
+                "state_path": str(self.state_path),
+                "exists": True,
+                "migrated": was_migrated,
+                "from_version": orig_version,
+                "to_version": STATE_SCHEMA_VERSION,
+                "run_count": len(runs),
+                "dry_run": dry_run,
+            }
 
     def load_runs(self) -> list[RunRecord]:
         """Load all recorded runs in chronological order."""
