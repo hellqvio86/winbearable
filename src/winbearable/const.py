@@ -2,8 +2,10 @@
 
 from pathlib import Path
 
-__version__ = "0.12.2"
+__version__ = "0.13.0"
 JSON_SCHEMA_VERSION = "1.0"
+STATE_SCHEMA_VERSION = 2
+PROFILE_SCHEMA_VERSION = 2
 
 APP_NAME = "winbearable"
 CLI_NAME = "wb"

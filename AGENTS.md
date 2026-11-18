@@ -58,6 +58,8 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
     - `MIN_SUPPORTED_BUILD = 26300`; `min_build` and `tested_builds` follow `const.py` (`DEFAULT_TESTED_BUILDS`). Only the maintainer's Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT (`IoTEnterprise`, `IoTEnterpriseS`), LTSC (`EnterpriseS`), Windows Server, and builds `< 26300` are strictly unsupported. Do not add compatibility code for older builds or IoT/LTSC.
 13. **Category Conventions:**
     - Follow existing category names (`apps`, `onedrive`, `search`, `start`, `taskbar`, `explorer`, `ai`, `privacy`, `bloat`, `telemetry`, `hardening`). Create a new category only for a genuinely new area (e.g. `input`, `dev`, `power`, `services`, `edge`).
+14. **JSON Format & Backwards-Compatible Config/State Migration:**
+    - Both TOML and JSON formats are first-class for profiles/configs (`profiles.py`), and `state.json` (`state.py`) + config/profile loaders must remain backwards compatible across schema versions. Always support reading older config/profile and `state.json` formats and migrating them cleanly up to the latest `PROFILE_SCHEMA_VERSION` / `STATE_SCHEMA_VERSION` (`const.py`), with `wb migrate {config,state}` (dry-run by default) and regression tests covering every schema transition.
 
 ## Diagnostic & CLI Commands
 
