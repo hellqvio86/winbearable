@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.12.0] - 2026-11-17
+
+### Security & Rollback Hardening
+
+- **UAC & Privileged Execution:** Elevated Python launches pass `-I` (isolated mode); `NativeSystemBackend._sys32_exe` uses Win32 `GetSystemDirectoryW` on Windows; elevated extension operations refuse user-writable `code.cmd` under `%LOCALAPPDATA%` / `%USERPROFILE%`.
+- **Rollback & Concurrency Safety:** Recorded post-apply registry/file states (`post_existed`, `post_data`, `post_type`, `post_sha256`) and abort with `restore_conflict` if an external actor modified the target (unless `force=True`); `.wslconfig` writes verify baseline existence and SHA-256 (`apply_wslconfig_target`) and store backups per `run_id`; `WslDistroSnapshot` binds `distro_guid` from `Lxss` to reject mismatched replacement distros; registry snapshots include `RegistryView` in deduplication keys; `_atomic_write_bytes` preserves existing Windows DACLs via `icacls /save` and `/restore`.
+- **Subprocess, Audit & Profiles:** `_run_native_cmd` drains stdout/stderr via bounded streaming (`_communicate_bounded`); `_check_listening_ports` enumerates IPv4/IPv6 TCP and UDP endpoints; `load_profile` enforces `MAX_PROFILE_INHERITANCE_DEPTH` with full chain diagnostics; CI publish jobs verify git tag `v${__version__}` agreement.
+
 ## [0.11.0] - 2026-11-17
 
 ### Security, Reliability & Catalog Accuracy

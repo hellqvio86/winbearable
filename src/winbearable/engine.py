@@ -68,6 +68,7 @@ from .wsl import (
     WslOperationError,
     apply_distro_wsl_conf,
     apply_wslconfig_target,
+    get_wsl_distro_guid,
     plan_or_apply_wsl,
     prepare_wsl_plan,
 )
@@ -812,11 +813,22 @@ def _compensate_run_record(
     registry: RegistryBackend,
     system: SystemBackend,
     restore_full_policy: bool = False,
+    force_rollback: bool = False,
 ) -> list[str]:
     """Execute compensating rollback for a RunRecord and return any error messages."""
     errors: list[str] = []
     for reg_snap in reversed(run_record.registry_snapshots):
         try:
+            if not force_rollback and reg_snap.post_existed is not None:
+                cur_val = registry.get_value(reg_snap.hive, reg_snap.key_path, reg_snap.value_name, view=reg_snap.view)
+                matches_post = (
+                    (cur_val is not None and cur_val[0] == reg_snap.post_data and cur_val[1] == reg_snap.post_type)
+                    if reg_snap.post_existed
+                    else (cur_val is None)
+                )
+                if not matches_post:
+                    errors.append(f"restore_conflict registry {reg_snap.full_key_path} [{reg_snap.display_value_name}]")
+                    continue
             registry.restore_snapshot(reg_snap)
         except Exception as exc:
             errors.append(f"registry {reg_snap.full_key_path} [{reg_snap.display_value_name}]: {exc}")
@@ -923,6 +935,12 @@ def _compensate_run_record(
 
     for f_snap in reversed(run_record.file_snapshots):
         try:
+            if not force_rollback and f_snap.post_sha256 is not None:
+                cur_path = Path(f_snap.path)
+                cur_sha = hashlib.sha256(cur_path.read_bytes()).hexdigest() if cur_path.is_file() else None
+                if cur_sha != f_snap.post_sha256:
+                    errors.append(f"restore_conflict file {f_snap.path}")
+                    continue
             restore_file_snapshot(f_snap)
         except Exception as exc:
             errors.append(f"file {f_snap.path}: {exc}")
@@ -945,6 +963,13 @@ def _compensate_run_record(
         except OSError as exc:
             errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
     for d_snap in reversed(run_record.wsl_distro_snapshots):
+        if d_snap.distro_guid is not None:
+            cur_guid = get_wsl_distro_guid(d_snap.distro, registry)
+            if cur_guid != d_snap.distro_guid:
+                errors.append(
+                    f"wsl distro '{d_snap.distro}' identity mismatch (expected {d_snap.distro_guid}, got {cur_guid})"
+                )
+                continue
         if d_snap.existed:
             res = system.run_wsl_command(
                 ["-d", d_snap.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
@@ -1353,7 +1378,25 @@ def _apply_profile_locked(
             exported_subtrees: set[tuple[str, str]] = set()
             now_iso = datetime.now(tz=UTC).isoformat()
 
+            def _populate_post_apply_states() -> None:
+                for i, rs in enumerate(snaps.registry):
+                    cur = registry.get_value(rs.hive, rs.key_path, rs.value_name, view=rs.view)
+                    snaps.registry[i] = replace(
+                        rs,
+                        post_existed=cur is not None,
+                        post_data=cur[0] if cur is not None else None,
+                        post_type=cur[1] if cur is not None else None,
+                    )
+                for i, fs in enumerate(snaps.files):
+                    p = Path(fs.path)
+                    snaps.files[i] = replace(
+                        fs,
+                        post_sha256=hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None,
+                    )
+
             def _make_record(state: TransactionState, error: str | None = None) -> RunRecord:
+                if state == TransactionState.COMMITTED:
+                    _populate_post_apply_states()
                 return RunRecord(
                     run_id=run_id_candidate,
                     timestamp=now_iso,
@@ -1484,6 +1527,7 @@ def _apply_profile_locked(
                                         distro=d_plan.distro,
                                         existed=d_plan.probe.status == "exists",
                                         previous_content=d_plan.probe.content,
+                                        distro_guid=get_wsl_distro_guid(d_plan.distro, registry),
                                     )
                                 )
                         wsl_changed = prepared_wsl.wslconfig_changed or bool(wsl_distro_snapshots)
@@ -1647,6 +1691,7 @@ def rollback_runs(
     dry_run: bool = True,
     allow_simulated: bool = False,
     restore_full_policy: bool = False,
+    force: bool = False,
 ) -> list[RunRecord]:
     """Revert the latest run (or all runs back to to_run_id inclusive)."""
     from contextlib import nullcontext
@@ -1663,6 +1708,7 @@ def rollback_runs(
             to_run_id=to_run_id,
             dry_run=dry_run,
             restore_full_policy=restore_full_policy,
+            force=force,
         )
 
 
@@ -1711,6 +1757,7 @@ def _rollback_runs_impl(
     to_run_id: str | None = None,
     dry_run: bool = True,
     restore_full_policy: bool = False,
+    force: bool = False,
 ) -> list[RunRecord]:
     all_runs = state_store.load_runs()
     if not all_runs:
@@ -1735,7 +1782,9 @@ def _rollback_runs_impl(
         for run_record in runs_to_revert:
             rolling_back = replace(run_record, state=TransactionState.ROLLING_BACK)
             state_store.upsert_run(rolling_back)
-            comp_errors = _compensate_run_record(run_record, registry, system, restore_full_policy=restore_full_policy)
+            comp_errors = _compensate_run_record(
+                run_record, registry, system, restore_full_policy=restore_full_policy, force_rollback=force
+            )
             if comp_errors:
                 err_msg = f"Rollback errors: {'; '.join(comp_errors)}"
                 state_store.upsert_run(

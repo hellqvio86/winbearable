@@ -280,6 +280,19 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Verify release tag matches package version
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "Publishing requires a git tag ref (got ref_type=${{ github.ref_type }})"
+            exit 1
+          fi
+          PKG_VER=$(PYTHONPATH=src python -c "from winbearable.const import __version__; print(__version__)")
+          if [ "${{ github.ref_name }}" != "v${PKG_VER}" ]; then
+            echo "Tag '${{ github.ref_name }}' does not match const.__version__ 'v${PKG_VER}'"
+            exit 1
+          fi
+
       - name: Build package
         run: uv build
 
@@ -326,6 +339,15 @@ jobs:
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.14"
+
+      - name: Verify release tag matches package version
+        shell: bash
+        run: |
+          PKG_VER=$(PYTHONPATH=src python -c "from winbearable.const import __version__; print(__version__)")
+          if [ "${{ github.ref_name }}" != "v${PKG_VER}" ]; then
+            echo "Tag '${{ github.ref_name }}' does not match const.__version__ 'v${PKG_VER}'"
+            exit 1
+          fi
 
       - name: Install dependencies
         run: uv sync --frozen

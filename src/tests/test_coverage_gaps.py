@@ -1839,3 +1839,100 @@ def test_uac_isolated_python_elevated_code_guard_wsl_backup_dir_and_network_audi
         finding = _check_listening_ports(env)
     assert "TCP4=1, TCP6=1, UDP4=1, UDP6=1" in finding.observation.evidence
     assert "445" in finding.observation.evidence and "5353" in finding.observation.evidence
+
+
+def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profile_depth(tmp_path: Path) -> None:
+    """Post-apply drift conflict, .wslconfig concurrency, bounded stdout, distro GUID, and profile depth."""
+    import sys
+
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import InMemorySystemBackend, NativeSystemBackend
+    from winbearable.const import HIVE_HKCU, REG_DWORD, REG_SZ
+    from winbearable.engine import apply_profile, rollback_runs
+    from winbearable.models import ProfileSpec, RunRecord, TransactionState, WslConfigSpec, WslDistroSnapshot
+    from winbearable.profiles import MAX_PROFILE_INHERITANCE_DEPTH, ProfileValidationError, load_profile
+    from winbearable.state import StateStore
+    from winbearable.wsl import WslOperationError, apply_wslconfig_target, get_wsl_distro_guid, prepare_wsl_plan
+
+    # P0.4: post-apply external registry edit triggers restore_conflict and preserves external value
+    reg = InMemoryRegistryBackend(
+        initial_values={
+            (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt"): (1, REG_DWORD)
+        }
+    )
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    env = sysb.detect_environment(reg)
+    store = StateStore(tmp_path / "state.json")
+    prof = ProfileSpec(name="p04", description="p04", tweaks={"explorer.show_file_extensions": True})
+    apply_profile(prof, env, reg, sysb, store, dry_run=False, allow_simulated=True)
+    assert reg.get_value(HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt") == (
+        0,
+        REG_DWORD,
+    )
+    # External change after apply:
+    reg.set_value(
+        HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt", 99, REG_DWORD
+    )
+    with pytest.raises(RuntimeError, match="restore_conflict"):
+        rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+    assert reg.get_value(HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt") == (
+        99,
+        REG_DWORD,
+    )
+
+    # P1.1: .wslconfig modified between prepare_wsl_plan and apply_wslconfig_target raises WslOperationError
+    wsl_cfg = tmp_path / ".wslconfig"
+    wsl_cfg.write_text("[wsl2]\nmemory=2GB\n", encoding="utf-8")
+    plan = prepare_wsl_plan(
+        WslConfigSpec(enabled=True, mode="strict", memory_gb=4),
+        InMemorySystemBackend(total_memory_gb=16),
+        wslconfig_path=wsl_cfg,
+        backup_dir=tmp_path / "bak",
+    )
+    wsl_cfg.write_text("[wsl2]\nmemory=8GB\n", encoding="utf-8")
+    with pytest.raises(WslOperationError, match="Concurrent modification"):
+        apply_wslconfig_target(plan)
+
+    # P1.5: _run_native_cmd bounds large stdout/stderr during streaming capture
+    from winbearable.const import MAX_CMD_OUTPUT_CHARS
+
+    native_lin = NativeSystemBackend(platform_override="linux")
+    big_res = native_lin._run_native_cmd(
+        [sys.executable, "-c", f"import sys; sys.stdout.write('A' * {MAX_CMD_OUTPUT_CHARS + 20_000})"]
+    )
+    assert big_res.returncode == 0
+    assert "truncated" in big_res.stdout
+
+    # P1.7: Lxss distro_guid mismatch aborts distro rollback
+    lxss_reg = InMemoryRegistryBackend(
+        initial_values={
+            (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Lxss\{NEW-GUID}", "DistributionName"): (
+                "Ubuntu",
+                REG_SZ,
+            )
+        }
+    )
+    assert get_wsl_distro_guid("Ubuntu", lxss_reg) == "{NEW-GUID}"
+    store_guid = StateStore(tmp_path / "state_guid.json")
+    store_guid.append_run(
+        RunRecord(
+            run_id="r-guid",
+            timestamp="2026-01-01T00:00:00Z",
+            profile_name="wsl",
+            applied_tweaks=(),
+            wsl_distro_snapshots=(
+                WslDistroSnapshot(distro="Ubuntu", existed=True, previous_content="", distro_guid="{OLD-GUID}"),
+            ),
+            state=TransactionState.COMMITTED,
+        )
+    )
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        rollback_runs(store_guid, lxss_reg, sysb, dry_run=False, allow_simulated=True)
+
+    # P2.1: load_profile bounds inheritance depth with ProfileValidationError
+    for idx in range(MAX_PROFILE_INHERITANCE_DEPTH + 2):
+        p_file = tmp_path / f"chain_{idx}.toml"
+        ext_line = f'extends = "chain_{idx - 1}"\n' if idx > 0 else ""
+        p_file.write_text(f'name = "c{idx}"\ndescription = "c"\n{ext_line}[tweaks]\n', encoding="utf-8")
+    with pytest.raises(ProfileValidationError, match="depth exceeded"):
+        load_profile(str(tmp_path / f"chain_{MAX_PROFILE_INHERITANCE_DEPTH + 1}.toml"))
