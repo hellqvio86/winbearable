@@ -261,7 +261,7 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "Medium risk: requires reboot and blocks unsigned LSA plugins.",
         "Unsigned third-party LSA/authentication DLLs will fail to load.",
         "registry_value",
-        "Verified HKLM SYSTEM\\CurrentControlSet\\Control\\Lsa RunAsPPL=1.",
+        "Verified HKLM SYSTEM\\CurrentControlSet\\Control\\Lsa RunAsPPL=2.",
     ),
     "hardening.enable_vbs_hvci": _p(
         "Enables Virtualization-Based Security (VBS) and HVCI kernel code integrity.",
@@ -310,7 +310,7 @@ TWEAK_PROVENANCE: dict[str, TweakProvenance] = {
         "Medium risk: enables PUA blocking and cloud sample/metadata protection.",
         "Potentially unwanted applications are blocked by Defender.",
         "registry_value",
-        "Verified Windows Defender PUAProtection=1 and SpynetReporting/SubmitSamplesConsent policies.",
+        "Verified Windows Defender PUAProtection=1 and SpynetReporting=2 policies.",
     ),
     "hardening.restrict_blank_passwords": _p(
         "Enforces LimitBlankPasswordUse=1 to restrict blank-password accounts to console logon.",

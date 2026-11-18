@@ -61,16 +61,14 @@ def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
                     timeout=5.0,
                 )
         proc.kill()
-        try:
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             proc.communicate(timeout=5.0)
-        except subprocess.TimeoutExpired, OSError:
-            pass
-        finally:
-            if proc.stdout is not None:
-                proc.stdout.close()
-            if proc.stderr is not None:
-                proc.stderr.close()
         raise subprocess.TimeoutExpired(cmd=args, timeout=15.0, output=exc.output, stderr=exc.stderr) from exc
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
 
 
 def _decode_enabled(raw: Any) -> bool | str | None:
@@ -115,12 +113,17 @@ def _normalize_action(value: str, field_name: str) -> str:
 
 
 def _parse_ps_setting_json(raw_stdout: str) -> dict[str, Any] | None:
-    if not raw_stdout.strip():
+    stripped = raw_stdout.strip()
+    if not stripped:
         return None
     try:
-        parsed = json.loads(raw_stdout.strip())
+        parsed = json.loads(stripped)
     except json.JSONDecodeError:
-        return None
+        last_line = stripped.splitlines()[-1].strip()
+        try:
+            parsed = json.loads(last_line)
+        except json.JSONDecodeError:
+            return None
     if isinstance(parsed, list):
         parsed = parsed[0] if len(parsed) == 1 else None
     if not isinstance(parsed, dict) or "error" in parsed:

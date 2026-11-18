@@ -54,7 +54,7 @@ publish: build
 	uv publish
 
 winget-build: ## Build portable Windows x64 zip of wb.exe for Winget
-	uv run --with pyinstaller python bin/build_winget.py
+	uv run --group release --frozen python bin/build_winget.py
 
 winget-validate: ## Validate local packaging/winget manifests
 	winget validate --manifest packaging/winget
@@ -83,9 +83,9 @@ secrets: ## Run TruffleHog secret scanning via Docker container
 trivy: ## Run Trivy vulnerability scanning via Docker container
 	@echo "Running Trivy vulnerability scan (container)..."
 	@if docker info >/dev/null 2>&1; then \
-		docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:$(TRIVY_VERSION) fs --severity HIGH,CRITICAL --exit-code 1 .; \
+		docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:$(TRIVY_VERSION) fs --scanners vuln --skip-dirs .venv,.mypy_cache,.ruff_cache,.pytest_cache --severity HIGH,CRITICAL --exit-code 1 .; \
 	elif command -v sg >/dev/null 2>&1; then \
-		sg docker -c "docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:$(TRIVY_VERSION) fs --severity HIGH,CRITICAL --exit-code 1 ."; \
+		sg docker -c "docker run --rm -v $$(pwd):/src -v trivy-cache:/root/.cache -w /src aquasec/trivy:$(TRIVY_VERSION) fs --scanners vuln --skip-dirs .venv,.mypy_cache,.ruff_cache,.pytest_cache --severity HIGH,CRITICAL --exit-code 1 ."; \
 	else \
 		echo "ERROR: docker is required!" >&2 && exit 1; \
 	fi

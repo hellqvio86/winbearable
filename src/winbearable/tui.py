@@ -72,6 +72,11 @@ def apply_from_tui(
 
 def format_apply_status(summary: ApplySummary) -> str:
     """Format a concise status message summarizing a TUI apply run."""
+    if summary.failed_ids:
+        rb = f", rolled back {len(summary.rolled_back_ids)}" if summary.rolled_back_ids else ""
+        return (
+            f"Apply FAILED on {', '.join(summary.failed_ids)}{rb}. {len(summary.already_applied_ids)} already applied."
+        )
     if summary.applied_ids:
         return (
             f"Applied {len(summary.applied_ids)} tweak(s) (run_id={summary.run_id}). "
@@ -82,7 +87,8 @@ def format_apply_status(summary: ApplySummary) -> str:
     return (
         f"No drifted tweaks applied ({len(summary.already_applied_ids)} already applied, "
         f"{len(summary.skipped_admin_ids)} needs admin, "
-        f"{len(summary.skipped_policy_ids)} blocked)."
+        f"{len(summary.skipped_policy_ids)} blocked, "
+        f"{len(summary.skipped_managed_ids)} managed)."
     )
 
 
@@ -100,9 +106,13 @@ def _build_textual_app(  # pragma: no cover
     textual_widgets: Any = importlib.import_module("textual.widgets")
 
     def _modal_compose(self: Any) -> Any:
-        warning_line = (
-            f"\nWARNING: Includes HIGH-RISK tweak(s): {', '.join(self._high_risk_ids)}" if self._high_risk_ids else ""
-        )
+        warnings_list: list[str] = []
+        if self._high_risk_ids:
+            warnings_list.append(f"WARNING: Includes HIGH-RISK tweak(s): {', '.join(self._high_risk_ids)}")
+        if self._irreversible_ids:
+            warnings_list.append(f"WARNING: Includes IRREVERSIBLE tweak(s): {', '.join(self._irreversible_ids)}")
+        warning_line = ("\n" + "\n".join(warnings_list)) if warnings_list else ""
+        has_danger = bool(self._high_risk_ids or self._irreversible_ids)
         with textual_containers.Vertical(id="confirm-dialog"):
             yield textual_widgets.Static(
                 f"Apply {self._drifted_count} drifted tweak(s) from profile '{profile.name}'?{warning_line}\n"
@@ -113,17 +123,18 @@ def _build_textual_app(  # pragma: no cover
                 yield textual_widgets.Button(
                     "Confirm Apply",
                     id="confirm-yes",
-                    variant="error" if self._high_risk_ids else "primary",
+                    variant="error" if has_danger else "primary",
                 )
                 yield textual_widgets.Button("Cancel", id="confirm-no")
 
     def _modal_button(self: Any, event: Any) -> None:
         self.dismiss(event.button.id == "confirm-yes")
 
-    def _modal_init(self: Any, drifted_count: int, high_risk_ids: list[str]) -> None:
+    def _modal_init(self: Any, drifted_count: int, high_risk_ids: list[str], irreversible_ids: list[str]) -> None:
         textual_screen.ModalScreen.__init__(self)
         self._drifted_count = drifted_count
         self._high_risk_ids = high_risk_ids
+        self._irreversible_ids = irreversible_ids
 
     confirm_screen_cls: Any = type(
         "ConfirmApplyScreen",
@@ -206,7 +217,7 @@ def _build_textual_app(  # pragma: no cover
 
     def _load_worker(self: Any) -> None:
         try:
-            evaluations = evaluate_profile(profile, env, registry, system)
+            evaluations = evaluate_profile(profile, env, registry, system, allow_managed=False)
             drifted_cnt = sum(1 for item in evaluations if item.status == TweakStatus.DRIFTED)
             applied_cnt = sum(1 for item in evaluations if item.status == TweakStatus.APPLIED)
 
@@ -223,10 +234,18 @@ def _build_textual_app(  # pragma: no cover
             err_msg = f"Evaluation failed: {exc}"
             self.call_from_thread(lambda m=err_msg: (self._set_status(m), self._set_busy(False)))
 
-    def _apply_worker(self: Any, allow_high_risk: bool) -> None:
+    def _apply_worker(self: Any, allow_high_risk: bool, allow_irreversible: bool) -> None:
         try:
-            summary = apply_from_tui(profile, env, registry, system, store, allow_high_risk=allow_high_risk)
-            refreshed = evaluate_profile(profile, env, registry, system)
+            summary = apply_from_tui(
+                profile,
+                env,
+                registry,
+                system,
+                store,
+                allow_high_risk=allow_high_risk,
+                allow_irreversible=allow_irreversible,
+            )
+            refreshed = evaluate_profile(profile, env, registry, system, allow_managed=False)
             status_msg = format_apply_status(summary)
 
             def _finish() -> None:
@@ -263,15 +282,20 @@ def _build_textual_app(  # pragma: no cover
             self._set_status("Nothing to apply — no drifted tweaks.")
             return
         high_risk_ids = [item.tweak_id for item in drifted if item.risk == RiskLevel.HIGH]
+        irreversible_ids = [item.tweak_id for item in drifted if item.irreversible]
 
         def _on_confirm(confirmed: bool | None) -> None:
             if not confirmed:
                 return
             self._set_busy(True)
             self._set_status(f"Applying {len(drifted)} drifted tweak(s)...")
-            self.run_worker(lambda: self._apply_worker(bool(high_risk_ids)), thread=True, exclusive=True)
+            self.run_worker(
+                lambda: self._apply_worker(bool(high_risk_ids), bool(irreversible_ids)),
+                thread=True,
+                exclusive=True,
+            )
 
-        self.push_screen(confirm_screen_cls(len(drifted), high_risk_ids), _on_confirm)
+        self.push_screen(confirm_screen_cls(len(drifted), high_risk_ids, irreversible_ids), _on_confirm)
 
     def _on_button_pressed(self: Any, event: Any) -> None:
         if event.button.id == "btn-apply":
@@ -319,7 +343,7 @@ def launch_tui(
 ) -> int:
     """Launch the interactive Textual TUI or explain how to install winbearable[tui]."""
     if runner is not None:
-        evaluations = evaluate_profile(profile, env, registry, system)
+        evaluations = evaluate_profile(profile, env, registry, system, allow_managed=False)
         return runner(format_tui_rows(evaluations))
 
     if not is_textual_available():

@@ -1,5 +1,6 @@
 """Read-only native security & posture audits (`wb audit` and `wb doctor` blockers)."""
 
+import contextlib
 import ctypes
 import os
 import re
@@ -146,13 +147,18 @@ def _check_bitlocker_protectors(env: EnvironmentInfo, registry: RegistryBackend)
 
 def _check_firewall_default_actions(registry: RegistryBackend) -> AuditFinding:
     base = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy"
+    pol_base = r"SOFTWARE\Policies\Microsoft\WindowsFirewall"
     profiles = ("DomainProfile", "StandardProfile", "PublicProfile")
     issues: list[str] = []
     evidence_parts: list[str] = []
+    all_explicit = True
+    any_missing = False
     for prof in profiles:
         ok_e, en = _safe_val(registry, HIVE_HKLM, f"{base}\\{prof}", "EnableFirewall")
         ok_i, inb = _safe_val(registry, HIVE_HKLM, f"{base}\\{prof}", "DefaultInboundAction")
-        if not ok_e or not ok_i:
+        ok_pe, pol_en = _safe_val(registry, HIVE_HKLM, f"{pol_base}\\{prof}", "EnableFirewall")
+        ok_pi, pol_inb = _safe_val(registry, HIVE_HKLM, f"{pol_base}\\{prof}", "DefaultInboundAction")
+        if not ok_e or not ok_i or not ok_pe or not ok_pi:
             obs = PostureObservation(
                 ObservationState.INACCESSIBLE,
                 f"registry:{base}",
@@ -161,11 +167,15 @@ def _check_firewall_default_actions(registry: RegistryBackend) -> AuditFinding:
                 "FirewallPolicy unreadable.",
             )
             return AuditFinding("chk.firewall_default_actions", "network", "Firewall Default Actions", "medium", obs)
-        en_v = en[0] if en else None
-        inb_v = inb[0] if inb else None
+        en_v = pol_en[0] if pol_en is not None else (en[0] if en else None)
+        inb_v = pol_inb[0] if pol_inb is not None else (inb[0] if inb else None)
         evidence_parts.append(f"{prof}(Enable={en_v}, Inbound={inb_v})")
         if en_v == 0 or inb_v == 0:
             issues.append(prof)
+        if en_v is None:
+            any_missing = True
+        if en_v is None or inb_v is None:
+            all_explicit = False
     if issues:
         obs = PostureObservation(
             ObservationState.DISABLED,
@@ -182,10 +192,19 @@ def _check_firewall_default_actions(registry: RegistryBackend) -> AuditFinding:
             obs,
             "hardening.enable_firewall_all_profiles",
         )
+    if any_missing:
+        obs = PostureObservation(
+            ObservationState.ABSENT,
+            f"registry:{base}",
+            ObservationConfidence.LOW,
+            "; ".join(evidence_parts),
+            "Firewall EnableFirewall values are absent in registry.",
+        )
+        return AuditFinding("chk.firewall_default_actions", "network", "Firewall Default Actions", "info", obs)
     obs = PostureObservation(
         ObservationState.ENABLED,
         f"registry:{base}",
-        ObservationConfidence.HIGH,
+        ObservationConfidence.HIGH if all_explicit else ObservationConfidence.MEDIUM,
         "; ".join(evidence_parts),
         "All firewall profiles enforce default-block inbound.",
     )
@@ -210,6 +229,36 @@ def _check_local_admins(env: EnvironmentInfo) -> AuditFinding:
         advapi32 = windll.advapi32
         kernel32 = windll.kernel32
         assert netapi32 is not None and advapi32 is not None
+
+        with contextlib.suppress(AttributeError, TypeError):
+            advapi32.ConvertStringSidToSidW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p)]
+            advapi32.ConvertStringSidToSidW.restype = ctypes.c_int
+            advapi32.LookupAccountSidW.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_int),
+            ]
+            advapi32.LookupAccountSidW.restype = ctypes.c_int
+            kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+            kernel32.LocalFree.restype = ctypes.c_void_p
+            netapi32.NetLocalGroupGetMembers.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.c_void_p,
+            ]
+            netapi32.NetLocalGroupGetMembers.restype = ctypes.c_ulong
+            netapi32.NetApiBufferFree.argtypes = [ctypes.c_void_p]
+            netapi32.NetApiBufferFree.restype = ctypes.c_ulong
+
         # Look up localized Administrators group name from SID S-1-5-32-544
         sid = ctypes.c_void_p()
         if not advapi32.ConvertStringSidToSidW("S-1-5-32-544", ctypes.byref(sid)):
@@ -290,6 +339,7 @@ def _check_guest_account(env: EnvironmentInfo, registry: RegistryBackend) -> Aud
             if windll is None:
                 raise OSError("windll unavailable")
             netapi32 = windll.netapi32
+            advapi32 = getattr(windll, "advapi32", None)
 
             class _USER_INFO_1(ctypes.Structure):
                 _fields_ = [
@@ -303,8 +353,73 @@ def _check_guest_account(env: EnvironmentInfo, registry: RegistryBackend) -> Aud
                     ("usri1_script_path", ctypes.c_wchar_p),
                 ]
 
+            class _USER_MODALS_INFO_2(ctypes.Structure):
+                _fields_ = [
+                    ("usrmod2_domain_name", ctypes.c_wchar_p),
+                    ("usrmod2_domain_id", ctypes.c_void_p),
+                ]
+
+            with contextlib.suppress(AttributeError, TypeError):
+                netapi32.NetUserGetInfo.argtypes = [
+                    ctypes.c_wchar_p,
+                    ctypes.c_wchar_p,
+                    ctypes.c_ulong,
+                    ctypes.POINTER(ctypes.c_void_p),
+                ]
+                netapi32.NetUserGetInfo.restype = ctypes.c_ulong
+                netapi32.NetApiBufferFree.argtypes = [ctypes.c_void_p]
+                netapi32.NetApiBufferFree.restype = ctypes.c_ulong
+
+            guest_name = "Guest"
+            modals_fn = getattr(netapi32, "NetUserModalsGet", None)
+            if callable(modals_fn) and advapi32 is not None and callable(getattr(advapi32, "CreateWellKnownSid", None)):
+                with contextlib.suppress(AttributeError, TypeError):
+                    modals_fn.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p)]
+                    modals_fn.restype = ctypes.c_ulong
+                    advapi32.CreateWellKnownSid.argtypes = [
+                        ctypes.c_int,
+                        ctypes.c_void_p,
+                        ctypes.c_void_p,
+                        ctypes.POINTER(ctypes.c_ulong),
+                    ]
+                    advapi32.CreateWellKnownSid.restype = ctypes.c_int
+                    advapi32.LookupAccountSidW.argtypes = [
+                        ctypes.c_wchar_p,
+                        ctypes.c_void_p,
+                        ctypes.c_wchar_p,
+                        ctypes.POINTER(ctypes.c_ulong),
+                        ctypes.c_wchar_p,
+                        ctypes.POINTER(ctypes.c_ulong),
+                        ctypes.POINTER(ctypes.c_int),
+                    ]
+                    advapi32.LookupAccountSidW.restype = ctypes.c_int
+                mod_buf = ctypes.c_void_p()
+                if modals_fn(None, 2, ctypes.byref(mod_buf)) == 0 and mod_buf:
+                    try:
+                        mod2 = ctypes.cast(mod_buf, ctypes.POINTER(_USER_MODALS_INFO_2)).contents
+                        sid_buf = (ctypes.c_ubyte * 68)()
+                        cb_sid = ctypes.c_ulong(68)
+                        if advapi32.CreateWellKnownSid(38, mod2.usrmod2_domain_id, sid_buf, ctypes.byref(cb_sid)):
+                            name_buf = ctypes.create_unicode_buffer(256)
+                            dom_buf = ctypes.create_unicode_buffer(256)
+                            cch_name = ctypes.c_ulong(256)
+                            cch_dom = ctypes.c_ulong(256)
+                            snu = ctypes.c_int()
+                            if advapi32.LookupAccountSidW(
+                                None,
+                                sid_buf,
+                                name_buf,
+                                ctypes.byref(cch_name),
+                                dom_buf,
+                                ctypes.byref(cch_dom),
+                                ctypes.byref(snu),
+                            ):
+                                guest_name = name_buf.value
+                    finally:
+                        netapi32.NetApiBufferFree(mod_buf)
+
             buf = ctypes.c_void_p()
-            rc = netapi32.NetUserGetInfo(None, "Guest", 1, ctypes.byref(buf))
+            rc = netapi32.NetUserGetInfo(None, guest_name, 1, ctypes.byref(buf))
             if rc == 0 and buf:
                 try:
                     info = ctypes.cast(buf, ctypes.POINTER(_USER_INFO_1)).contents
@@ -409,6 +524,17 @@ def _check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
         if windll is None:
             raise OSError("windll unavailable")
         iphlpapi = windll.iphlpapi
+        with contextlib.suppress(AttributeError, TypeError):
+            for tbl_fn in (iphlpapi.GetExtendedTcpTable, iphlpapi.GetExtendedUdpTable):
+                tbl_fn.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_ulong),
+                    ctypes.c_int,
+                    ctypes.c_ulong,
+                    ctypes.c_int,
+                    ctypes.c_ulong,
+                ]
+                tbl_fn.restype = ctypes.c_ulong
 
         def _query_table(fn: Any, af: int, table_cls: int, stride: int, port_off: int) -> tuple[int, list[int]]:
             sz = ctypes.c_ulong(0)
@@ -416,8 +542,15 @@ def _check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
             if sz.value == 0:
                 return 0, []
             buf = (ctypes.c_ubyte * sz.value)()
-            rc = fn(buf, ctypes.byref(sz), False, af, table_cls, 0)
-            if rc != 0:
+            for _ in range(3):
+                rc = int(fn(buf, ctypes.byref(sz), False, af, table_cls, 0))
+                if rc == 0:
+                    break
+                if rc == 122 and sz.value > 0:  # ERROR_INSUFFICIENT_BUFFER
+                    buf = (ctypes.c_ubyte * sz.value)()
+                    continue
+                return 0, []
+            else:
                 return 0, []
             count = int.from_bytes(bytes(buf[:4]), "little")
             found: list[int] = []
@@ -467,6 +600,19 @@ def _check_open_shares(env: EnvironmentInfo) -> AuditFinding:
         if windll is None:
             raise OSError("windll unavailable")
         netapi32 = windll.netapi32
+        with contextlib.suppress(AttributeError, TypeError):
+            netapi32.NetShareEnum.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_ulong),
+            ]
+            netapi32.NetShareEnum.restype = ctypes.c_ulong
+            netapi32.NetApiBufferFree.argtypes = [ctypes.c_void_p]
+            netapi32.NetApiBufferFree.restype = ctypes.c_ulong
 
         class _SHARE_INFO_1(ctypes.Structure):
             _fields_ = [
@@ -529,16 +675,27 @@ def _check_autostart_inventory(registry: RegistryBackend) -> AuditFinding:
         (HIVE_HKLM, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"),
         (HIVE_HKLM, r"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Run"),
     )
-    present_keys: list[str] = []
+    populated: list[str] = []
     for hive, kpath in run_keys:
-        if registry.key_exists(hive, kpath):
-            present_keys.append(f"{hive}\\{kpath}")
+        try:
+            vals = registry.list_values(hive, kpath)
+        except PermissionError:
+            obs = PostureObservation(
+                ObservationState.INACCESSIBLE,
+                "registry:Run",
+                ObservationConfidence.NONE,
+                f"Access denied reading {hive}\\{kpath}",
+                "Run key unreadable.",
+            )
+            return AuditFinding("chk.autostart_inventory", "persistence", "Autostart Run Keys", "info", obs)
+        if vals:
+            populated.append(f"{hive}\\{kpath} ({len(vals)} entries)")
     obs = PostureObservation(
-        ObservationState.ENABLED if present_keys else ObservationState.ABSENT,
+        ObservationState.ENABLED if populated else ObservationState.ABSENT,
         "registry:Run",
-        ObservationConfidence.MEDIUM,
-        f"Run keys present: {', '.join(present_keys) or 'none'}",
-        "Checked standard HKCU/HKLM Run keys.",
+        ObservationConfidence.HIGH,
+        f"Populated Run keys: {', '.join(populated) or 'none'}",
+        "Enumerated values in standard HKCU/HKLM Run keys.",
     )
     return AuditFinding("chk.autostart_inventory", "persistence", "Autostart Run Keys", "info", obs)
 
@@ -565,12 +722,17 @@ def _check_unquoted_service_paths(registry: RegistryBackend) -> AuditFinding:
         if not raw or raw.startswith('"'):
             continue
         low = raw.lower()
-        if low.startswith((r"\systemroot", "system32", r"c:\windows\system32", r"\??\\", "%systemroot%")):
+        if low.startswith((r"\systemroot", "system32", r"c:\windows\system32", "\\??\\", "%systemroot%")):
             continue
-        exe_match = re.match(r"^([^\s]+\.exe)(?:\s|$)", raw, re.IGNORECASE)
+        expanded = os.path.expandvars(raw)
+        if expanded == raw and "%programfiles%" in low:
+            expanded = re.sub(r"%ProgramFiles%", r"C:\Program Files", raw, flags=re.IGNORECASE)
+        if expanded == raw and "%programfiles(x86)%" in low:
+            expanded = re.sub(r"%ProgramFiles\(x86\)%", r"C:\Program Files (x86)", raw, flags=re.IGNORECASE)
+        exe_match = re.match(r"^([^\s]+\.exe)(?:\s|$)", expanded, re.IGNORECASE)
         if exe_match is not None:
             continue
-        space_exe_match = re.match(r"^([^\"/]+?\s[^\"/]+?\.exe)(?:\s|$)", raw, re.IGNORECASE)
+        space_exe_match = re.match(r"^([^\"/]+?\s[^\"/]+?\.exe)(?:\s|$)", expanded, re.IGNORECASE)
         if space_exe_match is not None:
             vulnerable.append(f"{svc}: {raw}")
     if vulnerable:
@@ -675,27 +837,32 @@ def _check_edr_present(env: EnvironmentInfo) -> AuditFinding:
 
 
 def _check_defender_exclusions(registry: RegistryBackend) -> AuditFinding:
-    excl_base = r"SOFTWARE\Microsoft\Windows Defender\Exclusions"
+    excl_bases = (
+        r"SOFTWARE\Microsoft\Windows Defender\Exclusions",
+        r"SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions",
+    )
     found: list[str] = []
-    for sub in ("Paths", "Processes", "Extensions"):
-        try:
-            if registry.key_exists(HIVE_HKLM, f"{excl_base}\\{sub}"):
-                found.append(sub)
-        except PermissionError:
-            obs = PostureObservation(
-                ObservationState.INACCESSIBLE,
-                f"registry:{excl_base}",
-                ObservationConfidence.NONE,
-                "not_readable (requires SYSTEM/Admin)",
-                "Defender Exclusions key is access-restricted.",
-            )
-            return AuditFinding("chk.defender_exclusions", "defender", "Defender Exclusions", "info", obs)
+    for excl_base in excl_bases:
+        for sub in ("Paths", "Processes", "Extensions"):
+            try:
+                vals = registry.list_values(HIVE_HKLM, f"{excl_base}\\{sub}")
+                if vals:
+                    found.append(f"{sub} ({len(vals)})")
+            except PermissionError:
+                obs = PostureObservation(
+                    ObservationState.INACCESSIBLE,
+                    f"registry:{excl_base}",
+                    ObservationConfidence.NONE,
+                    "not_readable (requires SYSTEM/Admin)",
+                    "Defender Exclusions key is access-restricted.",
+                )
+                return AuditFinding("chk.defender_exclusions", "defender", "Defender Exclusions", "info", obs)
     obs = PostureObservation(
         ObservationState.ENABLED if found else ObservationState.ABSENT,
-        f"registry:{excl_base}",
-        ObservationConfidence.LOW,
-        f"Subkeys present: {', '.join(found) or 'none'}",
-        "Checked Defender Exclusions subkey presence.",
+        f"registry:{excl_bases[0]}",
+        ObservationConfidence.HIGH,
+        f"Populated exclusion lists: {', '.join(found) or 'none'}",
+        "Enumerated Defender Exclusions values (live and policy).",
     )
     return AuditFinding("chk.defender_exclusions", "defender", "Defender Exclusions", "info", obs)
 

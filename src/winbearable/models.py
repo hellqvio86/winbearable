@@ -59,6 +59,7 @@ class TransactionState(StrEnum):
     COMMITTED = "committed"
     ROLLING_BACK = "rolling_back"
     ROLLED_BACK = "rolled_back"
+    PARTIALLY_ROLLED_BACK = "partially_rolled_back"
     FAILED = "failed"
 
 

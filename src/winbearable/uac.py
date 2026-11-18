@@ -157,7 +157,11 @@ def resolve_elevation_target(
     raw_argv0 = argv0 if argv0 is not None else (sys.argv[0] if sys.argv else "")
     if raw_argv0:
         argv0_path = Path(raw_argv0)
-        if argv0_path.name.lower() in {"wb.exe", "winbearable.exe"} and argv0_path.is_file():
+        if (
+            argv0_path.is_absolute()
+            and argv0_path.name.lower() in {"wb.exe", "winbearable.exe"}
+            and argv0_path.is_file()
+        ):
             return str(argv0_path.resolve()), elevated_args
 
     sibling_wb = Path(sys.executable).resolve().with_name("wb.exe")
@@ -194,10 +198,10 @@ def _is_reparse_or_symlink(path: Path) -> bool:
 
 
 def write_uac_output_safe(out_path: Path, text: str) -> None:
-    """Safely create and write elevated child output using O_EXCL and reparse-point checks."""
+    """Safely create and write elevated child output using O_EXCL and full ancestor reparse-point checks."""
     if not out_path.parent.name.startswith("wb-uac-") or out_path.name != "uac-output.txt":
         raise UacElevationError(f"Refusing untrusted UAC output path: {out_path}")
-    if _is_reparse_or_symlink(out_path.parent) or _is_reparse_or_symlink(out_path):
+    if _is_reparse_or_symlink(out_path) or any(_is_reparse_or_symlink(p) for p in out_path.parents):
         raise UacElevationError(f"Refusing symlink/reparse-point UAC output path: {out_path}")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     fd = os.open(str(out_path), flags, 0o600)
@@ -226,12 +230,12 @@ def run_elevated_wb(
         )
     else:
         effective_timeout_ms = timeout_ms
-    if effective_timeout_ms <= 0:
-        raise ValueError("timeout_ms must be a positive integer.")
+    if effective_timeout_ms <= 0 or effective_timeout_ms >= 0xFFFFFFFF:
+        raise ValueError("timeout_ms must be a positive integer (< 4294967295).")
 
     shell32, kernel32 = _get_win32_dlls(windll_override)
 
-    with tempfile.TemporaryDirectory(prefix="wb-uac-") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="wb-uac-", ignore_cleanup_errors=True) as tmp_dir:
         out_path = Path(tmp_dir) / "uac-output.txt"
         elevated_args = build_elevated_cmdline_args(argv, out_path)
         resolved_exe, launch_args = resolve_elevation_target(elevated_args, executable=executable)

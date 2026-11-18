@@ -17,7 +17,7 @@ from .backends.registry import RegistryBackend
 from .backends.system import SystemBackend
 from .const import ACTION_DELETE, ACTION_DELETE_KEY
 from .models import FileSnapshot, FileSpec, PlannedOperation, TweakDefinition
-from .wsl import _atomic_write_text, merge_ini_preserving_comments
+from .wsl import merge_ini_preserving_comments
 
 
 class OperationAdapter(Protocol):
@@ -47,6 +47,7 @@ class ServiceOperationAdapter:
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
+        unverified: list[str] = []
         for svc_spec in tweak.service_specs:
             svc_state, actual_start = system.get_service_state(registry, svc_spec.service_name)
             if svc_state == "absent":
@@ -72,6 +73,7 @@ class ServiceOperationAdapter:
                         reversible=True,
                     )
                 )
+                unverified.append(f"service {svc_spec.service_name}: unreadable Start type")
                 continue
             ops.append(
                 PlannedOperation(
@@ -87,7 +89,7 @@ class ServiceOperationAdapter:
                 drifted.append(
                     f"{svc_spec.registry_key_path} [Start]: {actual_start} -> {svc_spec.start_type} (REG_DWORD)"
                 )
-        return ops, drifted, []
+        return ops, drifted, unverified
 
 
 class TaskOperationAdapter:
@@ -199,8 +201,11 @@ class WingetOperationAdapter:
                     reversible=True,
                 )
             )
+            missing_exts: list[str] = []
             for ext_id in winget_spec.vscode_extensions:
                 ext_installed = system.is_vscode_extension_installed(ext_id)
+                if not ext_installed:
+                    missing_exts.append(ext_id)
                 ops.append(
                     PlannedOperation(
                         operation_type="vscode_extension",
@@ -219,6 +224,8 @@ class WingetOperationAdapter:
                     f"winget package {winget_spec.package_id} (scope={winget_spec.scope}): "
                     f"<missing> -> installed{ext_str}"
                 )
+            elif missing_exts:
+                drifted.append(f"vscode extensions for {winget_spec.package_id}: <missing> -> {missing_exts}")
         return ops, drifted, []
 
 
@@ -364,6 +371,63 @@ def _find_first_toml_table_line(lines: list[str]) -> int:
     return len(lines)
 
 
+def _deep_merge_dicts(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge nested dictionaries without clobbering unrelated sibling keys."""
+    merged = dict(base)
+    for k, v in updates.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = _deep_merge_dicts(merged[k], v)
+        else:
+            merged[k] = v
+    return merged
+
+
+def _toml_key_span_end(lines: list[str], start_idx: int) -> int:
+    """Return the inclusive end line index of a TOML key=value statement starting at start_idx."""
+    depth = 0
+    triple_quote: str | None = None
+    for idx in range(start_idx, len(lines)):
+        line = lines[idx]
+        i = 0
+        in_str: str | None = None
+        while i < len(line):
+            ch = line[i]
+            if triple_quote is not None:
+                if line.startswith(triple_quote, i):
+                    triple_quote = None
+                    i += 3
+                    continue
+                if ch == "\\" and triple_quote == '"""':
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if in_str is not None:
+                if ch == "\\" and in_str == '"':
+                    i += 2
+                    continue
+                if ch == in_str:
+                    in_str = None
+                i += 1
+                continue
+            if line.startswith('"""', i) or line.startswith("'''", i):
+                triple_quote = line[i : i + 3]
+                i += 3
+                continue
+            if ch in ('"', "'"):
+                in_str = ch
+            elif ch == "#":
+                break
+            elif ch in ("[", "{"):
+                depth += 1
+            elif ch in ("]", "}"):
+                depth = max(0, depth - 1)
+            i += 1
+        if depth == 0 and triple_quote is None:
+            return idx
+    return len(lines) - 1
+
+
 def _merge_toml_top_level(existing_text: str, desired_keys: dict[str, Any]) -> str:
     """Merge top-level TOML keys without mutating same-named keys inside [tables]."""
     has_bom = existing_text.startswith("\ufeff")
@@ -383,12 +447,14 @@ def _merge_toml_top_level(existing_text: str, desired_keys: dict[str, Any]) -> s
         if isinstance(v, dict):
             raise ValueError(f"Nested dict TOML merge for key {k!r} is unsupported; use top-level scalar/list values.")
         val_repr = json.dumps(v) if isinstance(v, (str, bool, int, float, list)) else repr(v)
-        pat = re.compile(rf"^\s*{re.escape(k)}\s*=")
+        pat = re.compile(rf'^\s*(?:{re.escape(k)}|"{re.escape(k)}"|\'{re.escape(k)}\')\s*=')
         matches = [idx for idx, ln in enumerate(top_lines) if pat.match(ln)]
         if len(matches) > 1:
             raise ValueError(f"Ambiguous duplicate top-level TOML key {k!r}.")
         if matches:
-            top_lines[matches[0]] = f"{k} = {val_repr}"
+            start_idx = matches[0]
+            end_idx = _toml_key_span_end(top_lines, start_idx)
+            top_lines[start_idx : end_idx + 1] = [f"{k} = {val_repr}"]
         elif parsed.get(k) != v:
             top_lines.append(f"{k} = {val_repr}")
 
@@ -411,8 +477,9 @@ def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[
         if fmt == "jsonc" and has_jsonc_comments(cleaned_json):
             raise ValueError("Refusing to overwrite JSONC file containing comments.")
         data: dict[str, Any] = json.loads(cleaned_json) if cleaned_json.strip() else {}
-        for k, v in desired_keys.items():
-            data[k] = v
+        if not isinstance(data, dict):
+            raise ValueError("Expected top-level JSON object.")
+        data = _deep_merge_dicts(data, desired_keys)
         rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
         return ("\ufeff" + rendered) if has_bom else rendered
     if fmt == "ini":
@@ -454,11 +521,21 @@ def _atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
         elif os.name == "posix":
             os.chmod(temp_path_str, 0o600)
         if existed and sys.platform == "win32":
-            windll: Any = getattr(ctypes, "windll", None)
-            if windll is not None and windll.kernel32.ReplaceFileW(
-                str(target_path), temp_path_str, None, _REPLACEFILE_WRITE_THROUGH, None, None
-            ):
-                return
+            win_dll_cls: Any = getattr(ctypes, "WinDLL", None)
+            if win_dll_cls is not None:
+                kernel32 = win_dll_cls("kernel32", use_last_error=True)
+                replace_fn = kernel32.ReplaceFileW
+                replace_fn.argtypes = [
+                    ctypes.c_wchar_p,
+                    ctypes.c_wchar_p,
+                    ctypes.c_wchar_p,
+                    ctypes.c_ulong,
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                ]
+                replace_fn.restype = ctypes.c_int
+                if replace_fn(str(target_path), temp_path_str, None, _REPLACEFILE_WRITE_THROUGH, None, None):
+                    return
         os.replace(temp_path_str, target_path)
         if os.name == "posix":
             dir_fd = os.open(str(target_path.parent), os.O_RDONLY)
@@ -519,7 +596,7 @@ def apply_file_spec(
     elif expected_existed is True or expected_sha256 is not None:
         raise RuntimeError(f"Refusing to write {target}: file existed at plan time but is now missing.")
     merged = merge_file_content(existing_text, spec.file_format, spec.desired_keys)
-    _atomic_write_text(target, merged)
+    _atomic_write_bytes(target, merged.encode("utf-8"))
 
 
 def restore_file_snapshot(snapshot: FileSnapshot) -> None:
@@ -533,7 +610,7 @@ def restore_file_snapshot(snapshot: FileSnapshot) -> None:
         _atomic_write_bytes(target, base64.b64decode(snapshot.previous_bytes_b64.encode("ascii")))
         return
     if snapshot.previous_content is not None:
-        _atomic_write_text(target, snapshot.previous_content)
+        _atomic_write_bytes(target, snapshot.previous_content.encode("utf-8"))
 
 
 class AuditpolOperationAdapter:
@@ -790,7 +867,13 @@ class FileConfigOperationAdapter:
         for spec in tweak.file_specs:
             try:
                 target = expand_file_spec_path(spec.path_template)
-                existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+                if target.is_file():
+                    raw_bytes = target.read_bytes()
+                    if len(raw_bytes) > MAX_FILE_SNAPSHOT_BYTES:
+                        raise ValueError(f"File {target} exceeds snapshot size cap ({MAX_FILE_SNAPSHOT_BYTES} bytes).")
+                    existing = raw_bytes.decode("utf-8")
+                else:
+                    existing = ""
                 merged = merge_file_content(existing, spec.file_format, spec.desired_keys)
             except (OSError, UnicodeDecodeError, ValueError) as exc:
                 unverified.append(f"file {spec.path_template}: {exc}")

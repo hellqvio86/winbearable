@@ -71,6 +71,7 @@ def test_catalog_never_disables_wsl_or_core_protections() -> None:
 def test_catalog_admin_flags_and_cis_verification_consistent() -> None:
     """HKLM/service/task/feature tweaks require admin; HKCU-only tweaks do not; CIS mappings have verification."""
     assert validate_catalog(TWEAK_CATALOG) == []
+    seen_cis_ids: set[str] = set()
     for tid, tweak in TWEAK_CATALOG.items():
         if tweak.parameterized:
             continue
@@ -90,7 +91,6 @@ def test_catalog_admin_flags_and_cis_verification_consistent() -> None:
             assert tweak.requires_admin, f"{tid} touches machine state and must have requires_admin=True"
         else:
             assert not tweak.requires_admin, f"{tid} is user-scope only and must have requires_admin=False"
-        seen_cis_ids: set[str] = set()
         if tweak.cis_mapping is not None:
             assert tweak.cis_mapping.verification_method.strip()
             assert tweak.cis_mapping.verified_on and tweak.cis_mapping.verified_on.strip()
@@ -114,6 +114,7 @@ def test_security_and_version_docs_consistent() -> None:
         yaml_text = yaml_path.read_text(encoding="utf-8")
         assert f"PackageVersion: {__version__}" in yaml_text
         if yaml_path.name.endswith(".installer.yaml"):
+            assert f"v{__version__}/winbearable-{__version__}-win-x64.zip" in yaml_text
             assert "7AA2A1B089EBBFFD8FACF468AB5F9131BFC027B61BEC4EC61633094CB48FDCC4" not in yaml_text
 
 

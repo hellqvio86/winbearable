@@ -120,7 +120,12 @@ def main() -> int:
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in sorted(wb_dir.rglob("*")):
             if item.is_file():
-                zf.write(item, arcname=item.relative_to(wb_dir))
+                arcname = item.relative_to(wb_dir).as_posix()
+                zi = zipfile.ZipInfo(arcname, date_time=(2026, 1, 1, 0, 0, 0))
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                mode = 0o755 if item.suffix.lower() in {".exe", ".dll", ".pyd"} else 0o644
+                zi.external_attr = (mode & 0xFFFF) << 16
+                zf.writestr(zi, item.read_bytes())
 
     sha256_hex = hashlib.sha256(zip_path.read_bytes()).hexdigest().upper()
     sha_file = dist_dir / f"{zip_path.name}.sha256"
