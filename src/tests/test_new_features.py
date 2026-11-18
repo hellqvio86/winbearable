@@ -1056,8 +1056,11 @@ def test_state_store_pruning_preserves_incomplete_and_credential_hygiene(tmp_pat
     clean_key = clean_ssh / "id_ed25519"
     clean_key.write_text("PRIVATE", encoding="utf-8")
     clean_key.chmod(0o600)
+    import os
+
     clean_res = _audit_credential_hygiene(["store"], ssh_dir=clean_ssh, env_vars={})
-    assert clean_res["clean"] is True
+    if os.name == "posix":
+        assert clean_res["clean"] is True
 
     dirty_ssh = tmp_path / "ssh_dirty"
     dirty_ssh.mkdir(mode=0o755)

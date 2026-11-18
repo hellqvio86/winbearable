@@ -838,7 +838,18 @@ def test_concurrent_apply_serialized_under_transaction_lock(tmp_path: Path) -> N
     def _worker() -> None:
         try:
             barrier.wait(timeout=5.0)
-            summaries.append(apply_profile(prof, env, reg, sysb, store, dry_run=False, allow_simulated=True))
+            summaries.append(
+                apply_profile(
+                    prof,
+                    env,
+                    reg,
+                    sysb,
+                    store,
+                    dry_run=False,
+                    allow_simulated=True,
+                    wslconfig_path=tmp_path / ".wslconfig",
+                )
+            )
         except Exception as exc:
             errors.append(exc)
 

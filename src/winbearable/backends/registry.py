@@ -679,13 +679,10 @@ def is_wsl2() -> bool:
 
 def find_wsl_reg_exe() -> str | None:
     """Locate Windows reg.exe via WSL2 interop if enabled and accessible."""
-    found = shutil.which("reg.exe")
-    if found:
-        return found
     candidate = Path("/mnt/c/Windows/System32/reg.exe")
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return str(candidate)
-    return None
+    return shutil.which("reg.exe", path="/mnt/c/Windows/System32:/mnt/c/Windows")
 
 
 class WslInteropRegistryBackend:

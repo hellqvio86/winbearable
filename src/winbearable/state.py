@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -145,6 +146,7 @@ class StateStore:
         max_backup_dirs: int = DEFAULT_MAX_BACKUP_DIRS,
         *,
         prune_unreferenced: bool = False,
+        known_ids: set[str] | None = None,
     ) -> list[str]:
         warnings: list[str] = []
         backups_root = self.state_path.parent / "backups"
@@ -164,10 +166,13 @@ class StateStore:
             if prune_unreferenced
             else {run.run_id for run in runs if run.state in incomplete_states}
         )
+        resolved_known_ids = {run.run_id for run in runs} if known_ids is None else known_ids
         candidates: list[tuple[float, Path]] = []
         for entry in backups_root.iterdir():
             if entry.is_symlink():
                 warnings.append(f"Skipped symlink/reparse point in backups: {entry.name}")
+                continue
+            if entry.name not in resolved_known_ids and not re.match(r"^\d{8}-\d{6}-[0-9a-f]{8}$", entry.name):
                 continue
             if not entry.is_dir() or entry.name in protected_ids:
                 continue
@@ -223,11 +228,16 @@ class StateStore:
             raise
 
     def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
+        all_known_ids = {run.run_id for run in runs}
         runs = self._prune_old_runs(runs)
         if self.state_path.is_file():
             shutil.copy2(self.state_path, self.state_path.with_suffix(".json.bak"))
         self._write_runs_atomic_unlocked(runs)
-        self.last_cleanup_warnings = self._prune_old_backups_unlocked(runs, prune_unreferenced=True)
+        self.last_cleanup_warnings = self._prune_old_backups_unlocked(
+            runs,
+            prune_unreferenced=True,
+            known_ids=all_known_ids,
+        )
 
     def restore_from_backup(self) -> bool:
         """Validate and restore state.json from state.json.bak without overwriting the backup."""

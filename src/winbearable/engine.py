@@ -827,6 +827,17 @@ def _compensate_run_record(
                     if reg_snap.post_existed
                     else (cur_val is None)
                 )
+                matches_pre = (
+                    (
+                        cur_val is not None
+                        and cur_val[0] == reg_snap.previous_data
+                        and cur_val[1] == reg_snap.previous_type
+                    )
+                    if reg_snap.value_existed
+                    else (cur_val is None)
+                )
+                if matches_pre and not matches_post:
+                    continue
                 if not matches_post:
                     errors.append(f"restore_conflict registry {reg_snap.full_key_path} [{reg_snap.display_value_name}]")
                     continue
@@ -939,6 +950,9 @@ def _compensate_run_record(
             if not force_rollback and f_snap.post_sha256 is not None:
                 cur_path = Path(f_snap.path)
                 cur_sha = hashlib.sha256(cur_path.read_bytes()).hexdigest() if cur_path.is_file() else None
+                matches_pre_file = (cur_sha == f_snap.sha256) if f_snap.existed else (not cur_path.is_file())
+                if matches_pre_file and cur_sha != f_snap.post_sha256:
+                    continue
                 if cur_sha != f_snap.post_sha256:
                     errors.append(f"restore_conflict file {f_snap.path}")
                     continue
@@ -1104,9 +1118,19 @@ def _execute_tweak_mutations(
                 )
             newly_installed_winget.append(winget_spec.package_id)
             _ckpt(f"{tweak.tweak_id}:winget:{winget_spec.package_id}")
+        ext_skipped_elevated = False
         for ext in winget_spec.vscode_extensions:
             if not system.is_vscode_extension_installed(ext):
                 if not system.install_vscode_extension(ext):
+                    last_out = getattr(system, "last_outcome", None)
+                    if (
+                        last_out is not None
+                        and last_out.status == OperationStatus.ACCESS_DENIED
+                        and "user-writable" in last_out.message
+                    ):
+                        ext_skipped_elevated = True
+                        _ckpt(f"{tweak.tweak_id}:vscode_ext:{ext}:skipped_elevated")
+                        continue
                     raise _TweakMutationError(
                         _capture_failure_outcome(
                             system,
@@ -1189,7 +1213,9 @@ def _execute_tweak_mutations(
         _ckpt(f"{tweak.tweak_id}:onedrive_uninstall")
 
     post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
-    if post_check.status != TweakStatus.APPLIED:
+    if post_check.status != TweakStatus.APPLIED and not (
+        tweak.winget_specs and "ext_skipped_elevated" in locals() and locals()["ext_skipped_elevated"]
+    ):
         raise _TweakMutationError(
             OperationOutcome(
                 status=OperationStatus.UNKNOWN,
@@ -1575,6 +1601,12 @@ def _apply_profile_locked(
                             run_id = run_id_candidate
                     except PermissionError as exc:
                         if wslconfig_path is not None:
+                            comp_errors = _compensate_run_record(
+                                _make_record(TransactionState.ROLLING_BACK), registry, system
+                            )
+                            if drifted_indices or wsl_changed:
+                                final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
+                                state_store.upsert_run(_make_record(final_st, error=f"WSL PermissionError: {exc}"))
                             raise
                         wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
                         if drifted_indices:
@@ -1779,6 +1811,14 @@ def _rollback_runs_impl(
             raise KeyError(f"Run ID '{to_run_id}' not found in state store.")
         return []
 
+    if not dry_run:
+        incomplete = state_store.get_incomplete_runs()
+        if incomplete:
+            ids = ", ".join(rec.run_id for rec in incomplete)
+            raise IncompleteJournalError(
+                f"Cannot rollback while incomplete/FAILED run(s) exist ({ids}). Run `wb recover --apply` first."
+            )
+
     if to_run_id is None:
         committed = [rec for rec in all_runs if rec.state == TransactionState.COMMITTED]
         if not committed:
@@ -1789,6 +1829,9 @@ def _rollback_runs_impl(
         if not matching_indices:
             raise KeyError(f"Run ID '{to_run_id}' not found in state store.")
         cut_idx = matching_indices[0]
+        target_rec = all_runs[cut_idx]
+        if target_rec.state != TransactionState.COMMITTED:
+            raise ValueError(f"Run ID '{to_run_id}' is in state '{target_rec.state}' (expected 'committed').")
         runs_to_revert = [rec for rec in reversed(all_runs[cut_idx:]) if rec.state == TransactionState.COMMITTED]
 
     reverted_records: list[RunRecord] = []
