@@ -898,27 +898,30 @@ def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest
     assert sys_lin.restrict_acl_to_current_user(str(tmp_path)) is False
 
     # win32 mocked _run_native_cmd
-    with patch.object(
-        sys_win,
-        "_run_native_cmd",
-        side_effect=[
-            CommandResult((), 0, "ms-python.python\n", ""),
-            CommandResult((), 1, "", ""),
-            CommandResult((), 0, "", ""),
-            CommandResult((), 0, "", ""),
-            CommandResult((), 0, "", ""),
-            CommandResult((), 0, "", ""),
-            CommandResult((), 0, "Case sensitive attribute on directory is enabled.\n", ""),
-            CommandResult((), 0, "Case sensitive attribute on directory is disabled.\n", ""),
-            CommandResult((), 1, "", ""),
-            CommandResult((), 0, "", ""),
-            CommandResult((), 0, "", ""),
-            CommandResult((), 1, "", ""),  # whoami.exe fallback in is_ssh_acl_restricted
-            CommandResult((), 0, "C:\\dir BUILTIN\\Users:(F)\nSuccessfully processed 1 files\n", ""),
-            CommandResult((), 1, "", ""),  # whoami.exe fallback in restrict_acl_to_current_user
-            CommandResult((), 0, "", ""),  # icacls /reset
-            CommandResult((), 0, "", ""),  # icacls /inheritance:r
-        ],
+    with (
+        patch.object(sys_win, "_resolve_code_cmd", return_value=r"C:\Program Files\Microsoft VS Code\bin\code.cmd"),
+        patch.object(
+            sys_win,
+            "_run_native_cmd",
+            side_effect=[
+                CommandResult((), 0, "ms-python.python\n", ""),
+                CommandResult((), 1, "", ""),
+                CommandResult((), 0, "", ""),
+                CommandResult((), 0, "", ""),
+                CommandResult((), 0, "", ""),
+                CommandResult((), 0, "", ""),
+                CommandResult((), 0, "Case sensitive attribute on directory is enabled.\n", ""),
+                CommandResult((), 0, "Case sensitive attribute on directory is disabled.\n", ""),
+                CommandResult((), 1, "", ""),
+                CommandResult((), 0, "", ""),
+                CommandResult((), 0, "", ""),
+                CommandResult((), 1, "", ""),  # whoami.exe fallback in is_ssh_acl_restricted
+                CommandResult((), 0, "C:\\dir BUILTIN\\Users:(F)\nSuccessfully processed 1 files\n", ""),
+                CommandResult((), 1, "", ""),  # whoami.exe fallback in restrict_acl_to_current_user
+                CommandResult((), 0, "", ""),  # icacls /reset
+                CommandResult((), 0, "", ""),  # icacls /inheritance:r
+            ],
+        ),
     ):
         assert sys_win.is_vscode_extension_installed("ms-python.python") is True
         assert sys_win.is_vscode_extension_installed("ms-python.python") is False
