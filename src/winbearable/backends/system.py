@@ -244,7 +244,7 @@ def _observe_defender(
 
     svc_running: bool | None = None
     if run_cmd is not None:
-        sc_res = run_cmd(["sc.exe", "query", "WinDefend"])
+        sc_res = run_cmd([NativeSystemBackend._sys32_exe("sc.exe"), "query", "WinDefend"])
         if sc_res.returncode == 0:
             upper_out = sc_res.stdout.upper()
             # Match Win32 SERVICE_RUNNING (4) / SERVICE_STOPPED (1) numeric state codes only (locale-safe).
@@ -516,7 +516,7 @@ def _collect_posture_observations(
 
     dsreg_stdout: str | None = None
     if run_cmd is not None:
-        dsreg_res = run_cmd(["dsregcmd.exe", "/status"])
+        dsreg_res = run_cmd([NativeSystemBackend._sys32_exe("dsregcmd.exe"), "/status"])
         if dsreg_res.returncode == 0:
             dsreg_stdout = dsreg_res.stdout
 
@@ -1144,7 +1144,7 @@ class NativeSystemBackend:
         if isinstance(raw, str):
             return raw
         exe_name = os.path.basename(args[0]).lower() if args else ""
-        if exe_name == "wsl.exe" and "-d" not in args[:2] and (b"\x00" in raw or raw.startswith(b"\xff\xfe")):
+        if exe_name == "wsl.exe" and (b"\x00" in raw or raw.startswith((b"\xff\xfe", b"\xfe\xff"))):
             return raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
         try:
             return raw.decode("utf-8")
@@ -1748,7 +1748,8 @@ class NativeSystemBackend:
             cand = Path(local_app) / "Microsoft" / "WindowsApps" / "winget.exe"
             if cand.is_file():
                 return str(cand)
-        return shutil.which("winget.exe") or (
+        trusted_winget_dir = f"{local_app}\\Microsoft\\WindowsApps" if local_app else ""
+        return (shutil.which("winget.exe", path=trusted_winget_dir) if trusted_winget_dir else None) or (
             f"{local_app}\\Microsoft\\WindowsApps\\winget.exe" if local_app else r"C:\Windows\System32\winget.exe"
         )
 
@@ -1766,7 +1767,15 @@ class NativeSystemBackend:
         for cand in candidates:
             if cand is not None and cand.is_file():
                 return str(cand)
-        return shutil.which("code.cmd") or (
+        trusted_code_dirs = os.pathsep.join(
+            p
+            for p in (
+                f"{local_app}\\Programs\\Microsoft VS Code\\bin" if local_app else "",
+                rf"{prog}\Microsoft VS Code\bin",
+            )
+            if p
+        )
+        return shutil.which("code.cmd", path=trusted_code_dirs) or (
             f"{local_app}\\Programs\\Microsoft VS Code\\bin\\code.cmd"
             if local_app
             else rf"{prog}\Microsoft VS Code\bin\code.cmd"
@@ -1786,7 +1795,17 @@ class NativeSystemBackend:
                 return str(cand)
         import shutil
 
-        return shutil.which("git.exe") or shutil.which("git")
+        trusted_git_dirs = os.pathsep.join(
+            p
+            for p in (
+                rf"{prog}\Git\cmd",
+                f"{local_app}\\Programs\\Git\\cmd" if local_app else "",
+            )
+            if p
+        )
+        return shutil.which("git.exe", path=trusted_git_dirs) or (
+            shutil.which("git", path="/usr/bin:/bin:/usr/local/bin") if sys.platform != "win32" else None
+        )
 
     def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
         if self._platform != "win32":

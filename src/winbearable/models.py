@@ -11,7 +11,9 @@ RegistryValueData = int | str | bytes | list[str] | None
 def _encode_registry_data(val: RegistryValueData) -> Any:
     if isinstance(val, bytes):
         return {"__bytes_b64__": base64.b64encode(val).decode("ascii")}
-    return val
+    if isinstance(val, (int, str, list)) or val is None:
+        return val
+    raise TypeError(f"Unsupported registry value type for snapshot serialization: {type(val).__name__}")
 
 
 def _decode_registry_data(raw: Any) -> RegistryValueData:

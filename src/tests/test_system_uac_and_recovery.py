@@ -597,7 +597,10 @@ def test_winreg_key_snapshot_delete_restore_and_wsl_helpers(monkeypatch: pytest.
     monkeypatch.setattr("winbearable.backends.registry.sys.platform", "linux")
     monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
     assert is_wsl2() is True
-    monkeypatch.setattr("winbearable.backends.registry.shutil.which", lambda name: "/mnt/c/Windows/System32/reg.exe")
+    monkeypatch.setattr(
+        "winbearable.backends.registry.shutil.which",
+        lambda name, path=None: "/mnt/c/Windows/System32/reg.exe",
+    )
     assert find_wsl_reg_exe() == "/mnt/c/Windows/System32/reg.exe"
 
 
@@ -1253,8 +1256,14 @@ def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytes
     backups_dir.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    (backups_dir / "link-dir").symlink_to(outside, target_is_directory=True)
-    warnings = store._prune_old_backups_unlocked([good_run], max_backup_dirs=0)
+    link_dir = backups_dir / "link-dir"
+    try:
+        link_dir.symlink_to(outside, target_is_directory=True)
+        warnings = store._prune_old_backups_unlocked([good_run], max_backup_dirs=0)
+    except OSError:
+        link_dir.mkdir()
+        with patch.object(Path, "is_symlink", autospec=True, side_effect=lambda p: p == link_dir):
+            warnings = store._prune_old_backups_unlocked([good_run], max_backup_dirs=0)
     assert any("symlink" in w.lower() for w in warnings)
     assert outside.is_dir()
 
@@ -1719,9 +1728,17 @@ def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path
     with pytest.raises(UacElevationError, match="untrusted"):
         write_uac_output_safe(tmp_path / "evil.txt", "x")
     sym_dir = tmp_path / "wb-uac-sym"
-    sym_dir.symlink_to(uac_dir)
-    with pytest.raises(UacElevationError, match="symlink"):
-        write_uac_output_safe(sym_dir / "uac-output.txt", "x")
+    try:
+        sym_dir.symlink_to(uac_dir, target_is_directory=True)
+        with pytest.raises(UacElevationError, match="symlink"):
+            write_uac_output_safe(sym_dir / "uac-output.txt", "x")
+    except OSError:
+        sym_dir.mkdir()
+        with (
+            patch.object(Path, "is_symlink", autospec=True, side_effect=lambda p: p == sym_dir),
+            pytest.raises(UacElevationError, match="symlink"),
+        ):
+            write_uac_output_safe(sym_dir / "uac-output.txt", "x")
 
     # S-03: TerminateProcess returning 0 reports truthful non-terminated message
     class _FakeKernel32:
@@ -2090,3 +2107,128 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
     )
     assert summary_multi.failed_ids == ("wsl",)
     assert distro_confs["Ubuntu"] == "[boot]\nsystemd=false\n"
+
+
+def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(tmp_path: Path) -> None:
+    """Verify idempotent recovery, rollback ordering, UAC writer resilience, UTF-16 -d decoding, and pruning."""
+    from unittest.mock import patch
+
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+    from winbearable.cli import run_cli
+    from winbearable.const import HIVE_HKCU, REG_DWORD, REG_SZ
+    from winbearable.engine import IncompleteJournalError, apply_profile, recover_incomplete_runs, rollback_runs
+    from winbearable.models import OperationStatus, RegistryValueSnapshot
+    from winbearable.profiles import load_profile
+    from winbearable.state import StateStore
+    from winbearable.wsl import probe_distro_wsl_conf
+
+    # N-01: partial rollback + recover reports only the single external conflict, not already-restored items
+    store = StateStore(tmp_path / "state_n01.json")
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    env = sysb.detect_environment(reg)
+    apply_profile(load_profile("user-only"), env, reg, sysb, store, dry_run=False, allow_simulated=True)
+    snaps = [s for s in store.load_runs()[-1].registry_snapshots if s.post_existed]
+    a = snaps[0]
+    reg.set_value(a.hive, a.key_path, a.value_name, 999, REG_DWORD)
+    with pytest.raises(RuntimeError, match="restore_conflict"):
+        rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+
+    # N-02: rollback_runs refuses while FAILED run exists, and refuses --to targeting non-committed run
+    with pytest.raises(IncompleteJournalError, match="wb recover"):
+        rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+
+    rec = recover_incomplete_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+    errors = rec[0].error or ""
+    assert errors.count("restore_conflict") == 1
+
+    # N-03: explicit wslconfig_path + PermissionError compensates and leaves no APPLYING run
+    wsl_ro = tmp_path / "ro.wslconfig"
+    store_n03 = StateStore(tmp_path / "state_n03.json")
+    with (
+        patch("winbearable.engine.apply_wslconfig_target", side_effect=PermissionError("read-only")),
+        pytest.raises(PermissionError),
+    ):
+        apply_profile(
+            load_profile("user-only"),
+            env,
+            InMemoryRegistryBackend(),
+            sysb,
+            store_n03,
+            dry_run=False,
+            wslconfig_path=wsl_ro,
+            allow_simulated=True,
+        )
+    assert store_n03.get_incomplete_runs() == []
+
+    # N-06: UAC output writer failure does not clobber CLI return code
+    uac_dir = tmp_path / "wb-uac-xyz"
+    uac_dir.mkdir()
+    pre_out = uac_dir / "uac-output.txt"
+    pre_out.write_text("existing", encoding="utf-8")
+    rc = run_cli(
+        ["--uac-output", str(pre_out), "doctor", "--json"],
+        registry=InMemoryRegistryBackend(),
+        system=InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300),
+        state_store=StateStore(tmp_path / "uac_state.json"),
+    )
+    assert rc == 0
+
+    # N-08: elevated user-writable code.cmd skips extension install cleanly without rolling back
+    from winbearable.models import ProfileSpec
+
+    ext_sys = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    ext_sys.installed_winget_packages.add("Microsoft.VisualStudioCode")
+
+    def _refuse_user_code(_ext: str) -> bool:
+        ext_sys.last_outcome = type(
+            "Out", (), {"status": OperationStatus.ACCESS_DENIED, "message": "Refusing user-writable code.cmd"}
+        )()
+        return False
+
+    with patch.object(ext_sys, "install_vscode_extension", side_effect=_refuse_user_code):
+        ext_summary = apply_profile(
+            ProfileSpec(name="vscode", description="vscode", tweaks={"apps.install_vscode": True}),
+            ext_sys.detect_environment(InMemoryRegistryBackend()),
+            InMemoryRegistryBackend(),
+            ext_sys,
+            StateStore(tmp_path / "state_n08.json"),
+            dry_run=False,
+            allow_simulated=True,
+        )
+    assert ext_summary.failed_ids == ()
+
+    # N-10: _decode_cmd_bytes decodes UTF-16LE wsl.exe even with -d, and localized error classifies as 'error'
+    err_u16 = "Det går inte att hitta distributionen.\r\n".encode("utf-16-le")
+    assert "distributionen" in NativeSystemBackend._decode_cmd_bytes(err_u16, ["wsl.exe", "-d", "Missing"])
+    with patch.object(
+        sysb,
+        "run_wsl_command",
+        return_value=CommandResult(("wsl.exe",), 1, "", "Det går inte att hitta distributionen."),
+    ):
+        probe = probe_distro_wsl_conf("Missing", sysb)
+    assert probe.status == "error"
+
+    # N-11: _encode_registry_data rejects unsupported tuple type
+    bad_snap = RegistryValueSnapshot(
+        hive=HIVE_HKCU,
+        key_path=r"Software\Test",
+        value_name="Bad",
+        key_existed=True,
+        value_existed=True,
+        previous_data=("a", "b"),  # type: ignore[arg-type]
+        previous_type=REG_SZ,
+    )
+    with pytest.raises(TypeError, match="Unsupported registry value type"):
+        bad_snap.to_dict()
+
+    # N-12: _prune_old_backups_unlocked preserves non-run-id user directories under backups/
+    store_n12 = StateStore(tmp_path / "state_n12.json")
+    user_folder = tmp_path / "backups" / "my-custom-notes"
+    user_folder.mkdir(parents=True)
+    stale_run_dir = tmp_path / "backups" / "20260101-000000-deadbeef"
+    stale_run_dir.mkdir(parents=True)
+    store_n12.save_runs([])
+    assert user_folder.is_dir()
+    assert not stale_run_dir.exists()

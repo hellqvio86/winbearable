@@ -222,7 +222,7 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 | `explorer.show_hidden_files` | Shows hidden files and `.dotfiles` in File Explorer | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Hidden` | `REG_DWORD` | `1` (Show hidden files & dotfiles) |
 | `explorer.show_hidden_files` | Shows protected operating system hidden files in File Explorer | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowSuperHidden` | `REG_DWORD` | `1` (Show protected OS files) |
 
-### 4. AI, Privacy & Native CIS Hardening (`ai.*`, `privacy.*`, `hardening.*`)
+### 4. AI, Privacy & Native Security Hardening (`ai.*`, `privacy.*`, `hardening.*`)
 
 | Tweak ID | What It Does | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value |
 | :--- | :--- | :---: | :--- | :--- | :---: | :--- |

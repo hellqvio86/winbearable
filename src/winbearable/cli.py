@@ -5,6 +5,7 @@ import contextlib
 import difflib
 import io
 import json
+import os
 import sys
 import uuid
 from collections.abc import Sequence
@@ -526,6 +527,7 @@ def run_cli(
     state_store: StateStore | None = None,
 ) -> int:
     """Execute the `wb` CLI and return an exit code."""
+    os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"  # noqa: SIM112
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(raw_argv)
@@ -548,7 +550,10 @@ def run_cli(
             return _run_cli_body(args, raw_argv, registry, system, state_store)
         finally:
             if uac_out_path is not None and uac_buf is not None:
-                write_uac_output_safe(uac_out_path, uac_buf.getvalue())
+                try:
+                    write_uac_output_safe(uac_out_path, uac_buf.getvalue())
+                except Exception as exc:
+                    sys.stderr.write(f"Warning: failed to write UAC output file: {exc}\n")
 
 
 def _run_cli_body(

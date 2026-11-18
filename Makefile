@@ -20,7 +20,7 @@ format: .venv
 
 test: .venv
 	.venv/bin/mypy src
-	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
+	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
 	.venv/bin/python3 src/generate_badge.py
 
 test-windows: ## Run safe real-Windows integration tests locally (or in local Windows Docker container)

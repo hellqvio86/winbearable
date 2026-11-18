@@ -60,10 +60,10 @@ fi
 echo "--> [2/4] Running Mypy strict type check & Pytest suite..."
 if command -v mypy >/dev/null 2>&1 && command -v pytest >/dev/null 2>&1; then
     mypy src
-    pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
+    pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
 elif command -v uv >/dev/null 2>&1; then
     uv run mypy src
-    uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80
+    uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
 else
     echo "ERROR: mypy/pytest or uv (.venv) is required for pre-commit test checks!" >&2
     exit 1

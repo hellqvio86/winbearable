@@ -342,7 +342,7 @@ def _atomic_write_text(target_path: Path, content: str, *, create_backup: bool =
         dir=str(target_path.parent),
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -426,16 +426,21 @@ _WSL_FAILURE_MARKERS = (
 def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfProbe:
     """Probe /etc/wsl.conf in *distro*, distinguishing confirmed absence from read/WSL errors."""
     try:
-        test_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "test", "-e", "/etc/wsl.conf"])
+        test_res = system.run_wsl_command(
+            ["-d", distro, "-u", "root", "--", "sh", "-c", "test -e /etc/wsl.conf; echo WB_RC=$?"]
+        )
     except (WslOperationError, OSError, TimeoutError) as exc:
         return WslDistroConfProbe(status="error", content="", evidence=str(exc))
 
-    test_stderr_low = (test_res.stderr or "").strip().lower()
-    if test_res.returncode == 1 and not any(marker in test_stderr_low for marker in _WSL_FAILURE_MARKERS):
-        return WslDistroConfProbe(status="missing", content="", evidence="confirmed_absent (test -e returned 1)")
-    if test_res.returncode != 0:
-        evidence = test_res.stderr.strip() or f"test -e /etc/wsl.conf exited with code {test_res.returncode}"
-        return WslDistroConfProbe(status="error", content="", evidence=evidence)
+    test_stderr = (test_res.stderr or "").strip()
+    if "WB_RC=1" in test_res.stdout and not test_stderr:
+        return WslDistroConfProbe(status="missing", content="", evidence="confirmed_absent (WB_RC=1)")
+    if "WB_RC=0" not in test_res.stdout:
+        if test_res.returncode == 1 and not test_stderr and "WB_RC=" not in test_res.stdout:
+            return WslDistroConfProbe(status="missing", content="", evidence="confirmed_absent (test -e returned 1)")
+        if test_res.returncode != 0 or test_stderr:
+            evidence = test_stderr or f"probe /etc/wsl.conf exited with code {test_res.returncode}"
+            return WslDistroConfProbe(status="error", content="", evidence=evidence)
 
     try:
         cat_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
@@ -686,7 +691,9 @@ def _read_git_system_credential_helpers(git_config_path: Path | None = None) -> 
         sections = _parse_ini_sections(git_config_path.read_text(encoding="utf-8", errors="replace"))
         helper = sections.get("credential", {}).get("helper", "").strip()
         return [helper] if helper else []
-    git_exe = shutil.which("git")
+    from .backends.system import NativeSystemBackend
+
+    git_exe = NativeSystemBackend._resolve_git_exe()
     if git_exe is None:
         return []
     try:

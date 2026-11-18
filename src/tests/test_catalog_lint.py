@@ -111,7 +111,10 @@ def test_security_and_version_docs_consistent() -> None:
     minor_prefix = ".".join(__version__.split(".")[:2]) + ".x"
     assert minor_prefix in sec_text
     for yaml_path in (repo_root / "packaging" / "winget").glob("*.yaml"):
-        assert f"PackageVersion: {__version__}" in yaml_path.read_text(encoding="utf-8")
+        yaml_text = yaml_path.read_text(encoding="utf-8")
+        assert f"PackageVersion: {__version__}" in yaml_text
+        if yaml_path.name.endswith(".installer.yaml"):
+            assert "7AA2A1B089EBBFFD8FACF468AB5F9131BFC027B61BEC4EC61633094CB48FDCC4" not in yaml_text
 
 
 def test_profiles_membership_and_corp_safe_constraints() -> None:

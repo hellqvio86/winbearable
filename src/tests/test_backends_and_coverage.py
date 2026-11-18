@@ -325,11 +325,14 @@ def test_native_system_backend_linux_and_simulated_win32(tmp_path: Path) -> None
         with patch.object(win_sys, "is_onedrive_installed", return_value=True):
             assert not (win_sys.uninstall_onedrive_client())
         assert win_sys.is_winget_package_installed("Microsoft.VisualStudioCode")
-        assert win_sys.install_winget_package(
-            "Microsoft.VisualStudioCode",
-            scope="user",
-            vscode_extensions=("ms-vscode-remote.remote-wsl",),
-        )
+        with patch.object(
+            win_sys, "_resolve_code_cmd", return_value=r"C:\Program Files\Microsoft VS Code\bin\code.cmd"
+        ):
+            assert win_sys.install_winget_package(
+                "Microsoft.VisualStudioCode",
+                scope="user",
+                vscode_extensions=("ms-vscode-remote.remote-wsl",),
+            )
         assert win_sys.uninstall_winget_package("Microsoft.VisualStudioCode")
         assert win_sys.is_scheduled_task_enabled(r"\Microsoft\Windows\Task")
         assert win_sys.set_scheduled_task_enabled(r"\Microsoft\Windows\Task", False)
@@ -401,8 +404,10 @@ def test_state_store_and_path_resolution(tmp_path: Path) -> None:
         store.save_runs([])
 
 
-def test_models_and_tui_helpers(tmp_path: Path) -> None:
+def test_models_and_tui_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Models, ServiceSnapshot, RegistrySpec properties, and TUI helper functions."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
     reg_spec = RegistrySpec(hive=HIVE_HKCU, key_path="Software\\Test", value_name="")
     assert reg_spec.full_path == "HKCU\\Software\\Test"
     assert reg_spec.display_value_name == "(Default)"
@@ -1248,7 +1253,7 @@ def test_uac_elevation_and_cli_relay(tmp_path: Path) -> None:
     fake_dll = FakeWinDLL(succeed=True)
     code, out = run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=fake_dll)
     assert code == 0
-    assert out == "Elevated OK\n"
+    assert out.replace("\r\n", "\n") == "Elevated OK\n"
     assert fake_dll.shell32.last_verb == "runas"
     assert fake_dll.kernel32.closed
 

@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.12.2] - 2026-11-18
+
+### Fixed
+
+- **Idempotent Partial Rollback & Ordering:** `_compensate_run_record` treats values/files already at their pre-apply state as already restored (only reporting `restore_conflict` when current state matches neither pre nor post); `rollback_runs` refuses execution when incomplete/`FAILED` runs exist or when `--to` targets a non-committed run; `apply_profile` compensates and transitions `APPLYING` runs before re-raising explicit `wslconfig_path` `PermissionError`.
+- **Elevation & Native Binary Hygiene:** Set `NoDefaultCurrentDirectoryInExePath=1` at CLI startup; routed `sc.exe` / `dsregcmd.exe` and `find_wsl_reg_exe` / `shutil.which` through `System32` / trusted directory searches; UAC output writer failures log to `stderr` without clobbering process exit codes; elevated user-writable `code.cmd` extension skips cleanly instead of rolling back the whole run; `_atomic_write_bytes` uses Win32 `ReplaceFileW` (`REPLACEFILE_WRITE_THROUGH`) on existing Windows files.
+- **WSL Decoding, Snapshot Encoding & Backup Pruning:** `NativeSystemBackend._decode_cmd_bytes` decodes UTF-16LE `wsl.exe` streams by BOM/NUL regardless of `-d`; `probe_distro_wsl_conf` uses `sh -c 'test -e /etc/wsl.conf; echo WB_RC=$?'` sentinel; `_encode_registry_data` rejects unsupported types (`TypeError`); `_prune_old_backups_unlocked` only prunes run-ID-formatted directories.
+
 ## [0.12.1] - 2026-11-18
 
 ### Fixed
