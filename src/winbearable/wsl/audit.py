@@ -331,7 +331,13 @@ def audit_wsl(
     deep: bool = False,
 ) -> dict[str, Any]:
     """Audit host WSL2 status, distros, .wslconfig presence, policy blocks, and Linux-side configuration."""
-    target_wslconfig = wslconfig_path or get_default_wslconfig_path()
+    pkg_mod = sys.modules.get("winbearable.wsl")
+    default_path_fn = (
+        getattr(pkg_mod, "get_default_wslconfig_path", get_default_wslconfig_path)
+        if pkg_mod is not None
+        else get_default_wslconfig_path
+    )
+    target_wslconfig = wslconfig_path or default_path_fn()
     has_wslconfig = target_wslconfig.is_file()
     wslconfig_text = target_wslconfig.read_text(encoding="utf-8") if has_wslconfig else ""
     sections = parse_ini_sections(wslconfig_text) if has_wslconfig else {}

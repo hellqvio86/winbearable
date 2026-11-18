@@ -258,9 +258,9 @@ def check_unquoted_service_paths(registry: RegistryBackend) -> AuditFinding:
             continue
         expanded = os.path.expandvars(raw)
         if expanded == raw and "%programfiles%" in low:
-            expanded = re.sub(r"%ProgramFiles%", r"C:\Program Files", raw, flags=re.IGNORECASE)
+            expanded = re.sub(r"%ProgramFiles%", lambda _: r"C:\Program Files", raw, flags=re.IGNORECASE)
         if expanded == raw and "%programfiles(x86)%" in low:
-            expanded = re.sub(r"%ProgramFiles\(x86\)%", r"C:\Program Files (x86)", raw, flags=re.IGNORECASE)
+            expanded = re.sub(r"%ProgramFiles\(x86\)%", lambda _: r"C:\Program Files (x86)", raw, flags=re.IGNORECASE)
         exe_match = re.match(r"^([^\s]+\.exe)(?:\s|$)", expanded, re.IGNORECASE)
         if exe_match is not None:
             continue
