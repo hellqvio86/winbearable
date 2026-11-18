@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.15.1] - 2026-11-18
+
+### Security & Fixed
+
+- **WSL INI Parser (`KEY_VALUE_RE`):** Eliminated exponential ReDoS backtracking in quoted-value regular expression groups (`(?:[^"\\]|\\.)*` and `(?:[^'\\]|\\.)*`) in `src/winbearable/wsl/ini.py`.
+
 ## [0.15.0] - 2026-11-18
 
 ### Changed
