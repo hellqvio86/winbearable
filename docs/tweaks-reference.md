@@ -22,7 +22,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `dev.enable_windows_containers` | `dev` | Yes | `medium` | — | *opt-in* | Enable Windows Containers Optional Feature |
 | `dev.fix_ssh_key_permissions` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Restrict %USERPROFILE%\.ssh ACLs to Current User Only |
 | `dev.git_sane_defaults` | `dev` | No | `low` | — | `corp-safe`, `dev-comfort` | Configure Sane Global Git Defaults (LF, Symlinks, LongPaths, main) |
-| `dev.install_nerd_font_user` | `dev` | No | `low` | — | *opt-in* | Install JetBrainsMono Nerd Font (Per-User) |
+| `dev.install_nerd_font_user` | `dev` | No | `low` | — | `dev-comfort` | Install JetBrainsMono Nerd Font (Per-User) |
 | `dev.long_paths` | `dev` | Yes | `low` | — | `dev-comfort` | Enable Win32 Long Paths (> 260 chars) |
 | `dev.terminal_settings_defaults` | `dev` | No | `low` | — | `dev-comfort` | Configure Windows Terminal Developer Defaults |
 | `dev.vscode_settings_defaults` | `dev` | No | `low` | — | `dev-comfort` | Configure VS Code Developer & WSL Defaults |
