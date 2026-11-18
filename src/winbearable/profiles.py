@@ -282,12 +282,26 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
             raise ProfileValidationError(f"Profile '{source_label}' [params.\"{tid}\"] must be a table.")
 
 
-def load_profile(name_or_path: str, _visited: set[Path] | None = None) -> ProfileSpec:
+MAX_PROFILE_INHERITANCE_DEPTH = 8
+
+
+def load_profile(
+    name_or_path: str,
+    _visited: set[Path] | None = None,
+    _chain: tuple[tuple[str, str], ...] = (),
+) -> ProfileSpec:
     """Load a TOML profile and recursively resolve any 'extends' base profiles and 'include' presets."""
     profile_path = resolve_profile_path(name_or_path).resolve()
+    current_chain = (*_chain, ("root" if not _chain else _chain[-1][0], str(profile_path)))
+    if len(current_chain) > MAX_PROFILE_INHERITANCE_DEPTH:
+        chain_str = " -> ".join(f"{edge}:{p}" for edge, p in current_chain)
+        raise ProfileValidationError(
+            f"Profile inheritance depth exceeded maximum ({MAX_PROFILE_INHERITANCE_DEPTH}): {chain_str}"
+        )
     visited = _visited or set()
     if profile_path in visited:
-        raise ProfileValidationError(f"Circular profile inheritance detected involving {profile_path}.")
+        chain_str = " -> ".join(f"{edge}:{p}" for edge, p in current_chain)
+        raise ProfileValidationError(f"Circular profile inheritance detected involving {profile_path}: {chain_str}")
     visited.add(profile_path)
 
     try:
@@ -305,7 +319,7 @@ def load_profile(name_or_path: str, _visited: set[Path] | None = None) -> Profil
             raise ProfileValidationError(f"Profile {profile_path} 'extends' must be a string.")
         sibling_candidate = profile_path.parent / f"{extends_ref}.toml"
         target_ref = str(sibling_candidate) if sibling_candidate.is_file() else extends_ref
-        base_profile = load_profile(target_ref, _visited=visited)
+        base_profile = load_profile(target_ref, _visited=visited, _chain=(*current_chain, ("extends", target_ref)))
 
     merged_tweaks: dict[str, bool] = {}
     if base_profile is not None:
@@ -318,7 +332,7 @@ def load_profile(name_or_path: str, _visited: set[Path] | None = None) -> Profil
             raise ProfileValidationError(f"Profile {profile_path} 'include' entries must be strings.")
         inc_candidate = profile_path.parent / (inc_ref if inc_ref.endswith(".toml") else f"{inc_ref}.toml")
         inc_target = str(inc_candidate) if inc_candidate.is_file() else inc_ref
-        inc_profile = load_profile(inc_target, _visited=set(visited))
+        inc_profile = load_profile(inc_target, _visited=set(visited), _chain=(*current_chain, ("include", inc_target)))
         merged_tweaks.update(inc_profile.tweaks)
         resolved_includes.append(inc_ref)
 

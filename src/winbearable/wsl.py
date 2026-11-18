@@ -388,6 +388,25 @@ class PreparedWslPlan:
     wslconfig_changed: bool
     warnings: tuple[str, ...]
     distro_plans: tuple[PreparedWslDistroPlan, ...]
+    baseline_existed: bool = False
+    baseline_sha256: str | None = None
+
+
+def get_wsl_distro_guid(distro_name: str, registry: RegistryBackend | None = None) -> str | None:
+    """Return the stable Lxss registration GUID for *distro_name* from HKCU, if present."""
+    if registry is None:
+        return None
+    lxss_root = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+    try:
+        subkeys = registry.list_subkeys("HKCU", lxss_root)
+    except OSError:
+        return None
+    target_low = distro_name.strip().lower()
+    for guid in subkeys:
+        val = registry.get_value("HKCU", f"{lxss_root}\\{guid}", "DistributionName")
+        if val is not None and str(val[0]).strip().lower() == target_low:
+            return guid
+    return None
 
 
 _ENOENT_MARKERS = ("no such file", "cannot find", "does not exist")
@@ -444,9 +463,10 @@ def prepare_wsl_plan(
 ) -> PreparedWslPlan:
     """Read host .wslconfig and probe all target distros before any WSL mutation occurs."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
-    existing_wslconfig = (
-        target_wslconfig.read_text(encoding="utf-8").lstrip("\ufeff") if target_wslconfig.is_file() else ""
-    )
+    baseline_existed = target_wslconfig.is_file()
+    baseline_bytes = target_wslconfig.read_bytes() if baseline_existed else b""
+    baseline_sha256 = hashlib.sha256(baseline_bytes).hexdigest() if baseline_existed else None
+    existing_wslconfig = baseline_bytes.decode("utf-8").lstrip("\ufeff") if baseline_existed else ""
 
     host_memory_bytes = system.get_total_memory_bytes()
     host_memory_gib_str = format_host_memory_gib(host_memory_bytes)
@@ -487,6 +507,8 @@ def prepare_wsl_plan(
         wslconfig_changed=wslconfig_changed,
         warnings=tuple(warnings),
         distro_plans=tuple(distro_plans),
+        baseline_existed=baseline_existed,
+        baseline_sha256=baseline_sha256,
     )
 
 
@@ -494,6 +516,17 @@ def apply_wslconfig_target(plan: PreparedWslPlan) -> None:
     """Write and verify host .wslconfig using a pre-prepared plan."""
     if not plan.wslconfig_changed:
         return
+    currently_exists = plan.target_wslconfig.is_file()
+    if currently_exists != plan.baseline_existed:
+        raise WslOperationError(
+            f"Concurrent modification detected on {plan.target_wslconfig}: existence changed between plan and apply."
+        )
+    if plan.baseline_existed and plan.baseline_sha256 is not None:
+        current_sha = hashlib.sha256(plan.target_wslconfig.read_bytes()).hexdigest()
+        if current_sha != plan.baseline_sha256:
+            raise WslOperationError(
+                f"Concurrent modification detected on {plan.target_wslconfig}: content changed between plan and apply."
+            )
     _atomic_write_text(plan.target_wslconfig, plan.merged_wslconfig, create_backup=plan.backup_path is None)
     verified_text = plan.target_wslconfig.read_text(encoding="utf-8")
     if verified_text != plan.merged_wslconfig:

@@ -568,6 +568,9 @@ class RegistryValueSnapshot:
     previous_data: RegistryValueData
     previous_type: str | None
     view: RegistryView = RegistryView.DEFAULT
+    post_existed: bool | None = None
+    post_data: RegistryValueData = None
+    post_type: str | None = None
 
     @property
     def full_key_path(self) -> str:
@@ -590,6 +593,9 @@ class RegistryValueSnapshot:
             "previous_data": _encode_registry_data(self.previous_data),
             "previous_type": self.previous_type,
             "view": str(self.view),
+            "post_existed": self.post_existed,
+            "post_data": _encode_registry_data(self.post_data),
+            "post_type": self.post_type,
         }
 
     @classmethod
@@ -600,6 +606,7 @@ class RegistryValueSnapshot:
             view = RegistryView(str(raw_view))
         except ValueError:
             view = RegistryView.DEFAULT
+        raw_post_existed = payload.get("post_existed")
         return cls(
             hive=str(payload["hive"]),
             key_path=str(payload["key_path"]),
@@ -609,6 +616,9 @@ class RegistryValueSnapshot:
             previous_data=_decode_registry_data(payload.get("previous_data")),
             previous_type=payload.get("previous_type"),
             view=view,
+            post_existed=bool(raw_post_existed) if raw_post_existed is not None else None,
+            post_data=_decode_registry_data(payload.get("post_data")),
+            post_type=payload.get("post_type"),
         )
 
 
@@ -927,6 +937,7 @@ class FileSnapshot:
     sha256: str | None
     previous_content: str | None
     previous_bytes_b64: str | None = None
+    post_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -935,6 +946,7 @@ class FileSnapshot:
             "sha256": self.sha256,
             "previous_content": self.previous_content,
             "previous_bytes_b64": self.previous_bytes_b64,
+            "post_sha256": self.post_sha256,
         }
 
     @classmethod
@@ -942,12 +954,14 @@ class FileSnapshot:
         sha = payload.get("sha256")
         content = payload.get("previous_content")
         b64 = payload.get("previous_bytes_b64")
+        post_sha = payload.get("post_sha256")
         return cls(
             path=str(payload["path"]),
             existed=bool(payload["existed"]),
             sha256=str(sha) if sha is not None else None,
             previous_content=str(content) if content is not None else None,
             previous_bytes_b64=str(b64) if b64 is not None else None,
+            post_sha256=str(post_sha) if post_sha is not None else None,
         )
 
 
@@ -958,21 +972,25 @@ class WslDistroSnapshot:
     distro: str
     existed: bool
     previous_content: str = ""
+    distro_guid: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "distro": self.distro,
             "existed": self.existed,
             "previous_content": self.previous_content,
+            "distro_guid": self.distro_guid,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> WslDistroSnapshot:
         raw_prev = payload.get("previous_content")
+        raw_guid = payload.get("distro_guid")
         return cls(
             distro=str(payload["distro"]),
             existed=bool(payload.get("existed", False)),
             previous_content=str(raw_prev) if raw_prev is not None else "",
+            distro_guid=str(raw_guid) if raw_guid is not None else None,
         )
 
 

@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1153,6 +1154,77 @@ class NativeSystemBackend:
             except LookupError:
                 return raw.decode("cp850", errors="replace")
 
+    @staticmethod
+    def _communicate_bounded(
+        proc: subprocess.Popen[bytes],
+        input_bytes: bytes | None,
+        timeout: float,
+        max_bytes: int = MAX_CMD_OUTPUT_CHARS + 4096,
+    ) -> tuple[bytes, bytes]:
+        """Drain stdout/stderr in bounded memory while enforcing timeout."""
+        if not isinstance(subprocess.Popen, type) or not isinstance(proc, subprocess.Popen):
+            return proc.communicate(input=input_bytes, timeout=timeout)
+        stdout_pipe = proc.stdout
+        stderr_pipe = proc.stderr
+        stdin_pipe = proc.stdin
+
+        out_buf = bytearray()
+        err_buf = bytearray()
+        dropped = {"out": 0, "err": 0}
+
+        def _drain(stream: Any, buf: bytearray, key: str) -> None:
+            if stream is None:
+                return
+            try:
+                while True:
+                    chunk = stream.read(16384)
+                    if not chunk:
+                        break
+                    room = max_bytes - len(buf)
+                    if room > 0:
+                        buf.extend(chunk[:room])
+                    if len(chunk) > room:
+                        dropped[key] += len(chunk) - max(0, room)
+            finally:
+                with contextlib.suppress(OSError):
+                    stream.close()
+
+        def _feed() -> None:
+            if stdin_pipe is None:
+                return
+            try:
+                if input_bytes is not None:
+                    stdin_pipe.write(input_bytes)
+                    stdin_pipe.flush()
+            except OSError:
+                pass
+            finally:
+                with contextlib.suppress(OSError):
+                    stdin_pipe.close()
+
+        t_out = threading.Thread(target=_drain, args=(stdout_pipe, out_buf, "out"), daemon=True)
+        t_err = threading.Thread(target=_drain, args=(stderr_pipe, err_buf, "err"), daemon=True)
+        t_in = threading.Thread(target=_feed, daemon=True) if stdin_pipe is not None else None
+        t_out.start()
+        t_err.start()
+        if t_in is not None:
+            t_in.start()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise subprocess.TimeoutExpired(
+                cmd=proc.args, timeout=timeout, output=bytes(out_buf), stderr=bytes(err_buf)
+            ) from exc
+        if t_in is not None:
+            t_in.join(timeout=1.0)
+        t_out.join(timeout=2.0)
+        t_err.join(timeout=2.0)
+        if dropped["out"] > 0:
+            out_buf.extend(f"\n[... truncated {dropped['out']} stdout bytes ...]".encode("ascii"))
+        if dropped["err"] > 0:
+            err_buf.extend(f"\n[... truncated {dropped['err']} stderr bytes ...]".encode("ascii"))
+        return bytes(out_buf), bytes(err_buf)
+
     def _run_native_cmd(
         self,
         args: list[str],
@@ -1175,7 +1247,7 @@ class NativeSystemBackend:
                 env=child_env,
             )
             input_bytes = input_text.encode("utf-8") if input_text is not None else None
-            stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=effective_timeout)
+            stdout_raw, stderr_raw = self._communicate_bounded(proc, input_bytes, effective_timeout)
             stdout_dec = self._decode_cmd_bytes(stdout_raw, args)
             stderr_dec = self._decode_cmd_bytes(stderr_raw, args)
             cleaned_stdout = self._truncate_text(stdout_dec.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
