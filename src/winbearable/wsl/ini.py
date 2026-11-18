@@ -28,7 +28,7 @@ SECTION_HEADER_RE = re.compile(r"^\s*\[(?P<section>[^\]]+)\]\s*(?:#.*|;.*)?$")
 
 
 KEY_VALUE_RE = re.compile(
-    r'^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+)(?P<sep>\s*=\s*)(?P<val>"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\'|[^#;\r\n]*?)(?P<comment>\s*[#;].*)?$'
+    r'^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+)(?P<sep>\s*=\s*)(?P<val>"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^#;\r\n]*?)(?P<comment>\s*[#;].*)?$'
 )
 
 

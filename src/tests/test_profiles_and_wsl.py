@@ -281,3 +281,20 @@ def test_wsl_conf_lf_bytes_sha256_verify_and_crlf_lint() -> None:
 
     sys_b.run_wsl_command = _wsl_sha_ok  # type: ignore[method-assign]
     apply_distro_wsl_conf(plan, sys_b)
+
+
+def test_ini_key_value_regex_avoids_backtracking() -> None:
+    """KEY_VALUE_RE parses escaped quoted values and rejects pathological backslash strings in linear time."""
+    import time
+
+    from winbearable.wsl.ini import KEY_VALUE_RE
+
+    m_double = KEY_VALUE_RE.match(r'key = "a\"b\\c" # tail')
+    assert m_double is not None and m_double.group("val") == r'"a\"b\\c"'
+    m_single = KEY_VALUE_RE.match(r"key = 'x\'y\\z' ; tail")
+    assert m_single is not None and m_single.group("val") == r"'x\'y\\z'"
+
+    start = time.monotonic()
+    assert KEY_VALUE_RE.match("-=" + r"\&" * 5000) is not None
+    assert KEY_VALUE_RE.match('-="' + r"\&" * 5000 + "\nnext") is None
+    assert (time.monotonic() - start) < 0.2
