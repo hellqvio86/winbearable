@@ -3,20 +3,40 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
-from ..models import TweakDefinition
+from ..models import TweakDefinition, TweakProvenance
 from .categories import CATEGORY_MODULES
 from .consts import CIS_BENCHMARK_NAME, CIS_BENCHMARK_VERSION
 from .helpers import cis_control
 from .provenance import TWEAK_PROVENANCE
+from .validation import CatalogValidationError, validate_catalog
 
-_RAW_CATALOG: dict[str, TweakDefinition] = {}
-for _module in CATEGORY_MODULES:
-    _RAW_CATALOG.update(_module.TWEAKS)
 
-TWEAK_CATALOG: dict[str, TweakDefinition] = {
-    tid: replace(tweak, provenance=TWEAK_PROVENANCE[tid]) for tid, tweak in _RAW_CATALOG.items()
-}
+def assemble_catalog(
+    category_modules: tuple[Any, ...],
+    provenance_map: dict[str, TweakProvenance],
+) -> dict[str, TweakDefinition]:
+    """Assemble and exhaustively validate the tweak catalog at startup."""
+    raw_catalog: dict[str, TweakDefinition] = {}
+    for mod in category_modules:
+        for tid, tweak in mod.TWEAKS.items():
+            if tid in raw_catalog:
+                raise CatalogValidationError(f"Duplicate tweak_id {tid!r} across category modules.")
+            raw_catalog[tid] = tweak
+
+    missing_prov = sorted(set(raw_catalog) - set(provenance_map))
+    if missing_prov:
+        raise CatalogValidationError(f"Tweaks missing provenance metadata: {missing_prov}")
+
+    catalog = {tid: replace(tweak, provenance=provenance_map[tid]) for tid, tweak in raw_catalog.items()}
+    errors = validate_catalog(catalog)
+    if errors:
+        raise CatalogValidationError("Catalog validation failed:\n" + "\n".join(errors))
+    return catalog
+
+
+TWEAK_CATALOG: dict[str, TweakDefinition] = assemble_catalog(CATEGORY_MODULES, TWEAK_PROVENANCE)
 
 TWEAK_ID_ALIASES: dict[str, str] = {
     "hardening.disable_guest_and_blank_passwords": "hardening.restrict_blank_passwords",

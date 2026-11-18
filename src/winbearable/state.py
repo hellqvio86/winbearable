@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from .const import APP_NAME, ENV_STATE_PATH, STATE_SCHEMA_VERSION
-from .models import RunRecord, TransactionState
+from .models import (
+    InvalidStateTransitionError,
+    RunRecord,
+    TransactionState,
+    validate_run_record_invariants,
+    validate_transaction_transition,
+)
 from .tweaks import resolve_tweak_id
 
 DEFAULT_MAX_RUN_HISTORY = 100
@@ -431,6 +437,12 @@ class StateStore:
 
     def upsert_run(self, record: RunRecord) -> None:
         """Insert or update a RunRecord by run_id in the write-ahead journal."""
+        invariants = validate_run_record_invariants(record)
+        if invariants:
+            raise InvalidStateTransitionError(
+                f"Invalid RunRecord {record.run_id!r}: {'; '.join(invariants)}",
+                context={"run_id": record.run_id, "errors": invariants},
+            )
         is_transient = record.state in {
             TransactionState.PLANNED,
             TransactionState.APPLYING,
@@ -440,6 +452,7 @@ class StateStore:
             runs = self._load_runs_unlocked()
             for idx, existing in enumerate(runs):
                 if existing.run_id == record.run_id:
+                    validate_transaction_transition(existing.state, record.state)
                     runs[idx] = record
                     self._save_runs_unlocked(runs, update_backup=not is_transient)
                     return

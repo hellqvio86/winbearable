@@ -1,0 +1,275 @@
+"""Hardening tweaks: credentials."""
+
+from __future__ import annotations
+
+from ....const import (
+    ACTION_SET,
+    DEFAULT_TESTED_BUILDS,
+    HIVE_HKLM,
+    MIN_SUPPORTED_BUILD,
+    REG_DWORD,
+)
+from ....models import (
+    RegistrySpec,
+    RiskLevel,
+    TweakDefinition,
+    TweakProvenance,
+)
+from ...helpers import provenance_entry
+
+TWEAKS: dict[str, TweakDefinition] = {
+    "hardening.enable_lsa_protection": TweakDefinition(
+        tweak_id="hardening.enable_lsa_protection",
+        category="hardening",
+        title="Enable LSA Protection (RunAsPPL=2, Reversible)",
+        description=(
+            "Configures lsass.exe to run as a Protected Process Light (PPL) using RunAsPPL=2 "
+            "(without UEFI variable lock, so registry rollback remains effective after reboot)."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        cis_id="18.4.4",
+        requires_reboot=True,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
+                value_name="RunAsPPL",
+                value_data=2,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "hardening.restrict_blank_passwords": TweakDefinition(
+        tweak_id="hardening.restrict_blank_passwords",
+        category="hardening",
+        title="Restrict Blank Passwords to Console Logon Only",
+        description="Restricts local accounts with blank passwords to console logon only (LimitBlankPasswordUse=1).",
+        source_url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/accounts-limit-local-account-use-of-blank-passwords-to-console-logon-only",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
+                value_name="LimitBlankPasswordUse",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+    "hardening.ntlm_hardening": TweakDefinition(
+        tweak_id="hardening.ntlm_hardening",
+        category="hardening",
+        title="Enforce NTLMv2 Only & Block Anonymous Enumeration",
+        description="Sets LmCompatibilityLevel=5, NoLMHash=1, RestrictAnonymous=1, RestrictAnonymousSAM=1.",
+        source_url="https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/network-security-lan-manager-authentication-level",
+        risk=RiskLevel.MEDIUM,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
+                value_name="LmCompatibilityLevel",
+                value_data=5,
+                value_type=REG_DWORD,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
+                value_name="NoLMHash",
+                value_data=1,
+                value_type=REG_DWORD,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
+                value_name="RestrictAnonymous",
+                value_data=1,
+                value_type=REG_DWORD,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
+                value_name="RestrictAnonymousSAM",
+                value_data=1,
+                value_type=REG_DWORD,
+            ),
+        ),
+    ),
+    "hardening.wdigest_off": TweakDefinition(
+        tweak_id="hardening.wdigest_off",
+        category="hardening",
+        title="Disable WDigest Plaintext Credential Caching",
+        description="Explicitly sets HKLM\\...\\WDigest\\UseLogonCredential=0.",
+        source_url="https://learn.microsoft.com/en-us/troubleshoot/windows-server/windows-security/wdigest-authentication-and-security-advisory-2871997",
+        risk=RiskLevel.LOW,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest",
+                value_name="UseLogonCredential",
+                value_data=0,
+                value_type=REG_DWORD,
+            ),
+        ),
+    ),
+    "hardening.uac_secure_desktop": TweakDefinition(
+        tweak_id="hardening.uac_secure_desktop",
+        category="hardening",
+        title="Enforce UAC Admin Approval Mode on Secure Desktop",
+        description="Sets EnableLUA=1, ConsentPromptBehaviorAdmin=2, PromptOnSecureDesktop=1 (never lowers UAC).",
+        source_url="https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/settings-and-configuration",
+        risk=RiskLevel.LOW,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+                value_name="EnableLUA",
+                value_data=1,
+                value_type=REG_DWORD,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+                value_name="ConsentPromptBehaviorAdmin",
+                value_data=2,
+                value_type=REG_DWORD,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+                value_name="PromptOnSecureDesktop",
+                value_data=1,
+                value_type=REG_DWORD,
+            ),
+        ),
+    ),
+    "hardening.credential_guard": TweakDefinition(
+        tweak_id="hardening.credential_guard",
+        category="hardening",
+        title="Enable Credential Guard Without UEFI Lock (LsaCfgFlags=2)",
+        description=(
+            "Enables Credential Guard without UEFI lock (LsaCfgFlags=2) so registry rollback "
+            "remains possible; requires VBS and reboot."
+        ),
+        source_url="https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/configure",
+        risk=RiskLevel.HIGH,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        requires_reboot=True,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SYSTEM\CurrentControlSet\Control\Lsa",
+                value_name="LsaCfgFlags",
+                value_data=2,
+                value_type=REG_DWORD,
+            ),
+        ),
+    ),
+    "hardening.inactivity_lock": TweakDefinition(
+        tweak_id="hardening.inactivity_lock",
+        category="hardening",
+        title="Enforce Machine Inactivity Lock Timeout (15 Minutes)",
+        description="Sets HKLM Policies\\System\\InactivityTimeoutSecs=900 (15 minutes before auto-lock).",
+        source_url="https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/interactive-logon-machine-inactivity-limit",
+        risk=RiskLevel.LOW,
+        requires_admin=True,
+        min_build=MIN_SUPPORTED_BUILD,
+        max_build=None,
+        tested_builds=DEFAULT_TESTED_BUILDS,
+        registry_specs=(
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+                value_name="InactivityTimeoutSecs",
+                value_data=900,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+        ),
+    ),
+}
+
+PROVENANCE: dict[str, TweakProvenance] = {
+    "hardening.enable_lsa_protection": provenance_entry(
+        "Enables LSA Protection (RunAsPPL) to protect credentials against LSASS dumping.",
+        "CIS Microsoft Windows 11 Enterprise Benchmark v3.0.0 §18.4.4",
+        "Medium risk: requires reboot and blocks unsigned LSA plugins.",
+        "Unsigned third-party LSA/authentication DLLs will fail to load.",
+        "registry_value",
+        "Verified HKLM SYSTEM\\CurrentControlSet\\Control\\Lsa RunAsPPL=2.",
+    ),
+    "hardening.restrict_blank_passwords": provenance_entry(
+        "Enforces LimitBlankPasswordUse=1 to restrict blank-password accounts to console logon.",
+        "Microsoft Security Policy: Limit local account use of blank passwords to console logon only",
+        "Medium risk: restricts network logon for local accounts with blank passwords.",
+        "Blank-password local accounts cannot log on over the network.",
+        "registry_value",
+        "Verified HKLM Control\\Lsa LimitBlankPasswordUse=1.",
+    ),
+    "hardening.ntlm_hardening": provenance_entry(
+        "Enforces NTLMv2 only (LmCompatibilityLevel=5), NoLMHash=1, and anonymous restriction.",
+        "Microsoft Learn: Network security: LAN Manager authentication level",
+        "Medium risk: breaks very old NTLMv1-only SMB servers.",
+        "Rejects LM and NTLMv1 authentication.",
+        "registry_value",
+        "Verified Control\\Lsa LmCompatibilityLevel=5, NoLMHash=1, RestrictAnonymous=1, RestrictAnonymousSAM=1.",
+    ),
+    "hardening.wdigest_off": provenance_entry(
+        "Explicitly disables WDigest plaintext credential caching in LSASS memory.",
+        "Microsoft Security Advisory 2871997 (WDigest UseLogonCredential=0)",
+        "Low risk: prevents plaintext credentials from being cached in LSASS.",
+        "WDigest UseLogonCredential=0 enforced.",
+        "registry_value",
+        "Verified WDigest UseLogonCredential=0.",
+    ),
+    "hardening.uac_secure_desktop": provenance_entry(
+        "Enforces UAC Admin Approval Mode with Secure Desktop prompt (never lowers UAC).",
+        "Microsoft Learn: User Account Control Group Policy settings",
+        "Low risk: strengthens UAC prompt isolation.",
+        "Admin elevation prompts on Secure Desktop and requires consent.",
+        "registry_value",
+        "Verified Policies\\System EnableLUA=1, ConsentPromptBehaviorAdmin=2, PromptOnSecureDesktop=1.",
+    ),
+    "hardening.credential_guard": provenance_entry(
+        "Enables Windows Defender Credential Guard WITHOUT UEFI lock (LsaCfgFlags=2) so it remains reversible.",
+        "Microsoft Learn: Configure Credential Guard (LsaCfgFlags=2 without UEFI lock)",
+        "High risk: requires VBS and reboot; never uses UEFI lock so registry rollback works.",
+        "Isolates NTLM/Kerberos secrets in VBS after reboot.",
+        "registry_value",
+        "Verified LsaCfgFlags=2 (without UEFI lock) against Microsoft Learn.",
+    ),
+    "hardening.inactivity_lock": provenance_entry(
+        "Locks the Windows session after 900 seconds (15 minutes) of user inactivity.",
+        "Microsoft Learn: Interactive logon: Machine inactivity limit",
+        "Low risk: standard 15-minute idle lock policy; trivially reverted.",
+        "Locks unattended workstation sessions after 15 minutes.",
+        "registry_value",
+        "Verified HKLM Policies\\System InactivityTimeoutSecs=900 against Microsoft Learn.",
+        supported_editions=("Pro", "Enterprise", "Education"),
+    ),
+}

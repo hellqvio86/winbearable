@@ -1,5 +1,6 @@
 """Catalog lint, invariant, and doc-sync tests (QA-03, ENG-09, MGD-02)."""
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -276,3 +277,38 @@ def test_no_cross_module_private_imports() -> None:
                         violations.append(f"{rel}:{node.lineno} imports private '{alias.name}' from '{node.module}'")
 
     assert not violations, "Cross-module private imports (make public instead):\n" + "\n".join(violations)
+
+
+def test_domain_modules_forbid_os_side_effect_imports() -> None:
+    """Domain, engine, profile, and operations modules must not import subprocess, ctypes, or winreg directly."""
+    pkg_root = Path(__file__).resolve().parent.parent / "winbearable"
+    protected_pkgs = {"models", "tweaks", "profiles", "engine", "operations"}
+    forbidden_modules = {"subprocess", "ctypes", "winreg"}
+    violations: list[str] = []
+
+    for py_file in sorted(pkg_root.rglob("*.py")):
+        rel = py_file.relative_to(pkg_root)
+        top_pkg = rel.parts[0].removesuffix(".py")
+        if top_pkg not in protected_pkgs:
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] in forbidden_modules:
+                        violations.append(f"{rel}:{node.lineno} imports {alias.name!r}")
+            elif isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] in forbidden_modules:
+                violations.append(f"{rel}:{node.lineno} imports from {node.module!r}")
+
+    assert not violations, "Forbidden OS side-effect imports in domain/engine modules:\n" + "\n".join(violations)
+
+
+def test_win32_ctypes_explicit_signatures() -> None:
+    """Every Win32 ctypes module using WinDLL/windll must declare explicit argtypes and restype."""
+    pkg_root = Path(__file__).resolve().parent.parent / "winbearable"
+    violations: list[str] = []
+    for py_file in sorted(pkg_root.rglob("*.py")):
+        text = py_file.read_text(encoding="utf-8")
+        if ("WinDLL" in text or "windll" in text) and (".argtypes" not in text or ".restype" not in text):
+            violations.append(f"{py_file.relative_to(pkg_root)}: uses WinDLL/windll without argtypes/restype")
+    assert not violations, "Unconfigured Win32 ctypes modules:\n" + "\n".join(violations)

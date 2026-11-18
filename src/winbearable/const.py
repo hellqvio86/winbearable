@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.15.1"
+__version__ = "0.16.0"
 JSON_SCHEMA_VERSION = "1.0"
 STATE_SCHEMA_VERSION = 2
 PROFILE_SCHEMA_VERSION = 2

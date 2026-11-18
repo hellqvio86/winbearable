@@ -179,6 +179,8 @@ class PlannedOperation:
     before_state: str
     after_state: str
     reversible: bool = True
+    scope: str = "machine"
+    requires_elevation: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize planned operation to a JSON-compatible dictionary."""
@@ -189,6 +191,8 @@ class PlannedOperation:
             "before_state": self.before_state,
             "after_state": self.after_state,
             "reversible": self.reversible,
+            "scope": self.scope,
+            "requires_elevation": self.requires_elevation,
         }
 
 

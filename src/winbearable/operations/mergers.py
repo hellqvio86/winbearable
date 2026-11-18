@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import base64
-import ctypes
 import hashlib
 import json
 import os
 import re
 import stat
-import sys
 import tempfile
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..backends.win32_fs import replace_file_preserving_acl
 from ..models import FileSnapshot, FileSpec
 from ..wsl import merge_ini_preserving_comments
 
@@ -23,9 +23,15 @@ _UNRESOLVED_WIN_ENV_RE = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*%")
 
 def expand_file_spec_path(path_template: str) -> Path:
     """Expand %VAR% and ~ in a FileSpec path template, rejecting unresolved %VAR% tokens."""
-    expanded = os.path.expandvars(os.path.expanduser(path_template))
+    expanded = _UNRESOLVED_WIN_ENV_RE.sub(
+        lambda m: os.environ.get(m.group(0)[1:-1], m.group(0)),
+        path_template,
+    )
+    expanded = os.path.expandvars(os.path.expanduser(expanded))
     if _UNRESOLVED_WIN_ENV_RE.search(expanded):
         raise ValueError(f"Unresolved environment variable in path template: {path_template!r}")
+    if os.name != "nt":
+        expanded = expanded.replace("\\", "/")
     return Path(expanded)
 
 
@@ -205,6 +211,7 @@ def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[
     """Merge desired_keys into existing_text for json, jsonc, ini, or toml while preserving unrelated keys."""
     fmt = file_format.lower()
     has_bom = existing_text.startswith("\ufeff")
+    use_crlf = "\r\n" in existing_text
     if fmt in {"json", "jsonc"}:
         cleaned_json = existing_text.lstrip("\ufeff")
         if fmt == "jsonc" and has_jsonc_comments(cleaned_json):
@@ -214,6 +221,8 @@ def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[
             raise ValueError("Expected top-level JSON object.")
         data = _deep_merge_dicts(data, desired_keys)
         rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        if use_crlf:
+            rendered = rendered.replace("\n", "\r\n")
         return ("\ufeff" + rendered) if has_bom else rendered
     if fmt == "ini":
         ini_sections: dict[str, dict[str, str]] = {}
@@ -221,16 +230,18 @@ def merge_file_content(existing_text: str, file_format: str, desired_keys: dict[
             if isinstance(kv, dict):
                 ini_sections[sec] = {str(k): str(v) for k, v in kv.items()}
         merged_ini = merge_ini_preserving_comments(existing_text.lstrip("\ufeff"), ini_sections, case_insensitive=True)
+        if use_crlf and "\r\n" not in merged_ini:
+            merged_ini = merged_ini.replace("\n", "\r\n")
         return ("\ufeff" + merged_ini) if has_bom else merged_ini
     if fmt == "toml":
-        return _merge_toml_top_level(existing_text, desired_keys)
+        merged_toml = _merge_toml_top_level(existing_text, desired_keys)
+        if use_crlf and "\r\n" not in merged_toml:
+            merged_toml = merged_toml.replace("\n", "\r\n")
+        return merged_toml
     raise ValueError(f"Unsupported FileSpec format: {file_format}")
 
 
 MAX_FILE_SNAPSHOT_BYTES = 512 * 1024
-
-
-_REPLACEFILE_WRITE_THROUGH = 0x00000001
 
 
 def atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
@@ -253,23 +264,10 @@ def atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
             os.chmod(temp_path_str, existing_mode)
         elif os.name == "posix":
             os.chmod(temp_path_str, 0o600)
-        if existed and sys.platform == "win32":
-            win_dll_cls: Any = getattr(ctypes, "WinDLL", None)
-            if win_dll_cls is not None:
-                kernel32 = win_dll_cls("kernel32", use_last_error=True)
-                replace_fn = kernel32.ReplaceFileW
-                replace_fn.argtypes = [
-                    ctypes.c_wchar_p,
-                    ctypes.c_wchar_p,
-                    ctypes.c_wchar_p,
-                    ctypes.c_ulong,
-                    ctypes.c_void_p,
-                    ctypes.c_void_p,
-                ]
-                replace_fn.restype = ctypes.c_int
-                if replace_fn(str(target_path), temp_path_str, None, _REPLACEFILE_WRITE_THROUGH, None, None):
-                    return
-        os.replace(temp_path_str, target_path)
+        if existed:
+            replace_file_preserving_acl(target_path, Path(temp_path_str))
+        else:
+            os.replace(temp_path_str, target_path)
         if os.name == "posix":
             dir_fd = os.open(str(target_path.parent), os.O_RDONLY)
             try:
@@ -282,19 +280,13 @@ def atomic_write_bytes(target_path: Path, raw_bytes: bytes) -> None:
         raise
 
 
-def _resolve_expand_file_spec_path(path_template: str) -> Path:
-    ops_pkg = sys.modules.get("winbearable.operations")
-    expand_fn = (
-        getattr(ops_pkg, "expand_file_spec_path", expand_file_spec_path)
-        if ops_pkg is not None
-        else expand_file_spec_path
-    )
-    return expand_fn(path_template)
-
-
-def snapshot_file_spec(spec: FileSpec) -> FileSnapshot:
+def snapshot_file_spec(
+    spec: FileSpec,
+    *,
+    expand_fn: Callable[[str], Path] | None = None,
+) -> FileSnapshot:
     """Capture sha256 and byte-exact snapshot of a FileSpec target."""
-    target = _resolve_expand_file_spec_path(spec.path_template)
+    target = (expand_fn or expand_file_spec_path)(spec.path_template)
     if not target.is_file():
         return FileSnapshot(
             path=str(target), existed=False, sha256=None, previous_content=None, previous_bytes_b64=None
@@ -321,9 +313,11 @@ def apply_file_spec(
     spec: FileSpec,
     expected_sha256: str | None = None,
     expected_existed: bool | None = None,
+    *,
+    expand_fn: Callable[[str], Path] | None = None,
 ) -> None:
     """Atomically apply a FileSpec, refusing if file existence or hash changed since snapshot."""
-    target = _resolve_expand_file_spec_path(spec.path_template)
+    target = (expand_fn or expand_file_spec_path)(spec.path_template)
     existing_text = ""
     if target.is_file():
         if expected_existed is False:

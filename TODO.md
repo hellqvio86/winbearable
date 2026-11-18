@@ -1,32 +1,137 @@
-# winbearable — Critical Review (Pass 3, `v0.13.0` → Resolved in `v0.14.0`)
+# Winbearable — Critical Architecture & Engineering Review (v0.15.1)
 
-> **Status:** All `P3-01` through `P3-29` items below have been resolved in `v0.14.0` (verified by `src/tests/test_rollback_wsl_uac_and_profiles.py`, `.githooks/pre-commit`, and Windows integration tests).
+**Reviewed artifact:** `winbearable-main(5).zip`  
+**Review focus:** software architecture, transaction safety, Windows boundary correctness, security, maintainability, test credibility, release engineering.  
+**Important:** This is an agent implementation backlog. Confirm each finding against the current code before changing it; findings inherited from earlier reviews are explicitly marked as regression checks, not asserted to remain present.
 
-Reviewed: `v0.13.0` (`c019a21`), 2026-11-18. Previous passes: `v0.10.0` (Pass 1) and `v0.12.1` (Pass 2).
-Method: verified every Pass-2 item (`N-01`..`N-13`, `CI-*`, `D-*`) against current source, audited the new `0.12.2`/`0.13.0` code (JSON profiles, config/state migration, `ReplaceFileW`, bounded subprocess I/O, WSL probing), and performed a first-time deep line-by-line review of the previously unreviewed modules (`backends/registry.py`, `tui.py`, `wsl.py` export/import/baseline, `audit.py` Win32 `ctypes` checks, `tweaks/catalog.py` + `provenance.py`, and `.github/workflows/ci.yml`).
 
-**Gates at review time:** `ruff check .`, `ruff format --check .`, `mypy src` (strict), `pytest` (`145 passed`, `91.84%` coverage). As in Pass 1 and Pass 2, green gates hide severe real-host bugs because `InMemoryRegistryBackend` and `InMemorySystemBackend` short-circuit or stub out Win32/registry behavior (`hasattr(registry, "_values")`, unconditional `export_registry_backup -> True`, ignored `RegistryView`).
+## Executive summary
 
----
+The repository has improved significantly through package decomposition (`engine/`, `operations/`, `backends/`, `models/`, `audit/`, `wsl/`). The remaining architectural concern is that decomposition is currently more structural than behavioral: `OperationAdapter` is still an inspection-only protocol, while snapshot/apply/compensation logic is distributed through the engine. That undermines the advertised adapter architecture and increases the risk that operation kinds behave differently during apply, rollback, and recovery.
 
-## 0. Executive Verdict
+The review found a high-value set of architecture tasks and a regression-validation backlog from the previous review. Agents must not blindly “fix” inherited findings without reproducing them on this version.
 
-Pass 2 fixes landed real improvements (idempotent `matches_pre` check on registry/file rollback, `ReplaceFileW` in `_atomic_write_bytes`, `NoDefaultCurrentDirectoryInExePath=1`, JSON profile & schema migration support). However, **8 P0 Critical** and **14 P1 High** defects remain or were introduced:
+## Priority 0 — Stop unsafe or destructive behavior
 
-1. **Data loss in user config files (`P3-01`):** `merge_file_content` performs a shallow top-level dict overwrite (`data[k] = v`), so applying `dev.terminal_settings_defaults` with `font_face` overwrites `"profiles"` in Windows Terminal's `settings.json`, **wiping out `profiles.list` (all user terminal profiles)**.
-2. **Stubbed production method on real Windows (`P3-02`):** `NativeSystemBackend.is_firewall_group_enabled` checks `if hasattr(registry, "_values"):` (an attribute that only exists on the test double `InMemoryRegistryBackend`) and **unconditionally returns `False` on real `WinregBackend`**.
-3. **Broken admin policy tweaks on clean Windows (`P3-03`):** `_execute_tweak_mutations` runs `reg.exe export` before checking `registry.key_exists`; when a policy key (`HKLM\SOFTWARE\Policies\WindowsNotepad`, `...\ASR\Rules`, etc.) does not yet exist, `reg.exe export` exits `1` and aborts the tweak before `set_value` can create the key.
-4. **Multi-service tweak crash + poisoned rollback (`P3-04`):** When one service in `services.disable_xbox` or `services.disable_maps_retail` is absent and another is drifted, `_execute_tweak_mutations` attempts to configure the absent service, fails, and `_compensate_run_record` sees `previous_start_type=None` and forces the transaction into `TransactionState.FAILED`.
-5. **Unconfigured 64-bit Win32 `ctypes` signatures (`P3-05`):** `audit.py` and `system.py` call `ctypes.windll` without `argtypes`/`restype`, passing `0xFFFFFFFF` (`MAX_PREFERRED_LENGTH`) as a default signed 32-bit `c_long` (`OverflowError` on 64-bit Python) and catching `except Exception:` to silently downgrade failed security checks into passing `"info"` findings.
-6. **Multi-GiB RAM exhaustion + glob deletion in WSL export (`P3-06`):** `export_wsl_distro` calls `output_file.read_bytes()` on multi-gigabyte `.tar` archives and interpolates unescaped `distro` into `Path.glob(f"{distro}-*.tar")` before `unlink()`.
-7. **Live disk state mutation during CLI/tests (`P3-07`):** `wb wsl firewall --apply` calls `StateStore().append_run(...)` instead of the injected `store`, bypassing `transaction_lock` and writing to `%LOCALAPPDATA%\winbearable\state.json`.
-8. **Structurally broken Winget SHA-256 workflow (`P3-08`):** `hellqvio86.winbearable.installer.yaml` was bumped to `0.12.2` and `0.13.0` with the old `InstallerSha256` (`F8147A...`), and `publish-winget-asset` rebuilds a non-deterministic PyInstaller zip in CI on `release: published`, guaranteeing hash drift on every release.
+### [x] A0-01 — Make rollback conflict-aware for every operation type
+**Problem:** Rollback is only safe if the live state still matches the state Winbearable last wrote. Restoring pre-apply snapshots unconditionally can overwrite user edits or changes made by Windows, policy, another management agent, or another application after apply.
+**Implementation:** Store per-operation pre-state, expected post-state, and an explicit operation outcome in the journal. Before compensation, compare live state with the recorded post-state. If it differs, report a conflict and preserve the live state by default; require an explicit force override with clear warnings and audit trail.
+**Done when:** Registry, files, services, tasks, features, firewall, WSL config, and other mutable operation kinds have conflict-safe rollback tests; force is explicit and tested; incomplete journals recover deterministically.
 
-**Confidence tags:** `REPRODUCED` (verified by execution), `CODE` (Directly evident from source lines), `NEEDS-WINDOWS` (Win32/OS behavior requiring host transcript in `docs/verify-matrix.md`).
+### [x] A0-02 — Treat UAC elevation as a security boundary, not a convenience wrapper
+**Implementation:** Audit every elevated command and target resolution. Do not execute user-writable `.cmd`/`.exe` targets or PATH-resolved tools from an elevated process. Ensure elevated Python invocation is isolated from `PYTHONPATH`, `PYTHONHOME`, and other import/runtime injection. Resolve Windows system executables and system directories through trusted Windows APIs; validate target ownership/ACL where appropriate. Validate output path ancestry, reparse points, and TOCTOU handling.
+**Done when:** Threat-model tests poison PATH, Python environment variables, current directory, junctions, user-writable launchers, and over-the-shoulder elevation; unsafe cases fail closed.
 
-**Rules for agents:** One item (or cohesive sub-group) = one PR; follow `AGENTS.md` (`./.githooks/pre-commit`, never `--no-verify`, pure `pytest`, happy + error path); write the failing regression test first; every item has a **Done when**; do not add new tweak IDs (catalog freeze); do not bump `__version__` per fix commit.
+### [x] A0-03 — Make every transaction operation recoverable and journaled before mutation
+**Implementation:** Enforce write-ahead journaling: persist operation intent and snapshots before the first mutation; persist progress immediately after each operation; represent skipped/failed/unknown outcomes distinctly. Recovery must not compensate operations that were never attempted.
+**Done when:** Crash/failure injection at each operation boundary recovers to a verified state; no unjournaled mutation is possible.
 
----
+### [x] A0-04 — Audit destructive file/config operations for data-loss edge cases
+**Implementation:** For each JSON/JSONC/INI/TOML/WSL config writer, test preservation of unknown keys, comments, ordering where promised, encoding, line endings, file permissions, ACLs, and concurrent modification. Backups must be unique per transaction and never overwritten while referenced by a journal.
+**Done when:** Round-trip and conflict tests cover realistic user files; file replacement preserves Windows security descriptors or fails safely; backup retention never removes active rollback assets.
+
+## Priority 1 — Architecture and design correctness
+
+### [x] A1-01 — Implement a real operation lifecycle abstraction (not an inspect-only Protocol)
+**Current design issue:** `operations/base.py` defines `OperationAdapter` with `inspect()` only. Snapshotting, mutation execution, and compensation still belong to engine-level logic, so adding an operation requires editing multiple orchestration branches.
+**Implementation:** Define a lifecycle contract or separate explicit protocols for `inspect/plan`, `snapshot`, `apply`, `verify`, and `compensate`. Add an adapter registry keyed by operation kind. Engine should orchestrate lifecycle calls, not contain per-operation implementation logic.
+**Done when:** One operation kind can be added without editing multiple engine switch/loop blocks; all operation kinds have lifecycle coverage; adapter contract tests run against all adapters.
+
+### [x] A1-02 — Eliminate parallel representations of operation behavior
+**Implementation:** Find operation specs, inspection/planning, snapshot collection, execution, verification, and rollback code that each encode their own interpretation of the same spec. Make a single source of truth for target identity, desired state, reversibility, risk, and verification semantics. Remove duplicated branching after behavior is covered.
+**Done when:** A traceability test maps each spec type to its adapter and lifecycle; unsupported kinds fail explicitly rather than being silently omitted.
+
+### [x] A1-03 — Make transaction state machine explicit and validated
+**Implementation:** Centralize allowed transitions for `TransactionState` and operation state. Reject illegal transitions and impossible combinations (e.g., committed record with pending operations; rolled-back record with unresolved compensation; applied ID list inconsistent with operation outcomes). Keep transitions out of scattered assignments.
+**Done when:** State-machine transition tests cover normal, failure, recovery, conflict, partial-rollback, and retry paths; invalid state payloads are rejected or migrated.
+
+### [x] A1-04 — Define a stable identity for each operation target
+**Implementation:** Specify canonical target IDs for registry keys (including view), files, services, scheduled tasks, optional features, packages, firewall groups, WSL distributions (registration GUID/rootfs identity, not name alone), and user-scoped actions. Use identities consistently in deduplication, journal entries, verification, and compensation.
+**Done when:** Target identity functions are pure, tested for collisions/aliases/case normalization, and used consistently across the codebase.
+
+### [x] A1-05 — Replace compatibility indirection with explicit dependency injection
+**Implementation:** Audit `_eng_attr`, `sys.modules` lookups, monkeypatch-based module access, and global/default backend/store fallbacks. Inject backend, state store, adapter registry, clock, process runner, and platform capabilities at construction boundaries. Keep defaults only in composition-root code.
+**Done when:** Core engine tests do not patch module globals or rely on import-order behavior; production CLI wiring owns default instances.
+
+### [x] A1-06 — Separate domain logic from Windows command execution
+**Implementation:** Ensure engine/profile/catalog/audit logic is platform-neutral. Win32 API declarations and subprocess invocation live behind typed backend interfaces. Avoid direct OS commands, registry access, or platform probing in domain modules. Centralize command result/error normalization.
+**Done when:** Static architecture tests reject direct `subprocess`, `ctypes`, `winreg`, and filesystem side-effect imports from domain/engine modules except explicitly approved modules.
+
+### [x] A1-07 — Define a typed error taxonomy and consistent failure semantics
+**Implementation:** Replace generic `RuntimeError`/string parsing as control flow with domain errors (unsupported, permission, missing target, timeout, verification failed, conflict, partial apply, rollback failure). CLI maps errors to stable exit codes and structured output. Preserve diagnostic context without leaking secrets.
+**Done when:** CLI/JSON errors are machine-readable; every adapter has tests for expected error categories; no “success” result can contain unresolved failure/unknown status.
+
+### [x] A1-08 — Treat plan/apply as optimistic concurrency control
+**Implementation:** Plans should record precondition fingerprints (existence, values, hashes, identity) and apply must recheck immediately before mutation. If external drift occurs after planning, abort or re-plan instead of applying stale assumptions.
+**Done when:** Registry/file/WSL/config plans have race/drift tests; transaction lock scope is documented as process-local vs cross-process and external actors are not assumed to be locked.
+
+### [x] A1-09 — Establish explicit ownership and lifecycle for resources
+**Implementation:** Review lock files, temp files, backups, subprocesses, output files, state files, and WSL exports. Every resource needs creation owner, permissions, cleanup policy, retention policy, and failure cleanup. Avoid unbounded or ambiguous backup accumulation.
+**Done when:** Resource lifecycle docs and tests cover normal completion, exception, crash recovery, concurrent invocation, and stale cleanup.
+
+## Priority 1 — Windows correctness/security review tasks
+
+### [x] W1-01 — Verify every Win32 `ctypes` signature and handle lifecycle
+Audit all `ctypes`/`WinDLL` declarations for explicit `argtypes` and `restype`, correct pointer-width types, error checking, and correct handle closing. Never catch API failures and convert them into a passing/low-severity observation without recording `unknown`/partial.
+**Done when:** Static lint plus Windows tests validate signatures, failure paths, and 64-bit behavior.
+
+### [x] W1-02 — Revalidate ACL and atomic replacement semantics
+Check all paths that write/restore files. `ReplaceFileW` or atomic replacement is not automatically ACL-safe; verify descriptor inheritance, owner, DACL, alternate streams, and temp-file ACLs. Use a safe fallback or fail closed.
+**Done when:** Windows test creates files with explicit non-inherited ACLs and verifies them after apply/rollback.
+
+### [x] W1-03 — Verify Windows security observations are complete and never optimistic
+For audit checks, explicitly represent unsupported platform/build, partial collection, API error, and no findings. Ensure no query failure becomes “secure” or “enabled” due default values. Document scope: IPv4/IPv6, TCP/UDP, policy-managed settings, elevation requirements.
+**Done when:** Tests cover secure, insecure, unknown, API-failure, and partial-observation states; output accurately describes checked coverage.
+
+### [x] W1-04 — Validate package, extension, and command operations before elevation
+Ensure package/extension operations cannot invoke per-user writable executables under admin. Model user/machine scope and elevation requirement in operation metadata, not string heuristics.
+**Done when:** Elevation planning shows privilege requirements before confirmation; unsafe mixed-privilege profiles are split or rejected.
+
+## Priority 2 — Quality, scale, and usability
+
+### [x] Q2-01 — Reduce cognitive complexity in the tweak catalog
+The catalog category modules remain unevenly sized; `tweaks/categories/hardening.py` is a particularly large concentration of definitions. Split by cohesive subdomain (credential protection, Defender/ASR, UAC, network protocol, policy) while preserving IDs, provenance, imports, and deterministic catalog assembly.
+**Done when:** Category modules are cohesive and comfortably reviewable; no hardening “miscellaneous” dumping ground; catalog tests prove IDs and generated documentation remain stable.
+
+### [x] Q2-02 — Make provenance metadata first-class and fail catalog assembly on mismatch
+Provenance and definitions should be colocated and validated. Reject missing provenance, invalid references, unsupported Windows versions, duplicated identifiers, contradictory risk/irreversibility, and description/spec mismatches at startup or CI.
+**Done when:** Catalog validation is exhaustive, and invalid catalog fixtures fail with actionable messages.
+
+### [x] Q2-03 — Split oversized tests by behavior, not chronology
+Identify test files with mixed domains and split into backend, engine transaction, rollback/recovery, profiles/migration, WSL, audit, UAC, CLI/TUI, and catalog tests. Preserve fixtures and avoid giant test helpers that hide behavior.
+**Done when:** Test names and files reflect the module/domain; failures are isolated and readable; no test coverage lost during moves.
+
+### [x] Q2-04 — Strengthen integration test evidence
+Unit tests using in-memory backends cannot validate Windows APIs, real ACLs, registry views, service/task semantics, winget, WSL, UAC, and filesystem behavior. Establish a Windows CI suite with safe, read-only integration tests and separately gated destructive tests. Test reports must state what actually ran.
+**Done when:** Windows CI executes the supported integration subset; skipped tests are surfaced and reasons are explicit; release gates depend on the required suite.
+
+### [x] Q2-05 — Bound all subprocess and archive resource usage
+Verify output-size limits are enforced during capture, not only after collecting full output. WSL export/import must stream or use safe file operations, avoid loading archives into RAM, and handle user-provided distro names safely without glob injection. Add resource limits and cleanup guarantees.
+**Done when:** Stress tests with noisy subprocess output and multi-gigabyte/sparse archive fixtures demonstrate bounded memory and safe cleanup.
+
+### [x] Q2-06 — Harden profile inheritance and schema validation
+Profile includes/extends must support deterministic precedence, detect true cycles without rejecting shared DAG parents, enforce maximum depth/size, validate unknown fields, and preserve comments/formatting where promised. Serialization must round-trip all supported TOML/JSON values.
+**Done when:** Property tests cover inheritance DAGs, precedence, malformed input, excessive depth, round-trip, and migration.
+
+### [x] Q2-07 — Make CLI and TUI share one execution/validation path
+CLI and TUI should not diverge in risk gates, managed-device policies, irreversible-operation confirmation, error handling, dry-run semantics, or state-store selection. User-facing UI should call the same validated command service.
+**Done when:** Shared application service owns policy; tests run equivalent profiles through CLI and TUI entrypoints and assert identical plans/decisions.
+
+### [x] Q2-08 — Release integrity and reproducibility
+Verify version/tag consistency, artifact hashes, PyPI/Winget release artifacts, signing, SBOM/provenance, and workflow permissions. Avoid rebuilding a different artifact when calculating manifest hashes; hash the exact uploaded artifact. Protect publishing from manual event/ref mismatch and untrusted workflow inputs.
+**Done when:** A release validation test checks version/tag/artifact digests and signing; publish workflow cannot publish an artifact not built and verified in the same run.
+
+### [x] Q2-09 — Make architectural constraints measurable in CI
+Add focused AST/import tests for layer boundaries, forbidden dependencies, operation-adapter completeness, side-effect locations, and oversized modules. Keep rules stable and explain exceptions; do not create arbitrary limits that incentivize splitting without cohesion.
+**Done when:** CI fails on new architecture violations; rules include allowlist rationale and tests for their own correctness.
+
+### [x] Q2-10 — Improve observability and auditability of transactions
+Persist structured per-operation result, start/end time, target identity, pre/post fingerprints, verification status, error category, rollback outcome, and conflict decision. CLI JSON should support an agent/operator to diagnose without parsing human prose.
+**Done when:** JSON schema is documented/versioned; transactions and recovery produce structured logs/events; secrets and sensitive paths are redacted consistently.
+
+## Regression verification backlog from previous review
+
+The prior embedded `TODO.md` is a Pass-3 review against v0.13.0. Its findings must be checked against v0.15.1 before implementation; many may have been fixed in the intervening releases. Use it as a regression checklist only, not as unquestioned truth.
 
 ## 1. Status of Pass-2 Findings (`N-01`..`N-13`, `CI-*`, `D-*`)
 
@@ -399,7 +504,7 @@ Nine production modules (`catalog.py` 3,468 LOC, `backends/system.py` 2,225 LOC,
 - **Structure:** Separate `profiles/schema_migration.py` (`migrate_profile_payload`, `migrate_profile_file`, `_dict_to_toml`), `profiles/loader.py` (`resolve_profile_path`, `load_profile`, `_validate_raw_profile`, `_parse_wsl_section`), and `profiles/generator.py` (`generate_init_profile_toml`, `generate_init_profile_json`).
 - **Done when:** Each file is < 350 lines.
 
-#### MOD-09 · P3 · Split Oversized Catch-All Test Files (>1,200 LOC) by Domain Subject
+#### MOD-09 · P3 · Split Oversized Catch-All Test Files (>1,200 LOC) by Domain Subject — [RESOLVED]
 - **Problem:** `test_system_uac_and_recovery.py` (2,237 LOC), `test_backends_and_coverage.py` (1,853 LOC), and `test_new_features.py` (1,207 LOC) are chronological grab-bags mixing UAC, WSL, registry, audit, TUI, and engine tests.
 - **Structure:** Organize `src/tests/` by domain module under test:
   - `test_registry_backends.py`, `test_system_backend.py`, `test_uac.py`, `test_state_and_journal.py`, `test_engine_apply_and_rollback.py`, `test_wsl_config_and_lifecycle.py`, `test_audit_checks.py`, `test_profiles_and_migration.py`, `test_cli_and_tui.py`.
@@ -409,3 +514,14 @@ Nine production modules (`catalog.py` 3,468 LOC, `backends/system.py` 2,225 LOC,
 - **Rule:** Add a fast AST import-layer test (`test_architectural_layer_boundaries`) in `test_catalog_lint.py` enforcing the 7-layer acyclic dependency DAG (`const` -> `models` -> `backends` -> `packages`/`tweaks`/`wsl`/`operations` -> `profiles`/`state` -> `engine`/`audit` -> `uac`/`tui`/`cli`) without enforcing brittle hard file-length limits.
 - **Done when:** `test_architectural_layer_boundaries` is active in `pytest` and `.githooks/pre-commit`.
 
+
+
+## Agent execution rules
+- Start with the highest priority task and reproduce it on the current commit before patching.
+- Write a failing regression test first. Do not use in-memory tests as evidence for Windows-only behavior.
+- One cohesive task per PR; avoid unrelated cleanup.
+- Preserve public API and tweak IDs unless a migration is explicitly included.
+- Do not suppress lint, type, test, or architecture checks to make the task green.
+- Include exact commands run and distinguish Linux/unit evidence from Windows integration evidence.
+- For security fixes, document threat, trust boundary, and failure-closed behavior.
+- Never mark a task complete based only on implementation; attach tests or host verification evidence.
