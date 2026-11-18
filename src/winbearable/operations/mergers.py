@@ -23,9 +23,15 @@ _UNRESOLVED_WIN_ENV_RE = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*%")
 
 def expand_file_spec_path(path_template: str) -> Path:
     """Expand %VAR% and ~ in a FileSpec path template, rejecting unresolved %VAR% tokens."""
-    expanded = os.path.expandvars(os.path.expanduser(path_template))
+    expanded = _UNRESOLVED_WIN_ENV_RE.sub(
+        lambda m: os.environ.get(m.group(0)[1:-1], m.group(0)),
+        path_template,
+    )
+    expanded = os.path.expandvars(os.path.expanduser(expanded))
     if _UNRESOLVED_WIN_ENV_RE.search(expanded):
         raise ValueError(f"Unresolved environment variable in path template: {path_template!r}")
+    if os.name != "nt":
+        expanded = expanded.replace("\\", "/")
     return Path(expanded)
 
 

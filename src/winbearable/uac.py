@@ -9,17 +9,20 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    import msvcrt
-else:
-    msvcrt = None  # type: ignore[assignment]
-
 from .const import ERROR_CANCELLED as ERROR_CANCELLED
 from .const import (
     WAIT_FAILED,
     WAIT_OBJECT_0,
     WAIT_TIMEOUT,
 )
+
+msvcrt: Any
+if sys.platform == "win32":
+    import msvcrt as _msvcrt
+
+    msvcrt = _msvcrt
+else:
+    msvcrt = None
 
 SEE_MASK_NOCLOSEPROCESS = 0x00000040
 SW_HIDE = 0
@@ -166,10 +169,10 @@ def _is_wb_launcher(path: Path) -> bool:
     return path.name.lower() in {"wb.exe", "winbearable.exe", "wb", "winbearable"}
 
 
-def _validate_elevation_executable(path: Path) -> Path:
+def _validate_elevation_executable(path: Path, *, check_symlinks: bool = True) -> Path:
     """Resolve *path* and reject symlinks/reparse points on the target or its ancestors."""
     resolved = path.resolve()
-    if _is_reparse_or_symlink(path) or any(_is_reparse_or_symlink(p) for p in path.parents):
+    if check_symlinks and (_is_reparse_or_symlink(path) or any(_is_reparse_or_symlink(p) for p in path.parents)):
         raise UacElevationError(f"Refusing elevation target with symlink or reparse point: {path}")
     return resolved
 
@@ -206,7 +209,11 @@ def resolve_elevation_target(
     if sibling_wb.is_file():
         return str(_validate_elevation_executable(sibling_wb)), elevated_args
 
-    return str(_validate_elevation_executable(Path(sys.executable))), ["-I", "-m", "winbearable", *elevated_args]
+    # Linux/macOS virtualenvs always symlink .venv/bin/python to the base interpreter; enforce symlink check on Win32.
+    return (
+        str(_validate_elevation_executable(Path(sys.executable), check_symlinks=(sys.platform == "win32"))),
+        ["-I", "-m", "winbearable", *elevated_args],
+    )
 
 
 def set_console_title(title: str = "winbearable", windll_override: Any = None) -> bool:
