@@ -326,28 +326,30 @@ def migrate_profile_payload(
         migrated["wsl"] = wsl_map
         transformed = True
 
-    # Canonicalize deprecated tweak IDs in tweaks and params
+    # Canonicalize deprecated tweak IDs in tweaks and params (explicit canonical keys take precedence)
     if isinstance(migrated.get("tweaks"), dict):
-        new_tweaks: dict[str, Any] = {}
-        for tid, val in migrated["tweaks"].items():
-            canonical = resolve_tweak_id(str(tid))
-            if tid in TWEAK_ID_ALIASES:
+        raw_t = migrated["tweaks"]
+        new_tweaks: dict[str, Any] = {str(k): v for k, v in raw_t.items() if str(k) not in TWEAK_ID_ALIASES}
+        for tid, val in raw_t.items():
+            if str(tid) in TWEAK_ID_ALIASES:
+                canonical = resolve_tweak_id(str(tid))
                 warnings.warn(
                     f"Profile '{source_label}' uses deprecated tweak ID '{tid}'; use '{canonical}' instead.",
                     DeprecationWarning,
                     stacklevel=3,
                 )
                 transformed = True
-            new_tweaks[canonical] = val
+                new_tweaks.setdefault(canonical, val)
         migrated["tweaks"] = new_tweaks
 
     if isinstance(migrated.get("params"), dict):
-        new_params: dict[str, Any] = {}
-        for tid, val in migrated["params"].items():
-            canonical = resolve_tweak_id(str(tid))
-            if tid in TWEAK_ID_ALIASES:
+        raw_p = migrated["params"]
+        new_params: dict[str, Any] = {str(k): v for k, v in raw_p.items() if str(k) not in TWEAK_ID_ALIASES}
+        for tid, val in raw_p.items():
+            if str(tid) in TWEAK_ID_ALIASES:
+                canonical = resolve_tweak_id(str(tid))
                 transformed = True
-            new_params[canonical] = val
+                new_params.setdefault(canonical, val)
         migrated["params"] = new_params
 
     migrated["schema_version"] = PROFILE_SCHEMA_VERSION
@@ -380,8 +382,17 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
         raise ProfileValidationError(f"Profile '{source_label}' must define a string 'name'.")
     if "description" in raw_data and not isinstance(raw_data["description"], str):
         raise ProfileValidationError(f"Profile '{source_label}' 'description' must be a string.")
-    if "include" in raw_data and not isinstance(raw_data["include"], list):
-        raise ProfileValidationError(f"Profile '{source_label}' 'include' must be a list of paths/names.")
+    if "extends" in raw_data and raw_data["extends"] is not None and not isinstance(raw_data["extends"], str):
+        raise ProfileValidationError(f"Profile '{source_label}' 'extends' must be a string.")
+    if "include" in raw_data and (
+        not isinstance(raw_data["include"], list) or any(not isinstance(x, str) for x in raw_data["include"])
+    ):
+        raise ProfileValidationError(f"Profile '{source_label}' 'include' must be a list of strings.")
+
+    raw_wsl_chk = raw_data.get("wsl", {})
+    if not isinstance(raw_wsl_chk, dict):
+        raise ProfileValidationError(f"Profile '{source_label}' [wsl] must be a table.")
+    _parse_wsl_section(raw_wsl_chk, content=content)
 
     raw_tweaks = raw_data.get("tweaks", {})
     if not isinstance(raw_tweaks, dict):
@@ -416,6 +427,9 @@ def _validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: 
         raise ProfileValidationError(
             f"Profile '{source_label}' unknown [packages] keys{ln_hint}: {', '.join(sorted(unknown_pkg))}"
         )
+    for pkg_list_key in ("install", "presets", "remove"):
+        if pkg_list_key in raw_packages and not isinstance(raw_packages[pkg_list_key], list):
+            raise ProfileValidationError(f"Profile '{source_label}' [packages.{pkg_list_key}] must be a list.")
     for pkg_name in raw_packages.get("install", []):
         if pkg_name not in PACKAGE_CATALOG:
             raise ProfileValidationError(f"Profile '{source_label}' references unknown catalog package '{pkg_name}'.")
@@ -457,10 +471,11 @@ def load_profile(
     name_or_path: str,
     _visited: set[Path] | None = None,
     _chain: tuple[tuple[str, str], ...] = (),
+    _edge: str = "root",
 ) -> ProfileSpec:
     """Load a TOML or JSON profile, migrate legacy fields, and resolve 'extends'/'include'."""
     profile_path = resolve_profile_path(name_or_path).resolve()
-    current_chain = (*_chain, ("root" if not _chain else _chain[-1][0], str(profile_path)))
+    current_chain = (*_chain, (_edge, str(profile_path)))
     if len(current_chain) > MAX_PROFILE_INHERITANCE_DEPTH:
         chain_str = " -> ".join(f"{edge}:{p}" for edge, p in current_chain)
         raise ProfileValidationError(
@@ -470,7 +485,7 @@ def load_profile(
     if profile_path in visited:
         chain_str = " -> ".join(f"{edge}:{p}" for edge, p in current_chain)
         raise ProfileValidationError(f"Circular profile inheritance detected involving {profile_path}: {chain_str}")
-    visited.add(profile_path)
+    path_visited = visited | {profile_path}
 
     content = profile_path.read_text(encoding="utf-8")
     parsed_data, _ = _parse_profile_content(content, profile_path)
@@ -484,11 +499,20 @@ def load_profile(
         if not isinstance(extends_ref, str):
             raise ProfileValidationError(f"Profile {profile_path} 'extends' must be a string.")
         target_ref = _resolve_sibling_profile(profile_path.parent, extends_ref)
-        base_profile = load_profile(target_ref, _visited=visited, _chain=(*current_chain, ("extends", target_ref)))
+        base_profile = load_profile(target_ref, _visited=path_visited, _chain=current_chain, _edge="extends")
 
     merged_tweaks: dict[str, bool] = {}
     if base_profile is not None:
         merged_tweaks.update(base_profile.tweaks)
+
+    pkg_list: list[str] = list(base_profile.packages) if base_profile else []
+    pkg_remove: list[str] = list(base_profile.packages_remove) if base_profile else []
+    merged_params: dict[str, dict[str, Any]] = {
+        k: dict(v) for k, v in (base_profile.params.items() if base_profile else ())
+    }
+    wsl_distros: dict[str, dict[str, Any]] = {
+        k: dict(v) for k, v in (base_profile.wsl_distros.items() if base_profile else ())
+    }
 
     includes_raw = raw_data.get("include", [])
     resolved_includes: list[str] = list(base_profile.includes) if base_profile else []
@@ -496,8 +520,21 @@ def load_profile(
         if not isinstance(inc_ref, str):
             raise ProfileValidationError(f"Profile {profile_path} 'include' entries must be strings.")
         inc_target = _resolve_sibling_profile(profile_path.parent, inc_ref)
-        inc_profile = load_profile(inc_target, _visited=set(visited), _chain=(*current_chain, ("include", inc_target)))
+        inc_profile = load_profile(inc_target, _visited=path_visited, _chain=current_chain, _edge="include")
         merged_tweaks.update(inc_profile.tweaks)
+        for p_name in inc_profile.packages:
+            if p_name not in pkg_list:
+                pkg_list.append(p_name)
+        for r_name in inc_profile.packages_remove:
+            if r_name not in pkg_remove:
+                pkg_remove.append(r_name)
+        for tid, p_map in inc_profile.params.items():
+            merged_params.setdefault(tid, {}).update(p_map)
+        for d_name, d_cfg in inc_profile.wsl_distros.items():
+            wsl_distros.setdefault(d_name, {}).update(d_cfg)
+        for tr_inc in inc_profile.includes:
+            if tr_inc not in resolved_includes:
+                resolved_includes.append(tr_inc)
         resolved_includes.append(inc_ref)
 
     for tweak_id, enabled in raw_data.get("tweaks", {}).items():
@@ -509,7 +546,6 @@ def load_profile(
     wsl_spec = _parse_wsl_section(raw_wsl, base_profile.wsl if base_profile else None, content=content)
 
     raw_pkgs = raw_data.get("packages", {})
-    pkg_list: list[str] = list(base_profile.packages) if base_profile else []
     for preset in raw_pkgs.get("presets", []):
         for p_name in PACKAGE_PRESETS[preset]:
             if p_name not in pkg_list:
@@ -517,20 +553,13 @@ def load_profile(
     for p_name in raw_pkgs.get("install", []):
         if p_name not in pkg_list:
             pkg_list.append(p_name)
-    pkg_remove = list(base_profile.packages_remove) if base_profile else []
     for r_name in raw_pkgs.get("remove", []):
         if r_name not in pkg_remove:
             pkg_remove.append(r_name)
 
-    merged_params: dict[str, dict[str, Any]] = {
-        k: dict(v) for k, v in (base_profile.params.items() if base_profile else ())
-    }
     for tid, p_map in raw_data.get("params", {}).items():
         merged_params.setdefault(tid, {}).update(p_map)
 
-    wsl_distros: dict[str, dict[str, Any]] = {
-        k: dict(v) for k, v in (base_profile.wsl_distros.items() if base_profile else ())
-    }
     raw_distros = raw_wsl.get("distro", {})
     if isinstance(raw_distros, dict):
         for d_name, d_cfg in raw_distros.items():
@@ -617,6 +646,27 @@ def _toml_scalar(val: Any) -> str:
     return json.dumps(val)
 
 
+def _toml_key_part(key: str) -> str:
+    if key.isidentifier() or all(ch.isalnum() or ch in ("_", "-") for ch in key):
+        return key
+    return json.dumps(key)
+
+
+def _emit_toml_table(lines: list[str], header_parts: tuple[str, ...], table: dict[str, Any]) -> None:
+    lines.append("")
+    lines.append(f"[{'.'.join(_toml_key_part(p) for p in header_parts)}]")
+    nested: list[tuple[str, dict[str, Any]]] = []
+    for k, v in table.items():
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            nested.append((str(k), v))
+        else:
+            lines.append(f"{_toml_key_part(str(k))} = {_toml_scalar(v)}")
+    for sub_name, sub_dict in nested:
+        _emit_toml_table(lines, (*header_parts, sub_name), sub_dict)
+
+
 def _dict_to_toml(data: dict[str, Any]) -> str:
     """Serialize a validated profile dictionary to clean TOML."""
     lines: list[str] = []
@@ -627,26 +677,8 @@ def _dict_to_toml(data: dict[str, Any]) -> str:
 
     for section in ("wsl", "tweaks", "packages", "params"):
         sec_val = data.get(section)
-        if not isinstance(sec_val, dict) or not sec_val:
-            continue
-        lines.append("")
-        lines.append(f"[{section}]")
-        nested_tables: list[tuple[str, dict[str, Any]]] = []
-        for k, v in sec_val.items():
-            if v is None:
-                continue
-            if isinstance(v, dict):
-                nested_tables.append((str(k), v))
-            else:
-                key_expr = f'"{k}"' if "." in str(k) or " " in str(k) else str(k)
-                lines.append(f"{key_expr} = {_toml_scalar(v)}")
-        for sub_name, sub_dict in nested_tables:
-            lines.append("")
-            sub_expr = f'"{sub_name}"' if "." in sub_name or " " in sub_name else sub_name
-            lines.append(f"[{section}.{sub_expr}]")
-            for sk, sv in sub_dict.items():
-                if sv is not None:
-                    lines.append(f"{sk} = {_toml_scalar(sv)}")
+        if isinstance(sec_val, dict) and sec_val:
+            _emit_toml_table(lines, (section,), sec_val)
     return "\n".join(lines) + "\n"
 
 
@@ -680,12 +712,28 @@ def migrate_profile_file(
         raise ProfileValidationError(f"Unsupported output format '{target_format}'. Must be 'json' or 'toml'.")
 
     rendered = (json.dumps(migrated, indent=2) + "\n") if target_format == "json" else _dict_to_toml(migrated)
+    if target_format == "json":
+        json.loads(rendered)
+    else:
+        tomllib.loads(rendered)
+
     format_changed = target_format != detected_format or target_path.resolve() != source_path.resolve()
     needs_write = was_migrated or format_changed
 
     if not dry_run and needs_write:
+        import tempfile
+
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(rendered, encoding="utf-8")
+        fd, tmp_str = tempfile.mkstemp(prefix=f"{target_path.name}.", dir=str(target_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(rendered)
+                fh.flush()
+            os.replace(tmp_str, target_path)
+        except Exception:
+            if os.path.exists(tmp_str):
+                os.unlink(tmp_str)
+            raise
 
     return {
         "source_path": str(source_path),

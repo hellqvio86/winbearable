@@ -1,5 +1,6 @@
 """Non-destructive .wslconfig and /etc/wsl.conf management and 75% RAM sizing."""
 
+import glob
 import hashlib
 import os
 import re
@@ -30,7 +31,7 @@ class WslOperationError(RuntimeError):
 
 SECTION_HEADER_RE = re.compile(r"^\s*\[(?P<section>[^\]]+)\]\s*(?:#.*|;.*)?$")
 KEY_VALUE_RE = re.compile(
-    r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+)(?P<sep>\s*=\s*)(?P<val>.*?)(?P<comment>\s*[#;].*)?$"
+    r'^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+)(?P<sep>\s*=\s*)(?P<val>"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\'|[^#;\r\n]*?)(?P<comment>\s*[#;].*)?$'
 )
 
 
@@ -167,6 +168,13 @@ def detect_wsl_policies(registry: RegistryBackend) -> dict[str, Any]:
     return {"blocked": blocked, "policies": policies}
 
 
+def _sanitize_ini_value(val: str, field_name: str) -> str:
+    """Reject CR/LF in INI values to prevent key/section injection."""
+    if "\r" in val or "\n" in val:
+        raise WslOperationError(f"Invalid newline in WSL configuration value for '{field_name}'.")
+    return val
+
+
 def build_wslconfig_sections(
     spec: WslConfigSpec,
     host_memory_bytes: int,
@@ -205,9 +213,9 @@ def build_wslconfig_sections(
             wsl2_sec["debugConsole"] = str(spec.debug_console).lower()
 
     if spec.kernel_command_line is not None:
-        wsl2_sec["kernelCommandLine"] = spec.kernel_command_line
+        wsl2_sec["kernelCommandLine"] = _sanitize_ini_value(spec.kernel_command_line, "kernel_command_line")
     if spec.default_vhd_size is not None:
-        wsl2_sec["defaultVhdSize"] = spec.default_vhd_size
+        wsl2_sec["defaultVhdSize"] = _sanitize_ini_value(spec.default_vhd_size, "default_vhd_size")
 
     experimental_sec: dict[str, str] = {
         "autoMemoryReclaim": "gradual",
@@ -259,7 +267,7 @@ def build_distro_wsl_conf_sections(spec: WslConfigSpec) -> dict[str, dict[str, s
             "options": '"metadata,umask=22,fmask=11"',
         }
         if spec.automount_root is not None:
-            automount_sec["root"] = spec.automount_root
+            automount_sec["root"] = _sanitize_ini_value(spec.automount_root, "automount_root")
         if spec.cross_distro is not None:
             automount_sec["crossDistro"] = str(spec.cross_distro).lower()
         sections = {
@@ -274,11 +282,11 @@ def build_distro_wsl_conf_sections(spec: WslConfigSpec) -> dict[str, dict[str, s
     if spec.default_user is not None:
         if spec.default_user.strip().lower() == "root":
             raise WslOperationError("Refusing to set /etc/wsl.conf [user] default=root.")
-        sections["user"] = {"default": spec.default_user.strip()}
+        sections["user"] = {"default": _sanitize_ini_value(spec.default_user.strip(), "default_user")}
 
     net_sec: dict[str, str] = {}
     if spec.hostname is not None:
-        net_sec["hostname"] = spec.hostname
+        net_sec["hostname"] = _sanitize_ini_value(spec.hostname, "hostname")
     if spec.generate_hosts is not None:
         net_sec["generateHosts"] = str(spec.generate_hosts).lower()
     if spec.generate_resolv_conf is not None:
@@ -433,7 +441,7 @@ def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfPr
         return WslDistroConfProbe(status="error", content="", evidence=str(exc))
 
     test_stderr = (test_res.stderr or "").strip()
-    if "WB_RC=1" in test_res.stdout and not test_stderr:
+    if "WB_RC=1" in test_res.stdout and (test_res.returncode == 0 or not test_stderr):
         return WslDistroConfProbe(status="missing", content="", evidence="confirmed_absent (WB_RC=1)")
     if "WB_RC=0" not in test_res.stdout:
         if test_res.returncode == 1 and not test_stderr and "WB_RC=" not in test_res.stdout:
@@ -465,6 +473,7 @@ def prepare_wsl_plan(
     distros: tuple[str, ...] = (),
     create_host_backup: bool = True,
     backup_dir: Path | None = None,
+    installed_wsl_version: str | None = None,
 ) -> PreparedWslPlan:
     """Read host .wslconfig and probe all target distros before any WSL mutation occurs."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
@@ -478,7 +487,9 @@ def prepare_wsl_plan(
     memory_gib = spec.memory_gb if spec.memory_gb is not None else calculate_wsl_memory_gib(host_memory_bytes)
 
     warnings: list[str] = []
-    desired_wslconfig_sections = build_wslconfig_sections(spec, host_memory_bytes, warnings=warnings)
+    desired_wslconfig_sections = build_wslconfig_sections(
+        spec, host_memory_bytes, installed_wsl_version=installed_wsl_version, warnings=warnings
+    )
     merged_wslconfig = merge_ini_preserving_comments(existing_wslconfig, desired_wslconfig_sections)
     wslconfig_changed = merged_wslconfig != existing_wslconfig
 
@@ -548,22 +559,53 @@ def lint_wsl_conf_lf(content: str) -> dict[str, Any]:
     }
 
 
+def _rollback_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBackend) -> None:
+    """Best-effort restore of /etc/wsl.conf if post-write verification fails."""
+    if distro_plan.probe.status == "exists":
+        system.run_wsl_command(
+            ["-d", distro_plan.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
+            input_text=distro_plan.probe.content,
+        )
+    elif distro_plan.probe.status == "missing":
+        system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "rm", "-f", "/etc/wsl.conf"])
+
+
 def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBackend) -> None:
-    """Write and byte-verify /etc/wsl.conf (LF-only) for a single prepared distro."""
+    """Atomically write and byte-verify /etc/wsl.conf (LF-only) for a single prepared distro."""
     if not distro_plan.changed:
         return
     lf_content = distro_plan.merged_content.replace("\r\n", "\n").replace("\r", "\n")
     expected_sha256 = hashlib.sha256(lf_content.encode("utf-8")).hexdigest()
-    write_res = system.run_wsl_command(
-        ["-d", distro_plan.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
-        input_text=lf_content,
-    )
-    if write_res.returncode != 0:
-        raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro_plan.distro}': {write_res.stderr}")
+    if getattr(system, "is_simulated", False):
+        write_res = system.run_wsl_command(
+            ["-d", distro_plan.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
+            input_text=lf_content,
+        )
+        if write_res.returncode != 0:
+            raise WslOperationError(f"Failed to write /etc/wsl.conf in '{distro_plan.distro}': {write_res.stderr}")
+    else:
+        tmp_path = "/etc/wsl.conf.wb.tmp"
+        write_res = system.run_wsl_command(
+            ["-d", distro_plan.distro, "-u", "root", "--", "tee", tmp_path],
+            input_text=lf_content,
+        )
+        if write_res.returncode != 0:
+            system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "rm", "-f", tmp_path])
+            raise WslOperationError(f"Failed to write {tmp_path} in '{distro_plan.distro}': {write_res.stderr}")
+
+        mv_res = system.run_wsl_command(
+            ["-d", distro_plan.distro, "-u", "root", "--", "mv", "-f", tmp_path, "/etc/wsl.conf"]
+        )
+        if mv_res.returncode != 0:
+            system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "rm", "-f", tmp_path])
+            raise WslOperationError(
+                f"Failed to move {tmp_path} to /etc/wsl.conf in '{distro_plan.distro}': {mv_res.stderr}"
+            )
 
     sha_res = system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "sha256sum", "/etc/wsl.conf"])
     sha_tokens = sha_res.stdout.strip().split() if sha_res.returncode == 0 else []
     if sha_tokens and len(sha_tokens[0]) == 64 and sha_tokens[0].lower() != expected_sha256:
+        _rollback_distro_wsl_conf(distro_plan, system)
         raise WslOperationError(
             f"SHA-256 verification failed after writing /etc/wsl.conf in '{distro_plan.distro}' "
             f"(expected {expected_sha256}, got {sha_tokens[0].lower()})."
@@ -571,6 +613,7 @@ def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBack
 
     verify_res = system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
     if verify_res.returncode != 0 or "\r" in verify_res.stdout or verify_res.stdout != lf_content:
+        _rollback_distro_wsl_conf(distro_plan, system)
         raise WslOperationError(f"Verification failed after writing /etc/wsl.conf in '{distro_plan.distro}'.")
 
 
@@ -580,19 +623,21 @@ def plan_or_apply_wsl(
     wslconfig_path: Path | None = None,
     distro: str | None = None,
     dry_run: bool = True,
+    installed_wsl_version: str | None = None,
 ) -> dict[str, Any]:
     """Plan or apply .wslconfig (sizing memory to 75% of host RAM) and per-distro /etc/wsl.conf."""
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
-    existing_wslconfig = (
-        target_wslconfig.read_text(encoding="utf-8").lstrip("\ufeff") if target_wslconfig.is_file() else ""
-    )
+    had_wslconfig = target_wslconfig.is_file()
+    existing_wslconfig = target_wslconfig.read_text(encoding="utf-8").lstrip("\ufeff") if had_wslconfig else ""
 
     host_memory_bytes = system.get_total_memory_bytes()
     host_memory_gib_str = format_host_memory_gib(host_memory_bytes)
     memory_gib = spec.memory_gb if spec.memory_gb is not None else calculate_wsl_memory_gib(host_memory_bytes)
 
     warnings: list[str] = []
-    desired_wslconfig_sections = build_wslconfig_sections(spec, host_memory_bytes, warnings=warnings)
+    desired_wslconfig_sections = build_wslconfig_sections(
+        spec, host_memory_bytes, installed_wsl_version=installed_wsl_version, warnings=warnings
+    )
     merged_wslconfig = merge_ini_preserving_comments(existing_wslconfig, desired_wslconfig_sections)
     wslconfig_changed = merged_wslconfig != existing_wslconfig
     backup_path: Path | None = None
@@ -639,6 +684,8 @@ def plan_or_apply_wsl(
         except Exception:
             if backup_path is not None and backup_path.is_file():
                 shutil.copy2(backup_path, target_wslconfig)
+            elif wslconfig_changed and not had_wslconfig:
+                target_wslconfig.unlink(missing_ok=True)
             raise
 
     return {
@@ -878,9 +925,9 @@ def detect_default_wsl_distro(
     for raw_line in res.stdout.splitlines():
         cleaned = raw_line.replace("\x00", "").lstrip("\ufeff").strip()
         if cleaned.startswith("*"):
-            tokens = cleaned[1:].strip().split()
-            if tokens:
-                return tokens[0]
+            first_col = re.split(r"\s{2,}", cleaned[1:].strip(), maxsplit=1)[0].strip()
+            if first_col:
+                return first_col
     return None
 
 
@@ -1083,7 +1130,8 @@ def export_wsl_distro(
     keep_last: int | None = None,
 ) -> dict[str, Any]:
     """Export a WSL2 distribution to a backup tarball via wsl.exe --export and record sha256."""
-    import hashlib
+    if not distro or any(ch in distro for ch in ("/", "\\", "*", "?", "[", "]", "\x00")) or ".." in distro:
+        raise WslOperationError(f"Invalid WSL distro name for export: {distro!r}")
 
     cmd = ["--export", distro, str(output_file)]
     returncode = 0
@@ -1094,16 +1142,18 @@ def export_wsl_distro(
         res = system.run_wsl_command(cmd)
         returncode = res.returncode
         if returncode == 0 and output_file.is_file():
-            sha256_hex = hashlib.sha256(output_file.read_bytes()).hexdigest()
+            with open(output_file, "rb") as fh:
+                sha256_hex = hashlib.file_digest(fh, "sha256").hexdigest()
             output_file.with_suffix(f"{output_file.suffix}.sha256").write_text(
                 f"{sha256_hex}  {output_file.name}\n",
                 encoding="utf-8",
             )
             if keep_last is not None and keep_last > 0:
+                escaped_distro = glob.escape(distro)
                 other_tarballs = sorted(
                     (
                         p
-                        for p in output_file.parent.glob(f"{distro}-*.tar")
+                        for p in output_file.parent.glob(f"{escaped_distro}-*.tar")
                         if p.is_file() and p.resolve() != output_file.resolve()
                     ),
                     key=lambda p: (p.stat().st_mtime, p.name),
@@ -1316,7 +1366,9 @@ def apply_wsl_linux_baseline(
             if r_pkg.returncode != 0:
                 raise WslOperationError(f"Failed to install dev packages in '{distro}': {r_pkg.stderr}")
         if dotfiles_repo:
-            r4 = system.run_wsl_command(["-d", distro, "--", "chezmoi", "init", "--apply", dotfiles_repo])
+            if dotfiles_repo.startswith("-"):
+                raise WslOperationError(f"Invalid chezmoi dotfiles_repo starting with '-': {dotfiles_repo!r}")
+            r4 = system.run_wsl_command(["-d", distro, "--", "chezmoi", "init", "--apply", "--", dotfiles_repo])
             if r4.returncode != 0:
                 raise WslOperationError(f"Failed to apply chezmoi dotfiles in '{distro}': {r4.stderr}")
 

@@ -15,7 +15,7 @@ from ..const import (
     REG_SZ,
     UNSUPPORTED_IOT_LTSC_EDITION_IDS,
 )
-from ..models import RegistryValueData, TweakDefinition
+from ..models import RegistryValueData, RegistryView, TweakDefinition
 
 _VALID_HIVES = frozenset({HIVE_HKCU, HIVE_HKLM})
 _VALID_ACTIONS = frozenset({ACTION_SET, ACTION_DELETE, ACTION_DELETE_KEY})
@@ -69,7 +69,7 @@ def _validate_provenance(tweak: TweakDefinition, errors: list[str]) -> None:
 def _validate_operations(
     tweak: TweakDefinition,
     errors: list[str],
-    seen_reg: dict[tuple[str, str, str], tuple[str, str, RegistryValueData, str]],
+    seen_reg: dict[tuple[str, str, str, RegistryView], tuple[str, str, RegistryValueData, str]],
     seen_svc: dict[str, tuple[str, int]],
     seen_tasks: dict[str, tuple[str, bool]],
     seen_features: dict[str, tuple[str, bool]],
@@ -123,7 +123,7 @@ def _validate_operations(
         elif not spec.key_path.strip():
             errors.append(f"{tweak.tweak_id}: empty registry key_path")
         target_key = (spec.key_path_glob or spec.key_path).lower()
-        reg_key = (spec.hive, target_key, spec.value_name.lower())
+        reg_key = (spec.hive, target_key, spec.value_name.lower(), spec.view)
         sig = (tweak.tweak_id, spec.action, spec.value_data, spec.value_type)
         prev = seen_reg.get(reg_key)
         if prev is not None and prev[1:] != sig[1:]:
@@ -171,6 +171,15 @@ def _validate_operations(
             )
         seen_features[feat_key] = (tweak.tweak_id, feat.enabled)
 
+    for f_spec in tweak.file_specs:
+        if f_spec.file_format.lower() not in {"json", "jsonc", "ini", "toml"}:
+            errors.append(f"{tweak.tweak_id}: unsupported file_format {f_spec.file_format!r}")
+    for w_spec in tweak.wevtutil_specs:
+        if w_spec.max_size_bytes is not None and w_spec.max_size_bytes <= 0:
+            errors.append(f"{tweak.tweak_id}: invalid wevtutil max_size_bytes {w_spec.max_size_bytes!r}")
+    for ap_spec in tweak.auditpol_specs:
+        if not ap_spec.subcategory_guid.startswith("{") or not ap_spec.subcategory_guid.endswith("}"):
+            errors.append(f"{tweak.tweak_id}: malformed auditpol subcategory GUID {ap_spec.subcategory_guid!r}")
     for pkg in tweak.winget_specs:
         if not pkg.package_id.strip():
             errors.append(f"{tweak.tweak_id}: empty winget package_id")
@@ -180,7 +189,7 @@ def validate_catalog(catalog: dict[str, TweakDefinition]) -> list[str]:
     """Validate all catalog tweaks for schema, conflicts, and safety/provenance metadata."""
     errors: list[str] = []
     seen_ids: set[str] = set()
-    seen_reg: dict[tuple[str, str, str], tuple[str, str, RegistryValueData, str]] = {}
+    seen_reg: dict[tuple[str, str, str, RegistryView], tuple[str, str, RegistryValueData, str]] = {}
     seen_svc: dict[str, tuple[str, int]] = {}
     seen_tasks: dict[str, tuple[str, bool]] = {}
     seen_features: dict[str, tuple[str, bool]] = {}

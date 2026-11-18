@@ -916,7 +916,7 @@ def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest
                 CommandResult((), 0, "", ""),
                 CommandResult((), 0, "", ""),
                 CommandResult((), 1, "", ""),  # whoami.exe fallback in is_ssh_acl_restricted
-                CommandResult((), 0, "C:\\dir BUILTIN\\Users:(F)\nSuccessfully processed 1 files\n", ""),
+                CommandResult((), 0, "C:\\dir DESKTOP\\testuser:(OI)(CI)(F)\nSuccessfully processed 1 files\n", ""),
                 CommandResult((), 1, "", ""),  # whoami.exe fallback in restrict_acl_to_current_user
                 CommandResult((), 0, "", ""),  # icacls /reset
                 CommandResult((), 0, "", ""),  # icacls /inheritance:r

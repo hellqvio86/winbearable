@@ -70,7 +70,7 @@ from .profiles import (
 )
 from .state import StateStore, StateStoreError
 from .tui import launch_tui
-from .tweaks import TWEAK_CATALOG, get_all_tweaks, get_tweak
+from .tweaks import TWEAK_CATALOG, get_all_tweaks, get_tweak, resolve_tweak_id
 from .uac import UacCancelledError, UacElevationError, run_elevated_wb, set_console_title, write_uac_output_safe
 from .wsl import (
     WslOperationError,
@@ -185,13 +185,16 @@ def _format_summary_markdown(summary: ApplySummary) -> str:
 def _parse_id_list(raw: str | None) -> set[str] | None:
     if not raw:
         return None
-    ids = {item.strip() for item in raw.split(",") if item.strip()}
-    for tid in sorted(ids):
-        if tid not in TWEAK_CATALOG:
+    raw_ids = {item.strip() for item in raw.split(",") if item.strip()}
+    resolved_ids: set[str] = set()
+    for tid in sorted(raw_ids):
+        canonical = resolve_tweak_id(tid)
+        if canonical not in TWEAK_CATALOG:
             matches = difflib.get_close_matches(tid, sorted(TWEAK_CATALOG.keys()), n=3, cutoff=0.4)
             hint = f" Did you mean: {', '.join(matches)}?" if matches else ""
             raise KeyError(f"Unknown tweak ID '{tid}'.{hint}")
-    return ids
+        resolved_ids.add(canonical)
+    return resolved_ids
 
 
 def _add_selection_args(p: argparse.ArgumentParser) -> None:
@@ -363,6 +366,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Force full compensation (including re-uninstalling packages on FAILED runs and overriding conflicts)",
+    )
+    recover_parser.add_argument(
+        "--keep-conflicts",
+        action="store_true",
+        help="Mark runs with only restore_conflict items as partially_rolled_back to preserve user edits",
     )
     recover_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
@@ -543,8 +551,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _absolutize_elevated_argv(raw_argv: list[str]) -> list[str]:
+    """Resolve relative file path arguments before UAC elevation changes CWD to System32."""
+    path_flags = {"--profile", "--wslconfig", "--output"}
+    out: list[str] = []
+    idx = 0
+    while idx < len(raw_argv):
+        tok = raw_argv[idx]
+        if tok in path_flags and idx + 1 < len(raw_argv):
+            val = raw_argv[idx + 1]
+            cand = Path(val)
+            if not cand.is_absolute() and (tok != "--profile" or cand.exists()):
+                val = str(cand.resolve())
+            out.extend([tok, val])
+            idx += 2
+            continue
+        matched_eq = False
+        for flag in path_flags:
+            prefix = f"{flag}="
+            if tok.startswith(prefix):
+                val = tok[len(prefix) :]
+                cand = Path(val)
+                if not cand.is_absolute() and (flag != "--profile" or cand.exists()):
+                    val = str(cand.resolve())
+                out.append(f"{prefix}{val}")
+                matched_eq = True
+                break
+        if not matched_eq:
+            out.append(tok)
+        idx += 1
+    return out
+
+
 def _relay_elevated_uac(raw_argv: list[str]) -> int:
-    exit_code, output_text = run_elevated_wb(raw_argv)
+    exit_code, output_text = run_elevated_wb(_absolutize_elevated_argv(raw_argv))
     if output_text:
         sys.stdout.write(output_text)
         if not output_text.endswith("\n"):
@@ -957,6 +997,7 @@ def _run_cli_body(
                     system=sys_backend,
                     dry_run=not args.apply,
                     force=force_flag,
+                    keep_conflicts=bool(getattr(args, "keep_conflicts", False)),
                 )
             else:
                 reverted = rollback_runs(
@@ -967,6 +1008,7 @@ def _run_cli_body(
                     dry_run=not args.apply,
                     force=force_flag,
                 )
+            has_failed = is_recover and args.apply and any(rec.state == TransactionState.FAILED for rec in reverted)
             if args.json:
                 _print_json(
                     {
@@ -1003,7 +1045,7 @@ def _run_cli_body(
                                 f"  Registry restore: {snap.full_key_path} "
                                 f"[{snap.display_value_name}] -> {target_desc}\n"
                             )
-            return 0
+            return EXIT_ERROR if has_failed else 0
 
         if args.command == "init":
             from dataclasses import replace as _dc_replace
@@ -1085,7 +1127,10 @@ def _run_cli_body(
             if p_dir.is_dir():
                 profile_files = sorted([*p_dir.glob("*.toml"), *p_dir.glob("*.json")])
                 for p_file in profile_files:
-                    loaded = load_profile(str(p_file))
+                    try:
+                        loaded = load_profile(str(p_file))
+                    except ProfileValidationError:
+                        continue
                     if loaded.tweaks.get(tweak.tweak_id):
                         memberships.append(loaded.name)
             prov_dict: dict[str, Any] | None = None
@@ -1253,6 +1298,8 @@ def _run_cli_body(
                 else:
                     sys.stderr.write(f"Error: {err_payload['error']}\n")
                 return EXIT_BLOCKED
+            if bool(args.apply) and not getattr(sys_backend, "is_simulated", False):
+                _require_windows_for_mutation(env, "wsl firewall --apply")
             fw_res = set_wsl_hyperv_firewall_setting(
                 enabled=not bool(args.disable),
                 default_inbound=str(args.inbound),
@@ -1267,16 +1314,17 @@ def _run_cli_body(
                     previous_inbound=prev_fw.get("default_inbound_action"),
                     previous_outbound=prev_fw.get("default_outbound_action"),
                 )
-                StateStore().append_run(
-                    RunRecord(
-                        run_id=f"hvfw-{uuid.uuid4().hex[:12]}",
-                        timestamp=datetime.now(UTC).isoformat(),
-                        profile_name="wsl-firewall",
-                        applied_tweaks=(),
-                        hyperv_firewall_snapshots=(hv_snap,),
-                        state=TransactionState.COMMITTED,
+                with store.transaction_lock():
+                    store.append_run(
+                        RunRecord(
+                            run_id=f"hvfw-{uuid.uuid4().hex[:12]}",
+                            timestamp=datetime.now(UTC).isoformat(),
+                            profile_name="wsl-firewall",
+                            applied_tweaks=(),
+                            hyperv_firewall_snapshots=(hv_snap,),
+                            state=TransactionState.COMMITTED,
+                        )
                     )
-                )
             if args.json:
                 _print_json(fw_res)
             else:

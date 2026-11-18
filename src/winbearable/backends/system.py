@@ -44,6 +44,7 @@ from ..models import (
     OperationOutcome,
     OperationStatus,
     PostureObservation,
+    RegistryView,
 )
 from .registry import RegistryBackend, find_wsl_reg_exe, is_wsl2
 
@@ -247,10 +248,10 @@ def _observe_defender(
         sc_res = run_cmd([NativeSystemBackend._sys32_exe("sc.exe"), "query", "WinDefend"])
         if sc_res.returncode == 0:
             upper_out = sc_res.stdout.upper()
-            # Match Win32 SERVICE_RUNNING (4) / SERVICE_STOPPED (1) numeric state codes only (locale-safe).
-            if re.search(r":\s*4\b", upper_out):
+            # Match Win32 SERVICE_RUNNING (4) / SERVICE_STOPPED (1) on the localized STATE line (number + state word).
+            if re.search(r":\s*4\s+[^\W\d_]+", upper_out):
                 svc_running = True
-            elif re.search(r":\s*1\b", upper_out):
+            elif re.search(r":\s*1\s+[^\W\d_]+", upper_out):
                 svc_running = False
 
     if disabled_by_reg and svc_running is True:
@@ -579,7 +580,13 @@ class SystemBackend(Protocol):
     def set_optional_feature_enabled(self, feature_name: str, enabled: bool) -> bool:
         """Enable or disable a Windows optional feature natively via dism.exe."""
 
-    def export_registry_backup(self, hive: str, key_path: str, output_path: Path) -> bool:
+    def export_registry_backup(
+        self,
+        hive: str,
+        key_path: str,
+        output_path: Path,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
         """Export a registry subtree to a .reg file via reg.exe export before admin apply."""
 
     def is_process_running(self, process_name: str) -> bool:
@@ -845,7 +852,13 @@ class InMemorySystemBackend:
         self.optional_features[feature_name] = enabled
         return True
 
-    def export_registry_backup(self, hive: str, key_path: str, output_path: Path) -> bool:
+    def export_registry_backup(
+        self,
+        hive: str,
+        key_path: str,
+        output_path: Path,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
         self.exported_backups.append((hive, key_path, str(output_path)))
         return True
 
@@ -907,11 +920,26 @@ class InMemorySystemBackend:
             distro_name = args[distro_idx]
             existing = self.wsl_etc_conf.get(distro_name, "")
             return CommandResult(args=tuple(args), returncode=0, stdout=existing, stderr="")
-        if "-d" in args and "tee" in args and "/etc/wsl.conf" in args and input_text is not None:
+        if (
+            "-d" in args
+            and "tee" in args
+            and ("/etc/wsl.conf" in args or "/etc/wsl.conf.wb.tmp" in args)
+            and input_text is not None
+        ):
             distro_idx = args.index("-d") + 1
             distro_name = args[distro_idx]
-            self.wsl_etc_conf[distro_name] = input_text
+            if "/etc/wsl.conf.wb.tmp" in args:
+                self.wsl_etc_conf[f"{distro_name}:tmp"] = input_text
+            else:
+                self.wsl_etc_conf[distro_name] = input_text
             return CommandResult(args=tuple(args), returncode=0, stdout=input_text, stderr="")
+        if "-d" in args and "mv" in args and "/etc/wsl.conf.wb.tmp" in args and "/etc/wsl.conf" in args:
+            distro_idx = args.index("-d") + 1
+            distro_name = args[distro_idx]
+            tmp_data = self.wsl_etc_conf.pop(f"{distro_name}:tmp", None)
+            if tmp_data is not None:
+                self.wsl_etc_conf[distro_name] = tmp_data
+            return CommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
         return CommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
 
     def get_total_memory_bytes(self) -> int:
@@ -1094,7 +1122,11 @@ class NativeSystemBackend:
             return override.lower() in ("1", "true", "yes", "on")
         if self._platform == "win32" and self._windll is not None:
             try:
-                return bool(self._windll.shell32.IsUserAnAdmin())
+                fn = self._windll.shell32.IsUserAnAdmin
+                with contextlib.suppress(AttributeError, TypeError):
+                    fn.argtypes = []
+                    fn.restype = ctypes.c_int
+                return bool(fn())
             except Exception:
                 return False
         return False
@@ -1144,7 +1176,12 @@ class NativeSystemBackend:
         if isinstance(raw, str):
             return raw
         exe_name = os.path.basename(args[0]).lower() if args else ""
-        if exe_name == "wsl.exe" and (b"\x00" in raw or raw.startswith((b"\xff\xfe", b"\xfe\xff"))):
+        is_utf16le_bom = raw.startswith(b"\xff\xfe")
+        # wsl.exe host messages emit UTF-16LE (ASCII chars interleaved with NUL at odd indices) unless WSL_UTF8=1.
+        looks_utf16le_ascii = (
+            exe_name == "wsl.exe" and len(raw) >= 4 and len(raw) % 2 == 0 and raw[1::2].count(0) > len(raw) // 4
+        )
+        if is_utf16le_bom or looks_utf16le_ascii:
             return raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
         try:
             return raw.decode("utf-8")
@@ -1155,15 +1192,16 @@ class NativeSystemBackend:
                 return raw.decode("cp850", errors="replace")
 
     @staticmethod
-    def _communicate_bounded(
+    def _communicate_bounded_with_truncation(
         proc: subprocess.Popen[bytes],
         input_bytes: bytes | None,
         timeout: float,
         max_bytes: int = MAX_CMD_OUTPUT_CHARS + 4096,
-    ) -> tuple[bytes, bytes]:
-        """Drain stdout/stderr in bounded memory while enforcing timeout."""
+    ) -> tuple[bytes, bytes, int, int]:
+        """Drain stdout/stderr in bounded memory while enforcing timeout, returning (out, err, drop_out, drop_err)."""
         if not isinstance(subprocess.Popen, type) or not isinstance(proc, subprocess.Popen):
-            return proc.communicate(input=input_bytes, timeout=timeout)
+            out, err = proc.communicate(input=input_bytes, timeout=timeout)
+            return out or b"", err or b"", 0, 0
         stdout_pipe = proc.stdout
         stderr_pipe = proc.stderr
         stdin_pipe = proc.stdin
@@ -1219,11 +1257,7 @@ class NativeSystemBackend:
             t_in.join(timeout=1.0)
         t_out.join(timeout=2.0)
         t_err.join(timeout=2.0)
-        if dropped["out"] > 0:
-            out_buf.extend(f"\n[... truncated {dropped['out']} stdout bytes ...]".encode("ascii"))
-        if dropped["err"] > 0:
-            err_buf.extend(f"\n[... truncated {dropped['err']} stderr bytes ...]".encode("ascii"))
-        return bytes(out_buf), bytes(err_buf)
+        return bytes(out_buf), bytes(err_buf), dropped["out"], dropped["err"]
 
     def _run_native_cmd(
         self,
@@ -1237,6 +1271,8 @@ class NativeSystemBackend:
         try:
             child_env = dict(os.environ)
             child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
+            if args and os.path.basename(args[0]).lower() == "wsl.exe":
+                child_env["WSL_UTF8"] = "1"
             proc = subprocess.Popen(
                 args,
                 stdin=subprocess.PIPE if input_text is not None else None,
@@ -1247,9 +1283,15 @@ class NativeSystemBackend:
                 env=child_env,
             )
             input_bytes = input_text.encode("utf-8") if input_text is not None else None
-            stdout_raw, stderr_raw = self._communicate_bounded(proc, input_bytes, effective_timeout)
+            stdout_raw, stderr_raw, drop_out, drop_err = self._communicate_bounded_with_truncation(
+                proc, input_bytes, effective_timeout
+            )
             stdout_dec = self._decode_cmd_bytes(stdout_raw, args)
             stderr_dec = self._decode_cmd_bytes(stderr_raw, args)
+            if drop_out > 0:
+                stdout_dec += f"\n[... truncated {drop_out} stdout bytes ...]"
+            if drop_err > 0:
+                stderr_dec += f"\n[... truncated {drop_err} stderr bytes ...]"
             cleaned_stdout = self._truncate_text(stdout_dec.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
             cleaned_stderr = self._truncate_text(stderr_dec.replace("\x00", ""), MAX_CMD_OUTPUT_CHARS)
             if proc.returncode == 0:
@@ -1282,7 +1324,10 @@ class NativeSystemBackend:
                 self._terminate_process_tree(proc.pid)
                 try:
                     proc.kill()
-                    proc.communicate(timeout=2.0)
+                    if isinstance(subprocess.Popen, type) and isinstance(proc, subprocess.Popen):
+                        proc.wait(timeout=2.0)
+                    else:
+                        proc.communicate(timeout=2.0)
                 except OSError, subprocess.SubprocessError:
                     pass
             raw_out = self._decode_cmd_bytes(exc.stdout, args)
@@ -1488,13 +1533,22 @@ class NativeSystemBackend:
         )
         return res.returncode == 0
 
-    def export_registry_backup(self, hive: str, key_path: str, output_path: Path) -> bool:
+    def export_registry_backup(
+        self,
+        hive: str,
+        key_path: str,
+        output_path: Path,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool:
         if self._platform != "win32":
             return False
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        res = self._run_native_cmd(
-            [self._sys32_exe("reg.exe"), "export", f"{hive}\\{key_path}", str(output_path), "/y"]
-        )
+        cmd = [self._sys32_exe("reg.exe"), "export", f"{hive}\\{key_path}", str(output_path), "/y"]
+        if view == RegistryView.VIEW_64:
+            cmd.append("/reg:64")
+        elif view == RegistryView.VIEW_32:
+            cmd.append("/reg:32")
+        res = self._run_native_cmd(cmd)
         return res.returncode == 0
 
     def _is_process_running_win32(self, process_name: str) -> bool | None:
@@ -1505,7 +1559,15 @@ class NativeSystemBackend:
         if kernel32 is None or not hasattr(kernel32, "CreateToolhelp32Snapshot"):
             return None
         try:
-            kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+            with contextlib.suppress(AttributeError, TypeError):
+                kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
+                kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+                kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
+                kernel32.Process32FirstW.restype = ctypes.c_int
+                kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
+                kernel32.Process32NextW.restype = ctypes.c_int
+                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+                kernel32.CloseHandle.restype = ctypes.c_int
             snap = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
             invalid_handle = ctypes.c_void_p(-1).value
             if snap in (None, 0, invalid_handle, -1):
@@ -1708,8 +1770,12 @@ class NativeSystemBackend:
     def get_total_memory_bytes(self) -> int:
         if self._platform == "win32" and self._windll is not None:
             try:
+                mem_fn = self._windll.kernel32.GetPhysicallyInstalledSystemMemory
+                with contextlib.suppress(AttributeError, TypeError):
+                    mem_fn.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+                    mem_fn.restype = ctypes.c_int
                 mem_kb = ctypes.c_ulonglong(0)
-                if self._windll.kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(mem_kb)):
+                if mem_fn(ctypes.byref(mem_kb)):
                     return max(4 * GIB_BYTES, int(mem_kb.value) * 1024)
             except Exception:
                 pass
@@ -1729,8 +1795,11 @@ class NativeSystemBackend:
         if sys.platform == "win32":
             windll: Any = getattr(ctypes, "windll", None)
             if windll is not None:
+                get_sys_dir = windll.kernel32.GetSystemDirectoryW
+                get_sys_dir.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+                get_sys_dir.restype = ctypes.c_uint
                 buf = ctypes.create_unicode_buffer(260)
-                if windll.kernel32.GetSystemDirectoryW(buf, 260) > 0:
+                if get_sys_dir(buf, 260) > 0:
                     return f"{buf.value.rstrip('/\\')}\\{exe_name}"
         sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
         if sys_root.endswith("\\") or sys_root.endswith("/"):
@@ -1898,17 +1967,16 @@ class NativeSystemBackend:
     def is_firewall_group_enabled(self, registry: RegistryBackend, group_resource_id: str) -> bool | None:
         fw_rules_key = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
         target_embed = f"embedctxt={group_resource_id.lower()}"
-        if hasattr(registry, "_values") and isinstance(registry._values, dict):
-            matched = False
-            for (vhive, vpath, _), (vdata, _) in registry._values.items():
-                if vhive == HIVE_HKLM and vpath.lower() == fw_rules_key.lower() and isinstance(vdata, str):
-                    low_val = vdata.lower()
-                    if target_embed in low_val:
-                        matched = True
-                        if "active=true" in low_val:
-                            return True
-            if matched:
-                return False
+        matched = False
+        for _, vdata, _ in registry.list_values(HIVE_HKLM, fw_rules_key):
+            if isinstance(vdata, str):
+                low_val = vdata.lower()
+                if target_embed in low_val:
+                    matched = True
+                    if "active=true" in low_val:
+                        return True
+        if matched:
+            return False
         return False
 
     def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
@@ -1950,12 +2018,48 @@ class NativeSystemBackend:
         res = self._run_native_cmd([self._sys32_exe("fsutil.exe"), "file", "queryCaseSensitiveInfo", directory])
         if res.returncode != 0:
             return None
-        # fsutil outputs numeric/standard status; check last token or 1/enabled
         low = res.stdout.strip().lower()
         if "enabled" in low or low.endswith("1."):
             return True
         if "disabled" in low or low.endswith("0."):
             return False
+        # Non-English Windows fsutil output: query Win32 FileCaseSensitiveInfo (23) directly (locale-independent).
+        if self._windll is not None:
+            try:
+                k32 = self._windll.kernel32
+                with contextlib.suppress(AttributeError, TypeError):
+                    k32.CreateFileW.argtypes = [
+                        ctypes.c_wchar_p,
+                        ctypes.c_ulong,
+                        ctypes.c_ulong,
+                        ctypes.c_void_p,
+                        ctypes.c_ulong,
+                        ctypes.c_ulong,
+                        ctypes.c_void_p,
+                    ]
+                    k32.CreateFileW.restype = ctypes.c_void_p
+                    k32.GetFileInformationByHandleEx.argtypes = [
+                        ctypes.c_void_p,
+                        ctypes.c_int,
+                        ctypes.c_void_p,
+                        ctypes.c_ulong,
+                    ]
+                    k32.GetFileInformationByHandleEx.restype = ctypes.c_int
+                    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+                    k32.CloseHandle.restype = ctypes.c_int
+                handle = k32.CreateFileW(directory, 0x80, 7, None, 3, 0x02000000, None)
+                invalid = ctypes.c_void_p(-1).value
+                if handle not in (None, 0, invalid, -1):
+                    try:
+                        flags = ctypes.c_ulong(0)
+                        if k32.GetFileInformationByHandleEx(
+                            ctypes.c_void_p(handle), 23, ctypes.byref(flags), ctypes.sizeof(flags)
+                        ):
+                            return bool(flags.value & 1)
+                    finally:
+                        k32.CloseHandle(ctypes.c_void_p(handle))
+            except Exception:
+                pass
         return None
 
     def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
@@ -2067,7 +2171,10 @@ class NativeSystemBackend:
         if res.returncode != 0:
             return False
         ace_lines = [ln.strip() for ln in res.stdout.splitlines() if ":" in ln and "(" in ln]
-        return len(ace_lines) == 1
+        if len(ace_lines) != 1:
+            return False
+        low_ace = ace_lines[0].lower()
+        return not any(broad in low_ace for broad in ("everyone:", "authenticated users:", "builtin\\users:"))
 
     def backup_acl(self, path_str: str, backup_file: Path) -> bool:
         if self._platform != "win32":
@@ -2088,11 +2195,7 @@ class NativeSystemBackend:
         if not target.exists():
             return False
         res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target.parent), "/restore", str(backup_file)])
-        if res.returncode == 0:
-            return True
-        # Unprivileged callers lack SeRestorePrivilege for icacls /restore (rc=1300); reset to inherited DACL.
-        reset_res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/reset"])
-        return reset_res.returncode == 0
+        return res.returncode == 0
 
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
         if self._platform != "win32":

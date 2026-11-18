@@ -43,7 +43,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.defender_cloud_and_pua` | `hardening` | Yes | `medium` | `18.10.43` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enable Microsoft Defender PUA Block & Cloud Protection |
 | `hardening.defender_controlled_folder_access_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Controlled Folder Access (Audit Mode) |
 | `hardening.defender_network_protection_audit` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Defender Network Protection (Audit Mode) |
-| `hardening.disable_autorun` | `hardening` | Yes | `low` | `18.9.8.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable AutoRun and AutoPlay on All Drives |
+| `hardening.disable_autorun` | `hardening` | Yes | `low` | `18.9.8.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable AutoRun on All Drives |
 | `hardening.disable_llmnr` | `hardening` | Yes | `medium` | `18.5.4.2` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Link-Local Multicast Name Resolution (LLMNR) |
 | `hardening.disable_mdns` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Multicast DNS (mDNS) |
 | `hardening.disable_netbios_broadcast` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable NetBIOS Broadcast Name Resolution (NodeType=2 / P-node) |

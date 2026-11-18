@@ -150,7 +150,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             ),
             RegistrySpec(
                 hive=HIVE_HKCU,
-                key_path=rf"Software\Classes\Wow6432Node\CLSID\{ONEDRIVE_CLSID}",
+                key_path=rf"Software\Classes\CLSID\{ONEDRIVE_CLSID}",
                 value_name="System.IsPinnedToNameSpaceTree",
                 value_data=0,
                 value_type=REG_DWORD,
@@ -474,6 +474,7 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
+        requires_explorer_restart=True,
         registry_specs=(
             RegistrySpec(
                 hive=HIVE_HKCU,
@@ -838,8 +839,8 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
     "hardening.disable_autorun": TweakDefinition(
         tweak_id="hardening.disable_autorun",
         category="hardening",
-        title="Disable AutoRun and AutoPlay on All Drives",
-        description="Sets NoDriveTypeAutoRun=255 and DisableAutoplay=1 across all removable and fixed drives.",
+        title="Disable AutoRun on All Drives",
+        description="Sets NoDriveTypeAutoRun=255 under Explorer Policies to disable AutoRun across all drives.",
         source_url="https://learn.microsoft.com/en-us/windows/win32/shell/autoplay-reg",
         risk=RiskLevel.LOW,
         requires_admin=True,
@@ -1091,6 +1092,14 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             ),
             RegistrySpec(
                 hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Policies\Microsoft\WindowsFirewall\DomainProfile",
+                value_name="DefaultInboundAction",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
                 key_path=r"SOFTWARE\Policies\Microsoft\WindowsFirewall\StandardProfile",
                 value_name="EnableFirewall",
                 value_data=1,
@@ -1099,8 +1108,24 @@ TWEAK_CATALOG: dict[str, TweakDefinition] = {
             ),
             RegistrySpec(
                 hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Policies\Microsoft\WindowsFirewall\StandardProfile",
+                value_name="DefaultInboundAction",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
                 key_path=r"SOFTWARE\Policies\Microsoft\WindowsFirewall\PublicProfile",
                 value_name="EnableFirewall",
+                value_data=1,
+                value_type=REG_DWORD,
+                action=ACTION_SET,
+            ),
+            RegistrySpec(
+                hive=HIVE_HKLM,
+                key_path=r"SOFTWARE\Policies\Microsoft\WindowsFirewall\PublicProfile",
+                value_name="DefaultInboundAction",
                 value_data=1,
                 value_type=REG_DWORD,
                 action=ACTION_SET,

@@ -2,6 +2,25 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.14.0] - 2026-11-18
+
+### Fixed
+
+- **Engine, Operations & Rollback Safety (`P3-01`..`P3-04`, `P3-09`, `P3-10`, `P3-13`..`P3-16`, `P3-23`, `P3-26`):**
+  - Deep-merged nested JSON dicts in `merge_file_content` so `dev.terminal_settings_defaults` preserves `profiles.list` and sibling defaults; fixed multi-line TOML key replacement and `MAX_FILE_SNAPSHOT_BYTES` enforcement in `FileConfigOperationAdapter`.
+  - Switched `apply_file_spec` and `restore_file_snapshot` to `_atomic_write_bytes` (`ReplaceFileW`) so Windows ACLs are preserved and no untracked `.bak` files are left behind.
+  - Skipped `reg.exe export` for non-existent keys in `_execute_tweak_mutations`; handled absent services in multi-service tweaks (`services.disable_xbox`, `services.disable_maps_retail`) without poisoning rollback; checked `backup_acl`/`backup_auditpol`/`export_firewall_policy` return values and reported missing ACL backups on rollback.
+  - Added `TransactionState.PARTIALLY_ROLLED_BACK` and `wb recover --keep-conflicts` to unblock runs with only `restore_conflict` items; avoided recording `.wslconfig` rollback targets when unchanged; fixed `ApplySummary.results` status updates and `WingetOperationAdapter`/`ServiceOperationAdapter` drift/error detection.
+- **Backends, Win32 `ctypes`, UAC, Audit & WSL (`P3-02`, `P3-05`, `P3-06`, `P3-11`, `P3-12`, `P3-15`, `P3-20`, `P3-22`, `P3-27`):**
+  - Added `RegistryBackend.list_values` across all backends and removed the `_values` fake-only shortcut in `NativeSystemBackend.is_firewall_group_enabled`; implemented `key_existed=False` empty subkey cleanup in `restore_snapshot` and `PermissionError` propagation in `_enum_key_values`/`delete_key`.
+  - Configured explicit Win32 `argtypes`/`restype` in `audit.py` and `system.py`; resolved localized Guest RID `-501`, retried `ERROR_INSUFFICIENT_BUFFER`, enumerated `Run`/`Exclusions` values, and expanded `%ProgramFiles%` in `_check_unquoted_service_paths`.
+  - Streamed SHA-256 hashing in `export_wsl_distro` via `hashlib.file_digest` and escaped `distro` globs; added atomic `/etc/wsl.conf` temp-file swap (`mv -f`), `installed_wsl_version` gating, `WSL_UTF8=1`, and `chezmoi` flag-injection guard.
+  - Rejected relative CWD `wb.exe` in `resolve_elevation_target`, absolutized relative CLI file paths before UAC elevation, checked full ancestor reparse points, and bounded `WaitForSingleObject` timeout below `INFINITE`.
+- **Profiles, CLI, TUI, Catalog & CI (`P3-07`, `P3-08`, `P3-17`..`P3-19`, `P3-21`, `P3-24`, `P3-25`, `P3-28`, `P3-29`):**
+  - Fixed `load_profile` diamond DAG false cycles, `_chain` depth counting, `include` merging of `params`/`packages`/`wsl_distros`, `_dict_to_toml` nested tables, and `[packages.*]` list validation; `StateStore` now writes `.json.bak` atomically and preserves it across transient `PLANNED`/`APPLYING` updates.
+  - Fixed `wb wsl firewall --apply` to use injected `store` under `transaction_lock`, `wb recover --apply` to exit `1` on `FAILED`, `--only`/`--skip` alias resolution, and TUI `allow_irreversible` + `allow_managed` alignment.
+  - Aligned `catalog.py`/`provenance.py` (`onedrive.unpin_explorer`, `explorer.classic_context_menu`, `hardening.disable_autorun`, `hardening.enable_firewall_all_profiles`, `hardening.enable_lsa_protection`, `hardening.defender_cloud_and_pua`); made `bin/build_winget.py` zip timestamps deterministic, updated `bin/bump_version.py`, and removed `windows-latest` from the PR test matrix in `.github/workflows/ci.yml`.
+
 ## [0.13.0] - 2026-11-18
 
 ### Added

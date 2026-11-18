@@ -100,6 +100,18 @@ def migrate_state_payload(payload: Any, *, source_label: str = "state.json") -> 
         migrated["version"] = 2
         ver = 2
 
+    # Always canonicalize tweak IDs in runs regardless of schema version
+    for item in migrated.get("runs", []):
+        if isinstance(item, dict):
+            if isinstance(item.get("applied_tweaks"), list):
+                item["applied_tweaks"] = [resolve_tweak_id(str(t)) for t in item["applied_tweaks"]]
+            if isinstance(item.get("planned_tweaks"), list):
+                item["planned_tweaks"] = [resolve_tweak_id(str(t)) for t in item["planned_tweaks"]]
+            if isinstance(item.get("failure_outcomes"), list):
+                for fo in item["failure_outcomes"]:
+                    if isinstance(fo, dict) and "tweak_id" in fo:
+                        fo["tweak_id"] = resolve_tweak_id(str(fo["tweak_id"]))
+
     if not isinstance(migrated.get("runs"), list):
         raise StateStoreError(f"Invalid state file at {source_label}: 'runs' must be a list.")
 
@@ -300,11 +312,39 @@ class StateStore:
                 os.unlink(temp_path_str)
             raise
 
-    def _save_runs_unlocked(self, runs: list[RunRecord]) -> None:
+    def _write_backup_atomic_unlocked(self) -> None:
+        """Atomically copy state.json to state.json.bak if state.json is valid JSON."""
+        if not self.state_path.is_file():
+            return
+        try:
+            raw_bytes = self.state_path.read_bytes()
+            json.loads(raw_bytes.decode("utf-8"))
+        except OSError, UnicodeDecodeError, json.JSONDecodeError:
+            return
+        bak_path = self.state_path.with_suffix(".json.bak")
+        fd, temp_path_str = tempfile.mkstemp(
+            prefix="state-bak-",
+            suffix=".tmp",
+            dir=str(self.state_path.parent),
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.name == "posix":
+                os.chmod(temp_path_str, 0o600)
+            os.replace(temp_path_str, bak_path)
+        except Exception:
+            if os.path.exists(temp_path_str):
+                os.unlink(temp_path_str)
+            raise
+
+    def _save_runs_unlocked(self, runs: list[RunRecord], *, update_backup: bool = True) -> None:
         all_known_ids = {run.run_id for run in runs}
         runs = self._prune_old_runs(runs)
-        if self.state_path.is_file():
-            shutil.copy2(self.state_path, self.state_path.with_suffix(".json.bak"))
+        if update_backup:
+            self._write_backup_atomic_unlocked()
         self._write_runs_atomic_unlocked(runs)
         self.last_cleanup_warnings = self._prune_old_backups_unlocked(
             runs,
@@ -391,15 +431,20 @@ class StateStore:
 
     def upsert_run(self, record: RunRecord) -> None:
         """Insert or update a RunRecord by run_id in the write-ahead journal."""
+        is_transient = record.state in {
+            TransactionState.PLANNED,
+            TransactionState.APPLYING,
+            TransactionState.ROLLING_BACK,
+        }
         with self._locked():
             runs = self._load_runs_unlocked()
             for idx, existing in enumerate(runs):
                 if existing.run_id == record.run_id:
                     runs[idx] = record
-                    self._save_runs_unlocked(runs)
+                    self._save_runs_unlocked(runs, update_backup=not is_transient)
                     return
             runs.append(record)
-            self._save_runs_unlocked(runs)
+            self._save_runs_unlocked(runs, update_backup=not is_transient)
 
     def get_incomplete_runs(self) -> list[RunRecord]:
         """Return any transactions that did not reach COMMITTED or ROLLED_BACK."""
