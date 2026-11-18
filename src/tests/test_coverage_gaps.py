@@ -1936,3 +1936,157 @@ def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profil
         p_file.write_text(f'name = "c{idx}"\ndescription = "c"\n{ext_line}[tweaks]\n', encoding="utf-8")
     with pytest.raises(ProfileValidationError, match="depth exceeded"):
         load_profile(str(tmp_path / f"chain_{MAX_PROFILE_INHERITANCE_DEPTH + 1}.toml"))
+
+
+def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_path: Path) -> None:
+    """P0-WSL-EXPORT-PRUNE, P0-RECOVER-FAILED, P0-SERVICE-START-MAP, P1-CHECKPOINT, and P1-MULTI-DISTRO-WSL."""
+    from unittest.mock import patch
+
+    from winbearable.backends.registry import InMemoryRegistryBackend
+    from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+    from winbearable.const import HIVE_HKCU, HIVE_HKLM, REG_DWORD
+    from winbearable.engine import apply_profile, recover_incomplete_runs
+    from winbearable.models import (
+        OperationStatus,
+        ProfileSpec,
+        RegistryValueSnapshot,
+        RunRecord,
+        TransactionState,
+        WslConfigSpec,
+    )
+    from winbearable.state import StateStore
+    from winbearable.wsl import export_wsl_distro
+
+    # P0-WSL-EXPORT-PRUNE + P1-EXPORT-SIDE-CAR-PAIRING: keep_last=1 keeps new .tar + .sha256 and deletes older pairs
+    exp_dir = tmp_path / "exports"
+    exp_dir.mkdir()
+    for name in ("Ubuntu-a.tar", "Ubuntu-b.tar"):
+        old_tar = exp_dir / name
+        old_tar.write_bytes(b"old")
+        (exp_dir / f"{name}.sha256").write_text("deadbeef\n", encoding="utf-8")
+
+    new_tar = exp_dir / "Ubuntu-c.tar"
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+
+    def _fake_export(args: list[str], input_text: str | None = None) -> CommandResult:
+        if args[:1] == ["--export"]:
+            Path(args[2]).write_bytes(b"new-tar-payload")
+        return CommandResult(tuple(args), 0, "", "")
+
+    with patch.object(sysb, "run_wsl_command", side_effect=_fake_export):
+        exp_res = export_wsl_distro(sysb, "Ubuntu", new_tar, dry_run=False, keep_last=1)
+    assert exp_res["returncode"] == 0
+    assert new_tar.is_file() and (exp_dir / "Ubuntu-c.tar.sha256").is_file()
+    assert not (exp_dir / "Ubuntu-a.tar").exists() and not (exp_dir / "Ubuntu-a.tar.sha256").exists()
+    assert not (exp_dir / "Ubuntu-b.tar").exists() and not (exp_dir / "Ubuntu-b.tar.sha256").exists()
+
+    # P0-RECOVER-FAILED: recover on FAILED skips winget uninstall unless force=True
+    reg = InMemoryRegistryBackend()
+    store_fail = StateStore(tmp_path / "state_fail.json")
+    store_fail.append_run(
+        RunRecord(
+            run_id="r-failed",
+            timestamp="2026-01-01T00:00:00Z",
+            profile_name="fail",
+            applied_tweaks=(),
+            installed_winget_packages=("Microsoft.VisualStudioCode",),
+            state=TransactionState.FAILED,
+            error="prior failure",
+        )
+    )
+    with patch.object(sysb, "uninstall_winget_package", side_effect=AssertionError("must not uninstall without force")):
+        rec_no_force = recover_incomplete_runs(store_fail, reg, sysb, dry_run=False, allow_simulated=True, force=False)
+    assert len(rec_no_force) == 1 and rec_no_force[0].state == TransactionState.ROLLED_BACK
+
+    # P1-CHECKPOINT-DOCS: APPLYING + registry_snapshots + empty completed_operations -> recover restores values
+    reg.set_value(HIVE_HKCU, r"Software\WinbearableTest", "Flag", 9, REG_DWORD)
+    store_apply = StateStore(tmp_path / "state_applying.json")
+    store_apply.append_run(
+        RunRecord(
+            run_id="r-applying",
+            timestamp="2026-01-01T00:00:00Z",
+            profile_name="crash",
+            applied_tweaks=(),
+            registry_snapshots=(
+                RegistryValueSnapshot(
+                    hive=HIVE_HKCU,
+                    key_path=r"Software\WinbearableTest",
+                    value_name="Flag",
+                    key_existed=True,
+                    value_existed=True,
+                    previous_data=1,
+                    previous_type=REG_DWORD,
+                ),
+            ),
+            completed_operations=(),
+            state=TransactionState.APPLYING,
+        )
+    )
+    recover_incomplete_runs(store_apply, reg, sysb, dry_run=False, allow_simulated=True)
+    assert reg.get_value(HIVE_HKCU, r"Software\WinbearableTest", "Flag") == (1, REG_DWORD)
+
+    # P0-SERVICE-START-MAP: types 0..4 map accurately; unknown fails closed; registry error reverts sc.exe
+    svc_reg = InMemoryRegistryBackend(
+        initial_values={(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\TestSvc", "Start"): (2, REG_DWORD)}
+    )
+    native_win = NativeSystemBackend(platform_override="win32")
+    assert native_win.set_service_start_type(svc_reg, "TestSvc", 99) is False
+    assert native_win.last_outcome is not None and native_win.last_outcome.status == OperationStatus.UNKNOWN
+
+    recorded_modes: list[list[str]] = []
+
+    def _rec_sc(args: list[str], **_kw: object) -> CommandResult:
+        recorded_modes.append(args)
+        return CommandResult(tuple(args), 0, "", "")
+
+    with patch.object(native_win, "_run_native_cmd", side_effect=_rec_sc):
+        for code, expected_mode in ((0, "boot"), (1, "system"), (2, "auto"), (3, "demand"), (4, "disabled")):
+            assert native_win.set_service_start_type(svc_reg, "TestSvc", code) is True
+            assert f"start={expected_mode}" in recorded_modes[-1]
+
+        with patch.object(svc_reg, "set_value", side_effect=PermissionError("denied")):
+            assert native_win.set_service_start_type(svc_reg, "TestSvc", 3) is False
+        assert "start=disabled" in recorded_modes[-1]
+
+    # P1-MULTI-DISTRO-WSL: failure on distro 2 restores distro 1 /etc/wsl.conf
+    distro_confs = {"Ubuntu": "[boot]\nsystemd=false\n", "Debian": "[boot]\nsystemd=false\n"}
+    wsl_sys = InMemorySystemBackend(
+        is_windows=True, is_admin=True, windows_build=26300, wsl_distros=("Ubuntu", "Debian")
+    )
+
+    def _multi_wsl(args: list[str], input_text: str | None = None) -> CommandResult:
+        distro = args[1] if len(args) > 1 and args[0] == "-d" else ""
+        if "cat" in args:
+            return CommandResult(tuple(args), 0, distro_confs[distro], "")
+        if "tee" in args and input_text is not None:
+            if distro == "Debian" and "[automount]" in input_text:
+                return CommandResult(tuple(args), 1, "", "simulated tee failure")
+            distro_confs[distro] = input_text
+            return CommandResult(tuple(args), 0, "", "")
+        if "sha256sum" in args:
+            import hashlib
+
+            digest = hashlib.sha256(distro_confs[distro].encode("utf-8")).hexdigest()
+            return CommandResult(tuple(args), 0, f"{digest}  /etc/wsl.conf\n", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    wsl_sys.run_wsl_command = _multi_wsl  # type: ignore[method-assign]
+    multi_prof = ProfileSpec(
+        name="multi-wsl",
+        description="multi-wsl",
+        tweaks={},
+        wsl=WslConfigSpec(enabled=True, mode="strict", memory_gb=4),
+    )
+    multi_env = wsl_sys.detect_environment(reg)
+    summary_multi = apply_profile(
+        multi_prof,
+        multi_env,
+        reg,
+        wsl_sys,
+        StateStore(tmp_path / "state_multi.json"),
+        dry_run=False,
+        wslconfig_path=tmp_path / "multi.wslconfig",
+        allow_simulated=True,
+    )
+    assert summary_multi.failed_ids == ("wsl",)
+    assert distro_confs["Ubuntu"] == "[boot]\nsystemd=false\n"

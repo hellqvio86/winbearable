@@ -337,6 +337,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
     )
+    rollback_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force snapshot restore even if post-apply external modifications are detected",
+    )
     rollback_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb recover
@@ -349,6 +354,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--elevate",
         action="store_true",
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
+    )
+    recover_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force full compensation (including re-uninstalling packages on FAILED runs and overriding conflicts)",
     )
     recover_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
@@ -902,12 +912,14 @@ def _run_cli_body(
                 _require_windows_for_mutation(env, f"wb {args.command} --apply")
                 if args.elevate and not env.is_admin and not args.uac_output:
                     return _relay_elevated_uac(raw_argv)
+            force_flag = bool(getattr(args, "force", False))
             if is_recover:
                 reverted = recover_incomplete_runs(
                     state_store=store,
                     registry=reg_backend,
                     system=sys_backend,
                     dry_run=not args.apply,
+                    force=force_flag,
                 )
             else:
                 reverted = rollback_runs(
@@ -916,6 +928,7 @@ def _run_cli_body(
                     system=sys_backend,
                     to_run_id=args.to_run_id,
                     dry_run=not args.apply,
+                    force=force_flag,
                 )
             if args.json:
                 _print_json(
