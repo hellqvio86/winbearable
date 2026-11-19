@@ -133,6 +133,12 @@ def test_profiles_membership_and_corp_safe_constraints() -> None:
     covered: set[str] = set()
     for p_file in sorted(profiles_dir.glob("*.toml")):
         loaded = load_profile(str(p_file))
+        assert loaded.tweaks.get("explorer.show_file_extensions") is True, (
+            f"{p_file.name} must enable explorer.show_file_extensions"
+        )
+        assert loaded.tweaks.get("explorer.show_hidden_files") is True, (
+            f"{p_file.name} must enable explorer.show_hidden_files"
+        )
         for tid, enabled in loaded.tweaks.items():
             assert tid in TWEAK_CATALOG
             if enabled:
