@@ -209,6 +209,7 @@ def test_architectural_layer_boundaries() -> None:
 
     layer_map: dict[str, int] = {
         "const": 0,
+        "log": 1,
         "models": 1,
         "backends": 2,
         "hyperv_firewall": 2,

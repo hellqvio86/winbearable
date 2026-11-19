@@ -9,6 +9,7 @@ from typing import Any
 
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
+from ..log import get_logger
 from ..models import (
     EnvironmentInfo,
     OperationJournalEntry,
@@ -39,6 +40,7 @@ from .params import (
 from .phases import FinalizeJournalPhase, MutateTweaksPhase, MutateWslPhase, PlanPhase
 
 _APPLY_KIND_ORDER = APPLY_KIND_ORDER
+_logger = get_logger(__name__)
 
 
 def execute_tweak_mutations(
@@ -89,6 +91,13 @@ def execute_tweak_mutations(
                 OperationOutcome(status=exc.status, message=str(exc), returncode=rc, command=cmd)
             ) from exc
         except Exception as exc:
+            _logger.error(
+                "Tweak mutation failed for %s: %s",
+                tweak.tweak_id,
+                exc,
+                exc_info=True,
+                extra={"event": "tweak.mutation_error", "tweak_id": tweak.tweak_id, "error": str(exc)},
+            )
             raise TweakMutationError(capture_failure_outcome(system, str(exc))) from exc
 
     ext_skipped_elevated = any(e.operation_type == "vscode_extension" and e.outcome == "skipped" for e in entries)
@@ -101,6 +110,15 @@ def execute_tweak_mutations(
                 msg = (
                     f"Post-apply verification failed for '{tweak.tweak_id}' ({adapter.kind}): "
                     f"{post_check.status} ({post_check.detail})"
+                )
+                _logger.error(
+                    msg,
+                    extra={
+                        "event": "tweak.post_apply_verification_failed",
+                        "tweak_id": tweak.tweak_id,
+                        "adapter_kind": adapter.kind,
+                        "status": str(post_check.status),
+                    },
                 )
                 raise TweakMutationError(OperationOutcome(status=OperationStatus.UNKNOWN, message=msg))
         post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed, expand_fn=expand_fn)

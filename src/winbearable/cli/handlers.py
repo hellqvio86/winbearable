@@ -36,6 +36,7 @@ from ..engine import (
     run_profile_command,
     summarize_elevation_requirements,
 )
+from ..log import configure_logging, get_logger, reset_logging
 from ..models import (
     EnvironmentInfo,
     PermissionDeniedError,
@@ -406,6 +407,38 @@ def _relay_elevated_uac(raw_argv: list[str], deps: CliDeps) -> int:
     return int(exit_code)
 
 
+_logger = get_logger(__name__)
+
+
+def _handle_cli_exception(
+    args: argparse.Namespace, exc: BaseException, exit_code: int, *, unexpected: bool = False
+) -> int:
+    """Log structured failure details, re-raise in debug mode, or emit user-facing CLI error."""
+    context = exc.to_dict() if isinstance(exc, WinbearableError) else {}
+    _logger.error(
+        "CLI command failed: %s",
+        exc,
+        exc_info=True,
+        extra={
+            "event": "cli.command.error",
+            "command": getattr(args, "command", None),
+            "error_type": type(exc).__name__,
+            "exit_code": exit_code,
+            "unexpected": unexpected,
+            **({"context": context} if context else {}),
+        },
+    )
+    if getattr(args, "debug", False):
+        raise exc
+    if unexpected:
+        sys.stderr.write(f"ERROR: Unexpected failure: {exc}\n")
+        if getattr(args, "json", False):
+            print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+    else:
+        _emit_cli_error(args, exc)
+    return exit_code
+
+
 _COMMAND_HANDLERS = {
     "doctor": handle_doctor,
     "status": _handle_status,
@@ -455,6 +488,11 @@ def run_cli(
 
     try:
         with out_cm, err_cm:
+            configure_logging(
+                debug=bool(getattr(args, "debug", False)),
+                log_format=getattr(args, "log_format", None),
+                log_file=getattr(args, "log_file", None),
+            )
             return _run_cli_body(
                 args,
                 raw_argv,
@@ -470,6 +508,7 @@ def run_cli(
                 write_uac_output_safe(uac_out_path, uac_buf.getvalue())
             except (OSError, UacElevationError) as exc:
                 sys.stderr.write(f"Warning: failed to write UAC output file: {exc}\n")
+        reset_logging()
 
 
 def _emit_cli_error(args: argparse.Namespace, exc: BaseException) -> None:
@@ -497,26 +536,37 @@ def _run_cli_body(
     try:
         env = sys_backend.detect_environment(reg_backend)
         dry_run = not getattr(args, "apply", False)
+        _logger.debug(
+            "Starting command %s",
+            args.command,
+            extra={
+                "event": "cli.command.start",
+                "command": args.command,
+                "dry_run": dry_run,
+                "debug": bool(getattr(args, "debug", False)),
+                "is_admin": env.is_admin,
+                "build": env.windows_build,
+                "edition": env.edition,
+            },
+        )
         handler = _COMMAND_HANDLERS.get(args.command)
         if handler is None:
             raise ValueError(f"Unknown command: {args.command}")
-        return handler(args, raw_argv, reg_backend, sys_backend, store, env, dry_run, deps)
+        rc = handler(args, raw_argv, reg_backend, sys_backend, store, env, dry_run, deps)
+        _logger.debug(
+            "Finished command %s with exit_code=%d",
+            args.command,
+            rc,
+            extra={"event": "cli.command.finish", "command": args.command, "exit_code": rc},
+        )
+        return rc
 
     except UnsupportedPlatformError as exc:
-        if getattr(args, "debug", False):
-            raise
-        _emit_cli_error(args, exc)
-        return EXIT_UNSUPPORTED_PLATFORM
+        return _handle_cli_exception(args, exc, EXIT_UNSUPPORTED_PLATFORM)
     except (HighRiskConfirmationError, IrreversibleActionError, IncompleteJournalError, PermissionDeniedError) as exc:
-        if getattr(args, "debug", False):
-            raise
-        _emit_cli_error(args, exc)
-        return EXIT_BLOCKED
+        return _handle_cli_exception(args, exc, EXIT_BLOCKED)
     except WinbearableError as exc:
-        if getattr(args, "debug", False):
-            raise
-        _emit_cli_error(args, exc)
-        return EXIT_ERROR
+        return _handle_cli_exception(args, exc, EXIT_ERROR)
     except (
         ProfileValidationError,
         UacCancelledError,
@@ -530,17 +580,9 @@ def _run_cli_body(
         ValueError,
         RuntimeError,
     ) as exc:
-        if getattr(args, "debug", False):
-            raise
-        _emit_cli_error(args, exc)
-        return EXIT_ERROR
+        return _handle_cli_exception(args, exc, EXIT_ERROR)
     except Exception as exc:
-        if getattr(args, "debug", False):
-            raise
-        sys.stderr.write(f"ERROR: Unexpected failure: {exc}\n")
-        if getattr(args, "json", False):
-            print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
-        return 1
+        return _handle_cli_exception(args, exc, 1, unexpected=True)
 
 
 def main() -> None:
