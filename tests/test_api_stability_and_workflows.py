@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 import winbearable
-from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
+from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend, NativeSystemBackend
 from winbearable.backends.system_native_cmd import run_subprocess_bounded
+from winbearable.backends.system_protocol import CommandResult
 from winbearable.backends.win32_acl import build_private_sddl, find_permissive_sddl_trustees
 from winbearable.cli.handlers import run_cli
 from winbearable.cli.parser import build_parser
@@ -237,3 +239,22 @@ def test_adversarial_profile_validation_and_api_stability_and_e2e_workflows(tmp_
         )
         == EXIT_SUCCESS
     )
+
+
+def test_bulk_winget_list_cache_and_write_invalidation() -> None:
+    """NativeSystemBackend fetches bulk winget list once for multiple queries and invalidates on uninstall."""
+    sysb = NativeSystemBackend(platform_override="win32")
+    calls: list[list[str]] = []
+
+    def _fake_cmd(args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
+        calls.append(args)
+        if args[1:3] == ["list", "--disable-interactivity"]:
+            return CommandResult(tuple(args), 0, "Name Id Version\nVSCode Microsoft.VisualStudioCode 1.0 winget\n", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    with patch.object(sysb, "_run_native_cmd", side_effect=_fake_cmd):
+        assert sysb.is_winget_package_installed("Microsoft.VisualStudioCode") is True
+        assert sysb.is_winget_package_installed("XP9CXNGPPJ97XX") is False
+        assert len(calls) == 1
+        assert sysb.uninstall_winget_package("Microsoft.VisualStudioCode") is True
+        assert sysb._winget_bulk_list_stdout is None  # type: ignore[attr-defined]

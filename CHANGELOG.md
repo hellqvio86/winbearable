@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.24.0] - 2026-11-19
+
+### Performance
+
+- **Single-Call Bulk Winget Inventory (`backends/system_native_apps.py`):** Cached a single `winget.exe list --disable-interactivity --accept-source-agreements` invocation per `NativeSystemBackend` instance (invalidated on `install_winget_package` and `uninstall_winget_package`), replacing 7–40 sequential `winget.exe list --id ...` subprocesses during `wb doctor`, `wb plan`, and Windows integration tests.
+
 ## [0.23.0] - 2026-11-19
 
 ### Changed & Improved

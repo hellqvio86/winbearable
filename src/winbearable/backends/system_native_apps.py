@@ -17,6 +17,7 @@ class NativeAppMixin:
     _platform: str
     _setup_candidates: tuple[str, ...]
     _winget_installed_cache: dict[str, bool]
+    _winget_bulk_list_stdout: str | None = None
     last_outcome: OperationOutcome | None
 
     _is_user_writable_binary = staticmethod(is_user_writable_binary)
@@ -68,6 +69,20 @@ class NativeAppMixin:
         cache_key = package_id.lower()
         if cache_key in self._winget_installed_cache:
             return self._winget_installed_cache[cache_key]
+        if not getattr(self, "_has_custom_popen", False):
+            bulk_out: str | None = getattr(self, "_winget_bulk_list_stdout", None)
+            if bulk_out is None:
+                bulk_res = self._run_native_cmd(
+                    [self._resolve_winget_exe(), "list", "--disable-interactivity", "--accept-source-agreements"],
+                    timeout=60.0,
+                )
+                if bulk_res.returncode == 0 and bulk_res.stdout.strip():
+                    bulk_out = bulk_res.stdout
+                    self._winget_bulk_list_stdout = bulk_out
+            if bulk_out is not None:
+                installed = bool(re.search(rf"(?m)(?:^|\s){re.escape(package_id)}(?:\s|$)", bulk_out, re.IGNORECASE))
+                self._winget_installed_cache[cache_key] = installed
+                return installed
         res = self._run_native_cmd(
             [
                 self._resolve_winget_exe(),
@@ -95,6 +110,7 @@ class NativeAppMixin:
         if self._platform != "win32":
             return False
         self._winget_installed_cache.pop(package_id.lower(), None)
+        self._winget_bulk_list_stdout = None
         res = self._run_native_cmd(
             [
                 self._resolve_winget_exe(),
@@ -143,6 +159,7 @@ class NativeAppMixin:
         if self._platform != "win32":
             return False
         self._winget_installed_cache.pop(package_id.lower(), None)
+        self._winget_bulk_list_stdout = None
         res = self._run_native_cmd(
             [
                 self._resolve_winget_exe(),
