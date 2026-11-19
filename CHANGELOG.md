@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.19.1] - 2026-11-19
+
+### Fixed
+
+- **UAC Output Directory Permissions on Python 3.12+:** Replaced `tempfile.TemporaryDirectory` (which creates `0o700` `OWNER RIGHTS`-only directories on Windows) with `_uac_output_dir()` (`os.mkdir` with CSPRNG suffix + reparse check) in `uac/elevation.py` so `uac-output.txt` inherits `%TEMP%` DACLs and remains readable by the unelevated caller after the elevated child writes it as `BUILTIN\Administrators`.
+
 ## [0.19.0] - 2026-11-19
 
 ### Security

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
+import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +137,32 @@ def resolve_elevation_target(
     )
 
 
+@contextlib.contextmanager
+def _uac_output_dir(
+    reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+) -> Iterator[Path]:
+    """Create a fresh wb-uac-* directory inheriting %TEMP% DACLs (readable by both elevated child and caller)."""
+    temp_root = Path(tempfile.gettempdir())
+    uac_dir: Path | None = None
+    for _ in range(8):
+        candidate = temp_root / f"wb-uac-{secrets.token_hex(8)}"
+        try:
+            os.mkdir(candidate)
+            uac_dir = candidate
+            break
+        except FileExistsError:
+            continue
+    if uac_dir is None:
+        raise UacElevationError("Failed to allocate unique UAC output directory.")
+    try:
+        if reparse_check(uac_dir) or any(reparse_check(p) for p in uac_dir.parents):
+            raise UacElevationError(f"Refusing symlink/reparse-point UAC output directory: {uac_dir}")
+        yield uac_dir
+    finally:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(uac_dir, ignore_errors=True)
+
+
 def run_elevated_wb(
     argv: list[str],
     executable: str | None = None,
@@ -158,8 +187,8 @@ def run_elevated_wb(
         caller_sid = get_current_process_user_sid(windll_override)
     except AttributeError, OSError, TypeError:
         caller_sid = None
-    with tempfile.TemporaryDirectory(prefix="wb-uac-", ignore_cleanup_errors=True) as tmp_dir:
-        out_path = Path(tmp_dir) / "uac-output.txt"
+    with _uac_output_dir() as tmp_dir:
+        out_path = tmp_dir / "uac-output.txt"
         elevated_args = build_elevated_cmdline_args(argv, out_path, caller_sid=caller_sid)
         resolved_exe, launch_args = resolve_elevation_target(elevated_args, executable=executable)
         params = subprocess.list2cmdline(launch_args)
