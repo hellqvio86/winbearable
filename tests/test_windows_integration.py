@@ -74,10 +74,16 @@ def test_disposable_hkcu_registry_roundtrip_and_cleanup() -> None:
                 winreg_mod.DeleteKey(winreg_mod.HKEY_CURRENT_USER, key_to_del)
 
 
-def test_readonly_native_system_and_doctor_contract() -> None:
+@pytest.fixture(scope="module")
+def readonly_native_system() -> NativeSystemBackend:
+    """Share one read-only NativeSystemBackend across read-only integration tests to reuse winget query cache."""
+    return NativeSystemBackend()
+
+
+def test_readonly_native_system_and_doctor_contract(readonly_native_system: NativeSystemBackend) -> None:
     """Verify real Windows environment detection, process check, and `wb doctor --json` contract."""
     reg = WinregBackend()
-    sys_b = NativeSystemBackend()
+    sys_b = readonly_native_system
     env = sys_b.detect_environment(reg)
     assert env.is_windows
     assert env.windows_build > 0
@@ -139,10 +145,10 @@ def test_disposable_hkcu_apply_crash_and_recover() -> None:
                 del_key(hkcu_handle, test_root)
 
 
-def test_readonly_plan_all_profiles_and_audit() -> None:
+def test_readonly_plan_all_profiles_and_audit(readonly_native_system: NativeSystemBackend) -> None:
     """Run read-only `wb plan --json` for every built-in profile and `wb audit --json` on real Windows."""
     reg = WinregBackend()
-    sys_b = NativeSystemBackend()
+    sys_b = readonly_native_system
     for profile in ("user-only", "corp-safe", "dev-comfort", "privacy", "owner", "paranoid", "hardened-baseline"):
         buf = io.StringIO()
         with redirect_stdout(buf):

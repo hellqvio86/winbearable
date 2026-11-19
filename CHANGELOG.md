@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.23.0] - 2026-11-19
+
+### Changed & Improved
+
+- **Winget & Test Performance:** Added `--disable-interactivity` to `winget.exe list --id` queries in `backends/system_native_apps.py`, shared a module-scoped read-only `NativeSystemBackend` fixture in `tests/test_windows_integration.py` to reuse `_winget_installed_cache` across `doctor` and `plan`/`audit`, and removed `fail_under = 89` from `[tool.coverage.report]` in `pyproject.toml` (keeping `--cov-fail-under=89` in CI and `.githooks/pre-commit`) so single-file `pytest` runs report coverage and `--durations=15` without failing.
+
 ## [0.22.0] - 2026-11-19
 
 ### Added & Hardened
