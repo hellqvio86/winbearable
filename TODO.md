@@ -1,527 +1,268 @@
-# Winbearable — Critical Architecture & Engineering Review (v0.15.1)
+# Winbearable — Harsh Engineering, Security, Test & Setup Audit (`v0.16.0`)
 
-**Reviewed artifact:** `winbearable-main(5).zip`  
-**Review focus:** software architecture, transaction safety, Windows boundary correctness, security, maintainability, test credibility, release engineering.  
-**Important:** This is an agent implementation backlog. Confirm each finding against the current code before changing it; findings inherited from earlier reviews are explicitly marked as regression checks, not asserted to remain present.
-
-
-## Executive summary
-
-The repository has improved significantly through package decomposition (`engine/`, `operations/`, `backends/`, `models/`, `audit/`, `wsl/`). The remaining architectural concern is that decomposition is currently more structural than behavioral: `OperationAdapter` is still an inspection-only protocol, while snapshot/apply/compensation logic is distributed through the engine. That undermines the advertised adapter architecture and increases the risk that operation kinds behave differently during apply, rollback, and recovery.
-
-The review found a high-value set of architecture tasks and a regression-validation backlog from the previous review. Agents must not blindly “fix” inherited findings without reproducing them on this version.
-
-## Priority 0 — Stop unsafe or destructive behavior
-
-### [x] A0-01 — Make rollback conflict-aware for every operation type
-**Problem:** Rollback is only safe if the live state still matches the state Winbearable last wrote. Restoring pre-apply snapshots unconditionally can overwrite user edits or changes made by Windows, policy, another management agent, or another application after apply.
-**Implementation:** Store per-operation pre-state, expected post-state, and an explicit operation outcome in the journal. Before compensation, compare live state with the recorded post-state. If it differs, report a conflict and preserve the live state by default; require an explicit force override with clear warnings and audit trail.
-**Done when:** Registry, files, services, tasks, features, firewall, WSL config, and other mutable operation kinds have conflict-safe rollback tests; force is explicit and tested; incomplete journals recover deterministically.
-
-### [x] A0-02 — Treat UAC elevation as a security boundary, not a convenience wrapper
-**Implementation:** Audit every elevated command and target resolution. Do not execute user-writable `.cmd`/`.exe` targets or PATH-resolved tools from an elevated process. Ensure elevated Python invocation is isolated from `PYTHONPATH`, `PYTHONHOME`, and other import/runtime injection. Resolve Windows system executables and system directories through trusted Windows APIs; validate target ownership/ACL where appropriate. Validate output path ancestry, reparse points, and TOCTOU handling.
-**Done when:** Threat-model tests poison PATH, Python environment variables, current directory, junctions, user-writable launchers, and over-the-shoulder elevation; unsafe cases fail closed.
-
-### [x] A0-03 — Make every transaction operation recoverable and journaled before mutation
-**Implementation:** Enforce write-ahead journaling: persist operation intent and snapshots before the first mutation; persist progress immediately after each operation; represent skipped/failed/unknown outcomes distinctly. Recovery must not compensate operations that were never attempted.
-**Done when:** Crash/failure injection at each operation boundary recovers to a verified state; no unjournaled mutation is possible.
-
-### [x] A0-04 — Audit destructive file/config operations for data-loss edge cases
-**Implementation:** For each JSON/JSONC/INI/TOML/WSL config writer, test preservation of unknown keys, comments, ordering where promised, encoding, line endings, file permissions, ACLs, and concurrent modification. Backups must be unique per transaction and never overwritten while referenced by a journal.
-**Done when:** Round-trip and conflict tests cover realistic user files; file replacement preserves Windows security descriptors or fails safely; backup retention never removes active rollback assets.
-
-## Priority 1 — Architecture and design correctness
-
-### [x] A1-01 — Implement a real operation lifecycle abstraction (not an inspect-only Protocol)
-**Current design issue:** `operations/base.py` defines `OperationAdapter` with `inspect()` only. Snapshotting, mutation execution, and compensation still belong to engine-level logic, so adding an operation requires editing multiple orchestration branches.
-**Implementation:** Define a lifecycle contract or separate explicit protocols for `inspect/plan`, `snapshot`, `apply`, `verify`, and `compensate`. Add an adapter registry keyed by operation kind. Engine should orchestrate lifecycle calls, not contain per-operation implementation logic.
-**Done when:** One operation kind can be added without editing multiple engine switch/loop blocks; all operation kinds have lifecycle coverage; adapter contract tests run against all adapters.
-
-### [x] A1-02 — Eliminate parallel representations of operation behavior
-**Implementation:** Find operation specs, inspection/planning, snapshot collection, execution, verification, and rollback code that each encode their own interpretation of the same spec. Make a single source of truth for target identity, desired state, reversibility, risk, and verification semantics. Remove duplicated branching after behavior is covered.
-**Done when:** A traceability test maps each spec type to its adapter and lifecycle; unsupported kinds fail explicitly rather than being silently omitted.
-
-### [x] A1-03 — Make transaction state machine explicit and validated
-**Implementation:** Centralize allowed transitions for `TransactionState` and operation state. Reject illegal transitions and impossible combinations (e.g., committed record with pending operations; rolled-back record with unresolved compensation; applied ID list inconsistent with operation outcomes). Keep transitions out of scattered assignments.
-**Done when:** State-machine transition tests cover normal, failure, recovery, conflict, partial-rollback, and retry paths; invalid state payloads are rejected or migrated.
-
-### [x] A1-04 — Define a stable identity for each operation target
-**Implementation:** Specify canonical target IDs for registry keys (including view), files, services, scheduled tasks, optional features, packages, firewall groups, WSL distributions (registration GUID/rootfs identity, not name alone), and user-scoped actions. Use identities consistently in deduplication, journal entries, verification, and compensation.
-**Done when:** Target identity functions are pure, tested for collisions/aliases/case normalization, and used consistently across the codebase.
-
-### [x] A1-05 — Replace compatibility indirection with explicit dependency injection
-**Implementation:** Audit `_eng_attr`, `sys.modules` lookups, monkeypatch-based module access, and global/default backend/store fallbacks. Inject backend, state store, adapter registry, clock, process runner, and platform capabilities at construction boundaries. Keep defaults only in composition-root code.
-**Done when:** Core engine tests do not patch module globals or rely on import-order behavior; production CLI wiring owns default instances.
-
-### [x] A1-06 — Separate domain logic from Windows command execution
-**Implementation:** Ensure engine/profile/catalog/audit logic is platform-neutral. Win32 API declarations and subprocess invocation live behind typed backend interfaces. Avoid direct OS commands, registry access, or platform probing in domain modules. Centralize command result/error normalization.
-**Done when:** Static architecture tests reject direct `subprocess`, `ctypes`, `winreg`, and filesystem side-effect imports from domain/engine modules except explicitly approved modules.
-
-### [x] A1-07 — Define a typed error taxonomy and consistent failure semantics
-**Implementation:** Replace generic `RuntimeError`/string parsing as control flow with domain errors (unsupported, permission, missing target, timeout, verification failed, conflict, partial apply, rollback failure). CLI maps errors to stable exit codes and structured output. Preserve diagnostic context without leaking secrets.
-**Done when:** CLI/JSON errors are machine-readable; every adapter has tests for expected error categories; no “success” result can contain unresolved failure/unknown status.
-
-### [x] A1-08 — Treat plan/apply as optimistic concurrency control
-**Implementation:** Plans should record precondition fingerprints (existence, values, hashes, identity) and apply must recheck immediately before mutation. If external drift occurs after planning, abort or re-plan instead of applying stale assumptions.
-**Done when:** Registry/file/WSL/config plans have race/drift tests; transaction lock scope is documented as process-local vs cross-process and external actors are not assumed to be locked.
-
-### [x] A1-09 — Establish explicit ownership and lifecycle for resources
-**Implementation:** Review lock files, temp files, backups, subprocesses, output files, state files, and WSL exports. Every resource needs creation owner, permissions, cleanup policy, retention policy, and failure cleanup. Avoid unbounded or ambiguous backup accumulation.
-**Done when:** Resource lifecycle docs and tests cover normal completion, exception, crash recovery, concurrent invocation, and stale cleanup.
-
-## Priority 1 — Windows correctness/security review tasks
-
-### [x] W1-01 — Verify every Win32 `ctypes` signature and handle lifecycle
-Audit all `ctypes`/`WinDLL` declarations for explicit `argtypes` and `restype`, correct pointer-width types, error checking, and correct handle closing. Never catch API failures and convert them into a passing/low-severity observation without recording `unknown`/partial.
-**Done when:** Static lint plus Windows tests validate signatures, failure paths, and 64-bit behavior.
-
-### [x] W1-02 — Revalidate ACL and atomic replacement semantics
-Check all paths that write/restore files. `ReplaceFileW` or atomic replacement is not automatically ACL-safe; verify descriptor inheritance, owner, DACL, alternate streams, and temp-file ACLs. Use a safe fallback or fail closed.
-**Done when:** Windows test creates files with explicit non-inherited ACLs and verifies them after apply/rollback.
-
-### [x] W1-03 — Verify Windows security observations are complete and never optimistic
-For audit checks, explicitly represent unsupported platform/build, partial collection, API error, and no findings. Ensure no query failure becomes “secure” or “enabled” due default values. Document scope: IPv4/IPv6, TCP/UDP, policy-managed settings, elevation requirements.
-**Done when:** Tests cover secure, insecure, unknown, API-failure, and partial-observation states; output accurately describes checked coverage.
-
-### [x] W1-04 — Validate package, extension, and command operations before elevation
-Ensure package/extension operations cannot invoke per-user writable executables under admin. Model user/machine scope and elevation requirement in operation metadata, not string heuristics.
-**Done when:** Elevation planning shows privilege requirements before confirmation; unsafe mixed-privilege profiles are split or rejected.
-
-## Priority 2 — Quality, scale, and usability
-
-### [x] Q2-01 — Reduce cognitive complexity in the tweak catalog
-The catalog category modules remain unevenly sized; `tweaks/categories/hardening.py` is a particularly large concentration of definitions. Split by cohesive subdomain (credential protection, Defender/ASR, UAC, network protocol, policy) while preserving IDs, provenance, imports, and deterministic catalog assembly.
-**Done when:** Category modules are cohesive and comfortably reviewable; no hardening “miscellaneous” dumping ground; catalog tests prove IDs and generated documentation remain stable.
-
-### [x] Q2-02 — Make provenance metadata first-class and fail catalog assembly on mismatch
-Provenance and definitions should be colocated and validated. Reject missing provenance, invalid references, unsupported Windows versions, duplicated identifiers, contradictory risk/irreversibility, and description/spec mismatches at startup or CI.
-**Done when:** Catalog validation is exhaustive, and invalid catalog fixtures fail with actionable messages.
-
-### [x] Q2-03 — Split oversized tests by behavior, not chronology
-Identify test files with mixed domains and split into backend, engine transaction, rollback/recovery, profiles/migration, WSL, audit, UAC, CLI/TUI, and catalog tests. Preserve fixtures and avoid giant test helpers that hide behavior.
-**Done when:** Test names and files reflect the module/domain; failures are isolated and readable; no test coverage lost during moves.
-
-### [x] Q2-04 — Strengthen integration test evidence
-Unit tests using in-memory backends cannot validate Windows APIs, real ACLs, registry views, service/task semantics, winget, WSL, UAC, and filesystem behavior. Establish a Windows CI suite with safe, read-only integration tests and separately gated destructive tests. Test reports must state what actually ran.
-**Done when:** Windows CI executes the supported integration subset; skipped tests are surfaced and reasons are explicit; release gates depend on the required suite.
-
-### [x] Q2-05 — Bound all subprocess and archive resource usage
-Verify output-size limits are enforced during capture, not only after collecting full output. WSL export/import must stream or use safe file operations, avoid loading archives into RAM, and handle user-provided distro names safely without glob injection. Add resource limits and cleanup guarantees.
-**Done when:** Stress tests with noisy subprocess output and multi-gigabyte/sparse archive fixtures demonstrate bounded memory and safe cleanup.
-
-### [x] Q2-06 — Harden profile inheritance and schema validation
-Profile includes/extends must support deterministic precedence, detect true cycles without rejecting shared DAG parents, enforce maximum depth/size, validate unknown fields, and preserve comments/formatting where promised. Serialization must round-trip all supported TOML/JSON values.
-**Done when:** Property tests cover inheritance DAGs, precedence, malformed input, excessive depth, round-trip, and migration.
-
-### [x] Q2-07 — Make CLI and TUI share one execution/validation path
-CLI and TUI should not diverge in risk gates, managed-device policies, irreversible-operation confirmation, error handling, dry-run semantics, or state-store selection. User-facing UI should call the same validated command service.
-**Done when:** Shared application service owns policy; tests run equivalent profiles through CLI and TUI entrypoints and assert identical plans/decisions.
-
-### [x] Q2-08 — Release integrity and reproducibility
-Verify version/tag consistency, artifact hashes, PyPI/Winget release artifacts, signing, SBOM/provenance, and workflow permissions. Avoid rebuilding a different artifact when calculating manifest hashes; hash the exact uploaded artifact. Protect publishing from manual event/ref mismatch and untrusted workflow inputs.
-**Done when:** A release validation test checks version/tag/artifact digests and signing; publish workflow cannot publish an artifact not built and verified in the same run.
-
-### [x] Q2-09 — Make architectural constraints measurable in CI
-Add focused AST/import tests for layer boundaries, forbidden dependencies, operation-adapter completeness, side-effect locations, and oversized modules. Keep rules stable and explain exceptions; do not create arbitrary limits that incentivize splitting without cohesion.
-**Done when:** CI fails on new architecture violations; rules include allowlist rationale and tests for their own correctness.
-
-### [x] Q2-10 — Improve observability and auditability of transactions
-Persist structured per-operation result, start/end time, target identity, pre/post fingerprints, verification status, error category, rollback outcome, and conflict decision. CLI JSON should support an agent/operator to diagnose without parsing human prose.
-**Done when:** JSON schema is documented/versioned; transactions and recovery produce structured logs/events; secrets and sensitive paths are redacted consistently.
-
-## Regression verification backlog from previous review
-
-The prior embedded `TODO.md` is a Pass-3 review against v0.13.0. Its findings must be checked against v0.15.1 before implementation; many may have been fixed in the intervening releases. Use it as a regression checklist only, not as unquestioned truth.
-
-## 1. Status of Pass-2 Findings (`N-01`..`N-13`, `CI-*`, `D-*`)
-
-| ID | Pass-2 finding | Status in `v0.13.0` | Verification notes |
-| :--- | :--- | :--- | :--- |
-| **N-01** | Partial rollback not idempotent (`restore_conflict` on already-restored items) | **PARTIAL** | `matches_pre` check added for registry values (`engine.py:830-840`) and files (`:953-955`), fixing the N-item conflict explosion. **Still open:** a single true conflict leaves the run in `FAILED` forever, blocking all future `apply`/`rollback` unless `--force` overwrites the user's edit (`P3-09`). |
-| **N-02** | Rollback ordering can invert history | **PARTIAL** | `rollback_runs` now refuses when incomplete/`FAILED` runs exist (`engine.py:1815-1820`) and errors if `--to` targets a non-committed run (`:1833-1834`), **only when `dry_run=False`**; `wb rollback` (dry-run) still silently previews across incomplete runs. |
-| **N-03** | `wslconfig_path is not None` + `PermissionError` strands `APPLYING` | **PARTIAL** | `engine.py:1603-1610` now compensates and transitions to `ROLLED_BACK`/`FAILED`, **but** forgets `applied_ids.clear()` before `_make_record` (recording rolled-back tweaks as `applied_tweaks`) and leaves `wslconfig_path is None` broken when `PermissionError` happens mid-WSL-apply (`P3-10`). |
-| **N-04** | Residual PATH/cwd-searched executables | **FIXED (system.py) / REGRESSED (`uac.py`)** | `system.py` routes `sc.exe`/`dsregcmd.exe`/`reg.exe` via `_sys32_exe` and sets `NoDefaultCurrentDirectoryInExePath=1`. However, `uac.py:157-161` checks `Path(sys.argv[0]).is_file()` in CWD before elevating (`P3-11`). |
-| **N-05** | Over-the-shoulder elevation as a different admin account | **OPEN** | Still zero SID comparison between parent and elevated child (`P3-11`). |
-| **N-06** | UAC output channel fragile | **PARTIAL** | `cli.py:550` now catches `OSError` and logs to `stderr`. Still open: ancestor junctions above `out_path.parent` unchecked, TOCTOU between `_is_reparse_or_symlink` and `os.open`, OTS temp dir ACL mismatch, and relative CLI paths breaking under `System32` CWD (`P3-11`). |
-| **N-07** | ACL preservation in `_atomic_write_bytes` | **PARTIAL** | `_atomic_write_bytes` (`operations.py:451-457`) now uses `ReplaceFileW`, **but** `apply_file_spec` (`:522`) and `restore_file_snapshot` (`:536`) call `wsl._atomic_write_text` (`os.replace`) instead of `_atomic_write_bytes`! (`P3-13`). |
-| **N-08** | Elevation guard rolls back whole run on user-scope VS Code | **PARTIAL** | `engine.py:1130-1135` skips elevated user-writable `code.cmd`, **but** `ext_skipped_elevated = False` (`:1121`) resets on each loop iteration, and `WingetOperationAdapter.inspect` (`operations.py:202-221`) never marks missing extensions as `DRIFTED` if VS Code is already installed (`P3-16`). |
-| **N-09** | Winget installer manifest has stale SHA-256 | **REGRESSED** | `test_catalog_lint.py:117` only blacklisted the literal `0.9.1` hash string; `0.12.2` and `0.13.0` both shipped with the same stale hash `F8147A672E30A49644960C69994FFCB2BA6A9F8B56B1E91C107DD256F8A9C705` (`P3-08`). |
-| **N-10** | `wsl.exe` decoding & probing lean on English text | **PARTIAL** | `WB_RC=` sentinel added (`wsl.py:428`), **but** `system.py:1147` checks `b"\x00" in raw` on `-d` commands (corrupting UTF-8 Linux output containing NUL bytes as UTF-16LE) and `probe_distro_wsl_conf` (`wsl.py:438`) treats any stderr warning on `WB_RC=1` as fatal (`P3-12`, `P3-22`). |
-| **N-11** | Snapshot encoding silently drops unsupported types | **FIXED** | `models.py:16` raises `TypeError`. |
-| **N-12** | Backup pruning destructive for unreferenced dirs | **FIXED** | `state.py:249` restricts pruning to `^\d{8}-\d{6}-[0-9a-f]{8}$` or `resolved_known_ids`. |
-| **N-13** | Smaller items (`_communicate_bounded`, `.bak` copy, CIS `0/0`) | **OPEN** | `_communicate_bounded` has a timeout thread race (`P3-12`), `.bak` is overwritten on `PLANNED`/`APPLYING` (`P3-25`), and `_cis()` in `catalog.py` is dead code (`P3-21`). |
-| **CI-02/03/04/06, D-04** | Provenance attestation, PyPI rebuild mismatch, coverage, `verify-matrix.md` | **OPEN** | Plus `ci.yml:80` added `windows-latest` to the PR test matrix in violation of `AGENTS.md` Rule #4 (`P3-28`). |
+**Audited commit:** `c6c8356` (`feat/arch-safety-v0160`, `v0.16.0`)  
+**Audit scope:** Engine & transaction safety, operation adapter architecture, Windows security boundaries, test suite credibility, packaging/CI/project setup.  
+**Audience:** Autonomous coding agents and maintainers. Every finding below was verified directly against the current codebase with `file:line` evidence. Do not check off an item until its **Done when** verification command/test passes.
 
 ---
 
-## 2. P0 — Critical Defects
+## Executive Verdict
 
-### P3-01 · P0 · `CODE` + `REPRODUCED` — `merge_file_content` overwrites top-level JSON dicts shallowly, wiping `profiles.list` in Windows Terminal `settings.json`
-- **Where:** `src/winbearable/operations.py:405-417` (`merge_file_content`), `src/winbearable/engine.py:565-581` (`resolve_tweak_params`).
-- **Problem:** When `[params."dev.terminal_settings_defaults"]` specifies `font_face`, `resolve_tweak_params` (`engine.py:570-571`) sets:
-  ```python
-  desired["profiles"] = {"defaults": {"font": {"face": params["font_face"].strip()}}}
-  ```
-  `merge_file_content` (`operations.py:414-415`) merges JSON/JSONC via shallow top-level assignment (`for k, v in desired_keys.items(): data[k] = v`). In Windows Terminal's `settings.json`, `"profiles"` contains `"list": [...]` (every user terminal profile) alongside `"defaults": {...}`. Assigning `data["profiles"] = v` **destroys `profiles.list` and all other `profiles.defaults` keys**.
-- **Fix:** Recursively deep-merge nested `dict` objects in `merge_file_content` (and correspondingly check nested keys recursively in `FileConfigOperationAdapter.inspect` at `operations.py:781-811`) when both existing `data.get(k)` and desired `v` are `dict`s.
-- **Done when:** Applying `dev.terminal_settings_defaults` with `font_face = "Cascadia Mono"` to a `settings.json` containing `"profiles": {"list": [{"name": "Ubuntu"}], "defaults": {"colorScheme": "Campbell"}}` preserves both `"list"` and `"colorScheme"`.
+`v0.16.0` added the right vocabulary (typed errors, state machine, canonical target identities, OCC fingerprints, full-lifecycle `OperationAdapter`, UAC env sanitization, elevation safety summary), **but a large fraction of it is dead or cosmetic code that is never wired into production call paths**:
 
-### P3-02 · P0 · `CODE` — `NativeSystemBackend.is_firewall_group_enabled` only inspects `InMemoryRegistryBackend._values` and always returns `False` on real Windows
-- **Where:** `src/winbearable/backends/system.py:1898-1912` (`NativeSystemBackend.is_firewall_group_enabled`).
+- **7 of 10** `WinbearableError` subclasses are never raised anywhere in `src/winbearable/`.
+- `OperationAdapter.verify()` has **0 callers** in `src/winbearable/`.
+- `sanitize_elevated_python_env()`, `summarize_elevation_requirements()`, `expected_fingerprints`, and `backends/win32_fs.is_reparse_or_symlink()` have **0 production callers**.
+- `run_profile_command()` is called by `tui.py` but **not** by `cli/handlers.py`, so CLI and TUI still diverge.
+- `compensate_run_record()` still compensates **never-attempted** operations on mid-run failure because snapshots are collected with speculative `post_*` values up front and compensation does not consult `operation_journal`.
+- `packaging/winget/hellqvio86.winbearable.installer.yaml` still ships the stale `v0.12.1` SHA-256 hash (`F8147A...`) on `PackageVersion: 0.16.0`.
+- `src/tests/` has **290 inline imports** (plus **12** in `src/winbearable/`), **15 giant grab-bag tests (>= 100 LOC)**, **112 lines with internal ticket IDs**, and weakened/tautological assertions in `test_lifecycle_and_safety.py`.
+
+---
+
+## Priority 0 — Correctness, Data Safety & Dead Security Controls
+
+### [ ] T0-01 · P0 · `CODE` — Compensation mutates or conflicts on never-attempted operations after mid-run failure
+- **Evidence:** `src/winbearable/engine/apply.py:119-168` (`_collect_pre_apply_snapshots`), `apply.py:187-289` (`compensate_run_record`), `src/winbearable/operations/system_adapters.py` (`snapshot()` sets `post_*` speculatively before any mutation).
+- **Problem:** `_collect_pre_apply_snapshots()` captures snapshots for **all** drifted tweaks before tweak 1 runs and pre-fills `post_*` (`post_start_type`, `post_enabled`, `post_existed`, etc.). If tweak 2 fails, `compensate_run_record()` iterates over every snapshot in `RunRecord` without filtering by `operation_journal` / `completed_operations`. Untouched targets from tweaks 3..N are either spuriously rolled back or emit false `restore_conflict` errors.
+- **Implementation:**
+  1. Leave `post_*` as `None` during pre-apply `snapshot()`. Populate `post_*` only **after** each operation actually executes (or in `OperationJournalEntry`).
+  2. In `compensate_run_record()`, only compensate targets whose journal entry reached `outcome in {"applied", "failed", "unknown"}` (never `"planned"` or `"skipped"`).
+  3. Update `operation_journal` entries with `rollback_outcome` (`"rolled_back"` / `"conflict"` / `"failed"`) during compensation.
+- **Done when:** Crash/failure injection at tweak 2 of a 4-tweak run leaves tweaks 3 and 4 completely untouched during compensation, emits zero false conflicts, and records exact `rollback_outcome` per attempted operation.
+
+### [ ] T0-02 · P0 · `CODE` — `operation_journal` target IDs and matching logic are broken for multi-op tweaks
+- **Evidence:** `src/winbearable/engine/apply.py:559-571` (`journal_entries` init), `apply.py:648-657` (`_record_journal_entry`), `apply.py:173-184` (`_compute_snapshot_fingerprints`).
 - **Problem:**
-  ```python
-  if hasattr(registry, "_values") and isinstance(registry._values, dict):
-      ...
-  return False
-  ```
-  `_values` only exists on the test double `InMemoryRegistryBackend` (`registry.py:152`). On `WinregBackend` and `WslInteropRegistryBackend`, `hasattr(registry, "_values")` is `False`, so `is_firewall_group_enabled` unconditionally returns `False` without querying the registry. Every `FirewallGroupSpec` with `enabled=False` is falsely reported `APPLIED` when active, and `enabled=True` permanently fails post-apply verification.
-- **Fix:** Add `list_values(hive: str, key_path: str, *, view: RegistryView = RegistryView.DEFAULT) -> list[tuple[str, RegistryValueData, str]]` to the `RegistryBackend` protocol (implemented across `InMemoryRegistryBackend`, `WinregBackend`, and `WslInteropRegistryBackend`) and use it in `is_firewall_group_enabled`. Remove `hasattr(registry, "_values")` from production code.
-- **Done when:** `NativeSystemBackend.is_firewall_group_enabled` works against `WinregBackend` (tested with a real or mocked `winreg` key) and `git grep "_values" src/winbearable/backends/system.py` returns nothing.
+  1. Planned journal entries build `target_id=f"{res.tweak_id}:{op.operation_type}:{op.target}"`, whereas adapters emit canonical IDs from `operations/identity.py` (`reg:...`, `svc:...`). The two never match.
+  2. `_record_journal_entry()` matches on `(existing.tweak_id == entry.tweak_id and existing.operation_type == entry.operation_type and existing.outcome == "planned")`, ignoring `target_id`! For a tweak with 6 registry values (e.g., ASR rules), updates overwrite planned entries by arbitrary first-match order.
+  3. `_compute_snapshot_fingerprints()` hand-rolls `f"reg:{rs.hive}\\{rs.key_path}|{rs.view}|{rs.value_name}"` instead of calling `identity.registry_value_id(...)`, losing case/path normalization.
+- **Implementation:** Use `operations/identity.py` as the single canonical target ID generator across `PlannedOperation`, `_compute_snapshot_fingerprints()`, `OperationJournalEntry` (planned and applied), and `_record_journal_entry()` (keyed by `target_id`).
+- **Done when:** Multi-op tweaks (6+ registry specs, multi-service tweaks) produce 1:1 `target_id` matches between planned and applied `OperationJournalEntry` records, and `_record_journal_entry` matches strictly on `target_id`.
 
-### P3-03 · P0 · `CODE` + `NEEDS-WINDOWS` — `_execute_tweak_mutations` runs `reg.exe export` on non-existent keys before creating them, aborting admin policy tweaks
-- **Where:** `src/winbearable/engine.py:1034-1050` (`_execute_tweak_mutations`), `src/winbearable/backends/system.py:1491-1498` (`export_registry_backup`).
-- **Problem:** Before `registry.set_value`, `_execute_tweak_mutations` calls `system.export_registry_backup(reg_spec.hive, reg_spec.key_path, ...)` for every admin tweak without checking `registry.key_exists(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)`. On real Windows, policy subkeys (`HKLM\SOFTWARE\Policies\WindowsNotepad`, `...\PowerShell\ModuleLogging\ModuleNames`, `...\Windows Defender Exploit Guard\ASR\Rules`, etc.) do not exist until created. `reg.exe export` on a non-existent key exits with code `1`, causing `_execute_tweak_mutations` to raise `_TweakMutationError("Failed to export registry backup...")`. (Hidden in unit tests because `InMemorySystemBackend.export_registry_backup` unconditionally returns `True`.)
-  Additionally:
-  - `subtree = (reg_spec.hive, reg_spec.key_path)` omits `reg_spec.view`, and `export_registry_backup` does not pass `/reg:32` or `/reg:64` to `reg.exe export`.
-  - `safe_name = reg_spec.key_path.replace("\\", "_")` (`engine.py:1038`) does not sanitize characters invalid in Windows filenames or cap length against `MAX_PATH`.
-- **Fix:** Only call `export_registry_backup` when `registry.key_exists(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)` is `True`; include `reg_spec.view` in `exported_subtrees` and pass `/reg:32` / `/reg:64` when non-default; sanitize `safe_name` (and hash suffix if > 120 chars). Make `InMemorySystemBackend.export_registry_backup` check `registry.key_exists` so unit tests match `reg.exe`.
-- **Done when:** Admin tweaks targeting brand-new `HKLM\SOFTWARE\Policies\...` subkeys succeed on real Windows and in unit tests when `export_registry_backup` rejects absent keys.
+### [ ] T0-03 · P0 · `SECURITY` — Security controls defined in `uac.py`, `engine/params.py`, and `engine/apply.py` are unwired dead code
+- **Evidence:**
+  - `src/winbearable/uac.py:67` (`sanitize_elevated_python_env`): **0 production callers**.
+  - `src/winbearable/engine/params.py:334` (`summarize_elevation_requirements`): **0 production callers**.
+  - `src/winbearable/engine/apply.py:409,547` (`expected_fingerprints`): **0 callers pass it** (`wb plan` never emits fingerprints; `wb apply` never checks them).
+  - `src/winbearable/backends/win32_fs.py:42` (`is_reparse_or_symlink`): **0 callers** (`uac.py:233` duplicates `_is_reparse_or_symlink`).
+- **Problem:** All four security/safety controls only execute inside unit tests, providing zero protection to real CLI/TUI users.
+- **Implementation:**
+  1. Call `sanitize_elevated_python_env()` at the start of elevated CLI execution (`cli/__init__.py` / `cli/handlers.py` when `--uac-output` is set or `env.is_admin`).
+  2. Call `summarize_elevation_requirements()` before UAC elevation confirmation in `cli/handlers.py`; display admin vs user-scope breakdown and refuse/split unsafe mixed-privilege elevation when elevating as a different user.
+  3. Emit `precondition_fingerprints` in `wb plan --json` and accept `--plan-file` / `--expected-fingerprints` (or re-verify plan digest/fingerprints) in `wb apply`.
+  4. Delete duplicate `_is_reparse_or_symlink` in `uac.py` and import `is_reparse_or_symlink` from `backends/win32_fs.py`.
+- **Done when:** Every one of those 4 functions has at least one tested production call path in `cli/` or `uac.py`, and an end-to-end CLI test verifies each behavior.
 
-### P3-04 · P0 · `CODE` — Partial-absent multi-service tweaks crash `_execute_tweak_mutations` and poison rollback into `TransactionState.FAILED`
-- **Where:** `src/winbearable/operations.py:50-63` (`ServiceOperationAdapter.inspect`), `src/winbearable/engine.py:704-710` (`_collect_pre_apply_snapshots`), `engine.py:852-866` (`_compensate_run_record`), `engine.py:1069-1077` (`_execute_tweak_mutations`).
-- **Problem:** Tweaks with multiple `service_specs` (`services.disable_xbox`, `services.disable_maps_retail`) mark the tweak `DRIFTED` if at least one service is present/drifted while emitting `action="skip_absent"` for absent services. During apply:
-  1. `_collect_pre_apply_snapshots` (`engine.py:704-710`) snapshots all `tweak.service_specs`, recording `ServiceSnapshot(service_name=..., previous_start_type=None)` for the absent service.
-  2. `_execute_tweak_mutations` (`engine.py:1069-1077`) calls `system.set_service_start_type` on all `tweak.service_specs` without skipping absent services, which returns `False` (`system.py:1409`) and raises `_TweakMutationError`.
-  3. `_compensate_run_record` (`engine.py:852-866`) iterates over `service_snapshots`, sees `previous_start_type is None` for the absent service, and appends `"service <name>: missing/unreadable previous Start type; refusing to delete"` to `errors`, stranding the run in `TransactionState.FAILED`!
-- **Fix:** In `_collect_pre_apply_snapshots` and `_execute_tweak_mutations`, check `svc_state, _ = system.get_service_state(registry, svc_spec.service_name)`: skip absent services (`svc_state == "absent"`), and raise before mutating if `svc_state == "unreadable"`.
-- **Done when:** Applying `services.disable_xbox` when `XblAuthManager` exists (Start=3) and `XboxGipSvc` is absent succeeds, configures `XblAuthManager` to 4, skips `XboxGipSvc`, and rolls back cleanly to `ROLLED_BACK`.
-
-### P3-05 · P0 · `CODE` — Unconfigured Win32 `ctypes` `argtypes`/`restype` in `audit.py` and `system.py` cause 64-bit `OverflowError` / pointer truncation and silently degrade security checks
-- **Where:**
-  - `src/winbearable/audit.py`: `_check_local_admins` (`:206-257`), `_check_guest_account` (`:289-313`), `_check_listening_ports` (`:408-435`), `_check_open_shares` (`:466-495`).
-  - `src/winbearable/backends/system.py`: `_check_is_admin` (`:1097`), `_is_process_running_win32` (`:1508-1525`), `get_total_memory_bytes` (`:1712`), `_sys32_exe` (`:1733`).
+### [ ] T0-04 · P0 · `CODE` — Non-atomic `tee /etc/wsl.conf` and silent conflict bypass in WSL rollback
+- **Evidence:** `src/winbearable/engine/apply.py:269-289`.
 - **Problem:**
-  1. All of these functions call global `ctypes.windll.*` without setting `argtypes` or `restype`. On 64-bit Windows (LLP64), unconfigured `ctypes` arguments default to signed 32-bit `c_long` and return values default to `c_int` (truncating 64-bit `HANDLE` returns from `CreateToolhelp32Snapshot`).
-  2. `_check_local_admins` (`audit.py:245`) and `_check_open_shares` (`audit.py:482`) pass `0xFFFFFFFF` (`MAX_PREFERRED_LENGTH`) as a bare Python `int`, which overflows signed 32-bit `c_long` (`ctypes.ArgumentError: OverflowError: int too large to convert to C long`).
-  3. Because `_check_local_admins` (`:274-282`), `_check_guest_account` (`:331-332`), `_check_listening_ports` (`:444-452`), and `_check_open_shares` (`:519-523`) catch `except Exception:` and return `severity="info"`, the `OverflowError` is silently swallowed and reported as a non-issue.
-- **Fix:** Use `ctypes.WinDLL(..., use_last_error=True)` with explicit `argtypes` and `restype` declarations for every Win32 function in `audit.py` and `system.py`. Do not swallow `ctypes.ArgumentError` / `OverflowError` as `ObservationState.UNKNOWN` without surfacing the error in evidence.
-- **Done when:** Unit and Windows integration tests execute `_check_local_admins`, `_check_guest_account`, `_check_listening_ports`, and `_check_open_shares` against real Win32 DLLs on Windows without hitting the `except Exception:` fallback.
+  1. Line 283 restores `/etc/wsl.conf` via `tee /etc/wsl.conf` (`O_TRUNC` in place), even though `wsl/config.py` uses atomic temp-file + `mv -f`. A timeout/crash mid-rollback leaves `/etc/wsl.conf` truncated.
+  2. Lines 270-280 only check `restore_conflict` if `probe.returncode == 0`; if `cat /etc/wsl.conf` fails (`returncode != 0`), conflict detection is **silently skipped** and rollback overwrites `/etc/wsl.conf` anyway!
+- **Implementation:** Reuse `wsl.config.apply_distro_wsl_conf` (atomic temp-file + `mv -f`) for rollback restoration; if probing `/etc/wsl.conf` fails (and `not force_rollback`), record a `wsl_distro` probe error and refuse to overwrite instead of silently skipping conflict detection.
+- **Done when:** WSL rollback uses atomic temp-file swap and fails closed when `/etc/wsl.conf` cannot be probed for conflict verification.
 
-### P3-06 · P0 · `CODE` — `export_wsl_distro` reads multi-GiB `.tar` archives into RAM (`read_bytes()`) and interpolates unescaped `distro` into `Path.glob` deletion
-- **Where:** `src/winbearable/wsl.py:1078-1119` (`export_wsl_distro`).
-- **Problem:**
-  1. Line 1097 computes `sha256_hex = hashlib.sha256(output_file.read_bytes()).hexdigest()`. Real WSL2 distro `.tar` exports are 2 GiB to 50+ GiB; reading the entire file into a single `bytes` object causes `MemoryError` / host OOM.
-  2. Line 1104 globs `output_file.parent.glob(f"{distro}-*.tar")` without `glob.escape(distro)` or validating `distro` against path separators/metacharacters (`*`, `?`, `[...]`, `../`), then unlinks matched `.tar` and `.tar.sha256` files during `keep_last` pruning.
-- **Fix:** Compute SHA-256 via streaming `hashlib.file_digest(fh, "sha256").hexdigest()`, validate `distro` name (no path separators or glob metacharacters), and use `glob.escape(distro)`.
-- **Done when:** `export_wsl_distro` streams hashing without calling `read_bytes()`, and a distro name containing `*` or `..` is rejected before globbing.
+### [ ] T0-05 · P0 · `SECURITY` + `NEEDS-WINDOWS` — Over-the-shoulder UAC elevation as a different admin account has zero SID verification
+- **Evidence:** `src/winbearable/uac.py:296-360` (`run_elevated_wb`), `src/winbearable/cli/handlers.py` (no `--uac-caller-sid` flag or token SID check).
+- **Problem:** When a standard user triggers UAC and enters credentials for a separate Administrator account (Over-the-Shoulder elevation), the elevated child runs under the Admin's profile. `HKCU`, `%APPDATA%`, `%LOCALAPPDATA%`, `.wslconfig`, and `--scope user` winget tweaks silently mutate the Admin account instead of the invoking user.
+- **Implementation:** Query the invoking process user SID via Win32 `OpenProcessToken` + `GetTokenInformation(TokenUser)` + `ConvertSidToStringSidW` (with explicit `argtypes`/`restype`), pass `--uac-caller-sid <SID>` to the elevated child, and refuse user-scope (`HKCU`, `file_config`, `wslconfig`, user-scope winget/extensions) mutations when the elevated token SID differs.
+- **Done when:** Unit and Windows integration tests verify that a mismatched `--uac-caller-sid` refuses user-scope mutations while allowing machine-only tweaks, and that matching SIDs proceed normally.
 
-### P3-07 · P0 · `CODE` — `wb wsl firewall --apply` instantiates a bare `StateStore()`, bypassing injected `state_store` and `transaction_lock`
-- **Where:** `src/winbearable/cli.py:1256-1278` (`_run_cli_body`).
-- **Problem:** Line 600 sets `store = state_store or StateStore()`, but line 1270 calls `StateStore().append_run(...)` directly. This ignores the injected `state_store`, bypasses `store.transaction_lock()`, does not check `store.get_incomplete_runs()`, and mutates the host's live `%LOCALAPPDATA%\winbearable\state.json` during tests unless `winbearable.cli.StateStore` is monkeypatched (as `test_audit_coverage.py:291` had to do). Furthermore, line 1256 invokes `set_wsl_hyperv_firewall_setting` without checking `_require_windows_for_mutation` or `sys_backend.is_simulated`.
-- **Fix:** Use `store.transaction_lock()` and `store.append_run(...)` at `cli.py:1270`, guard mutation with `_require_windows_for_mutation`, and remove the `monkeypatch.setattr("winbearable.cli.StateStore", ...)` workaround in `test_audit_coverage.py`.
-- **Done when:** Running `run_cli(["wsl", "firewall", "--apply"], state_store=custom_store)` writes exclusively to `custom_store` under `transaction_lock`.
-
-### P3-08 · P0 · `CODE` — Winget SHA-256 drift is structurally guaranteed by CI rebuilding a non-deterministic PyInstaller zip on release
-- **Where:** `.github/workflows/ci.yml:319-365` (`publish-winget-asset`), `bin/build_winget.py:83-127`, `bin/bump_version.py:1-61`, `packaging/winget/hellqvio86.winbearable.installer.yaml:12-13`, `src/tests/test_catalog_lint.py:116-117`.
-- **Problem:**
-  1. `packaging/winget/hellqvio86.winbearable.installer.yaml` in `v0.12.2` and `v0.13.0` still contains `InstallerSha256: F8147A672E30A49644960C69994FFCB2BA6A9F8B56B1E91C107DD256F8A9C705` from `v0.12.1` (because `test_catalog_lint.py:117` only blacklisted the literal `0.9.1` hash).
-  2. When a GitHub Release is published, `publish-winget-asset` in `ci.yml` runs `python bin/build_winget.py` on `windows-latest` and uploads the newly built zip to the release. Because PyInstaller embeds build timestamps and `build_winget.py:122` (`zf.write`) embeds filesystem `mtime`s, the CI-built zip **never** matches any pre-committed `InstallerSha256` in `packaging/winget/hellqvio86.winbearable.installer.yaml`.
-  3. `bin/bump_version.py` only updates `src/winbearable/const.py`, leaving `packaging/winget/*.yaml` and `SECURITY.md` out of sync on `make version`.
-- **Fix:** Normalize `ZipInfo.date_time = (2026, 1, 1, 0, 0, 0)` in `bin/build_winget.py`; update `bin/bump_version.py` to also update `SECURITY.md` and `packaging/winget/*.yaml`; and in `publish-winget-asset` (or `bin/publish_winget.py`), compute the SHA-256 of the actual uploaded release asset and verify/update the manifest hash.
-- **Done when:** `packaging/winget/hellqvio86.winbearable.installer.yaml` matches the actual SHA-256 of the `v0.13.0` release asset on GitHub, and `bin/bump_version.py` updates all versioned files together.
+### [ ] T0-06 · P0 · `SETUP` — Stale `InstallerSha256` (`v0.12.1`) still ships in Winget manifest on `v0.16.0`
+- **Evidence:** `packaging/winget/hellqvio86.winbearable.installer.yaml:4,12-13` (`PackageVersion: 0.16.0`, `InstallerSha256: F8147A672E30A49644960C69994FFCB2BA6A9F8B56B1E91C107DD256F8A9C705`), `src/tests/test_catalog_lint.py:118` (only blacklists an old `0.9.1` hash `7AA2A1...`).
+- **Problem:** `bin/bump_version.py` bumps `PackageVersion` and `InstallerUrl` but leaves `InstallerSha256` untouched, and `test_catalog_lint.py` never detects that the hash didn't change across releases. Anyone installing via the repo's Winget manifest fails hash verification.
+- **Implementation:** Either remove the hardcoded stale hash in favor of generating/updating `packaging/winget/*.installer.yaml` strictly from the verified release zip in `bin/publish_winget.py` / `publish-winget-asset`, or track/assert hash-to-version consistency and update `test_catalog_lint.py` to reject known-stale historical hashes.
+- **Done when:** `packaging/winget/hellqvio86.winbearable.installer.yaml` cannot ship with a prior release's SHA-256 and `publish-winget-asset` validates the uploaded zip's digest against the manifest.
 
 ---
 
-## 3. P1 — High-Severity Defects
+## Priority 1 — Architecture, Error Handling & Windows Boundary Correctness
 
-### P3-09 · P1 · `CODE` — A single genuine `restore_conflict` permanently deadlocks `wb recover`, `wb apply`, and `wb rollback` unless `--force` clobbers the user's change
-- **Where:** `src/winbearable/engine.py:823-844` (`_compensate_run_record`), `engine.py:1749-1796` (`recover_incomplete_runs`), `engine.py:1344-1350` (`_apply_profile_locked`).
-- **Problem:** When item A is modified externally after `apply`, `rollback_runs` restores all non-conflicting items B..Z and transitions the run to `TransactionState.FAILED`. Subsequent `wb recover --apply` skips B..Z (via `matches_pre`), hits the same `restore_conflict` on A, and transitions the run back to `FAILED`. Because `FAILED` is in `get_incomplete_runs()`, the user is permanently locked out of `wb apply` and `wb rollback` unless they pass `--force` (which overwrites their manual edit to A).
-  Additionally, conflict detection only exists for registry values and files—not for registry keys, services, tasks, features, git config, fsutil, powercfg, or wevtutil.
-- **Fix:** Introduce `TransactionState.PARTIALLY_ROLLED_BACK` (or an explicit `--keep-conflicts` / conflict-resolution path in `wb recover`) when all non-conflicting items have reached their pre-apply state and only `restore_conflict` items remain, so unrelated future `wb apply` runs are not deadlocked and the user is not forced to overwrite their manual edit to A.
-- **Done when:** After a single external edit to A causes `rollback` to restore B..Z and report a conflict on A, the user can resolve/acknowledge A in `wb recover` without overwriting A's current value.
+### [ ] T1-01 · P1 · `CODE` — Complete the `OperationAdapter` refactor (remove remaining engine switchboards and adapter stubs)
+- **Evidence:**
+  - `src/winbearable/engine/apply.py:122-148`: 13-branch `if isinstance(snap, ...)` dispatch ladder in `_collect_pre_apply_snapshots()`.
+  - `src/winbearable/engine/apply.py:201-216`: hand-listed 14-tuple `adapter_batches` + inline winget/vscode/wsl rollback loops in `compensate_run_record()`.
+  - `src/winbearable/engine/apply.py:338-354`: hardcoded `ordered_kinds` tuple and `FileConfigOperationAdapter` special-case in `execute_tweak_mutations()`.
+  - `OperationAdapter.verify()` has **0 callers** anywhere in `src/winbearable/`.
+  - `WingetOperationAdapter.snapshot()` / `.compensate()` and `HypervFirewallOperationAdapter.inspect/snapshot/apply/verify` are empty stubs (`return []`).
+- **Problem:** Adding a new operation kind still requires editing `models/snapshots.py`, `operations/`, AND 3 places in `engine/apply.py`. `verify()` is dead ceremony.
+- **Implementation:**
+  1. Give each adapter a `snapshot_field: str` (or polymorphic snapshot container on `RunRecord`) so `_collect_pre_apply_snapshots()` and `compensate_run_record()` loop generically over `OPERATION_ADAPTERS` with zero `isinstance` ladders.
+  2. Call `adapter.verify(tweak, registry, system)` in `execute_tweak_mutations()` (or fold per-adapter verification into `detect_tweak`).
+  3. Move winget/vscode rollback into `WingetOperationAdapter.compensate()`.
+  4. Deduplicate `_now_iso()` and `_raise_sys_err()` (currently copy-pasted across `registry_adapter.py`, `system_adapters.py`, `package_and_file_adapters.py`) into `operations/base.py`.
+- **Done when:** `engine/apply.py` has zero `isinstance(..., *Snapshot)` branches and zero hardcoded `ordered_kinds` / `adapter_batches` lists; `adapter.verify()` is called in production apply flow.
 
-### P3-10 · P1 · `CODE` — WSL `apply` and `rollback` bugs: untracked `.wslconfig` deleted on rollback, and uncompensated partial WSL state on `PermissionError`
-- **Where:** `src/winbearable/engine.py:970-980` (`_compensate_run_record`), `engine.py:1534-1623` (`_apply_profile_locked`).
-- **Problems:**
-  1. **Deleting user's `.wslconfig` when `.wslconfig` was not modified by the run (`engine.py:1549-1550, 970-974`):** `_apply_profile_locked` sets `wsl_target_path = str(prepared_wsl.target_wslconfig)` and `wslconfig_existed = prepared_wsl.target_wslconfig.is_file()` unconditionally even when `prepared_wsl.wslconfig_changed` is `False` (e.g., only registry tweaks changed while `.wslconfig` did not exist). If the user later creates `.wslconfig` and runs `wb rollback --apply`, `_compensate_run_record` sees `wslconfig_existed is False` and unlinks the user's `.wslconfig`!
-  2. **Uncompensated partial WSL state on `PermissionError` (`engine.py:1602-1622`):**
-     - When `wslconfig_path is not None` (`:1603-1610`), `_compensate_run_record` runs, but `applied_ids.clear()` is missing before `_make_record(final_st, ...)` (so the `ROLLED_BACK` record in `state.json` still lists `applied_tweaks = applied_ids`), and the exception is re-raised instead of returning `ApplySummary`.
-     - When `wslconfig_path is None` (`:1611-1622`) and `PermissionError` occurs *after* `apply_wslconfig_target` (`:1565`) or a distro's `apply_distro_wsl_conf` (`:1571`) already mutated the disk, lines 1612-1622 mark the run `COMMITTED` (or `ROLLED_BACK` without calling `_compensate_run_record`!), leaving uncompensated partial WSL changes on disk.
-- **Fix:** Only record `wsl_target_path` / `wslconfig_existed` on `RunRecord` when `prepared_wsl.wslconfig_changed` is `True`; clear `applied_ids` (and move them to `rolled_back_ids`) when compensating on `PermissionError`; and always compensate any already-executed WSL mutations if `PermissionError` occurs after `apply_wslconfig_target` has started.
-- **Done when:** Tests cover: (a) applying a profile where `wslconfig_changed=False` and `.wslconfig` is absent, creating `.wslconfig` manually, and rolling back preserves `.wslconfig`; (b) `PermissionError` during distro apply compensates `.wslconfig` and clears `applied_ids`.
+### [ ] T1-02 · P1 · `CODE` — Wire typed `WinbearableError` taxonomy end-to-end into engine, rollback, and CLI JSON output
+- **Evidence:** `src/winbearable/models/errors.py:49-105` (7 of 10 subclasses have 0 `raise` sites in `src/winbearable/`), `src/winbearable/engine/rollback.py:158` (`raise RuntimeError(err_msg)`), `src/winbearable/cli/handlers.py:1068,1141`.
+- **Problem:** The error taxonomy exists only as class definitions. `rollback_runs` still raises generic `RuntimeError`, `execute_tweak_mutations` wraps everything into `TweakMutationError`, and CLI error responses do not emit `WinbearableError.to_dict()` or distinct exit codes for conflict/drift/permission errors.
+- **Implementation:**
+  1. Raise `RollbackConflictError` when rollback fails solely due to `restore_conflict`, `RollbackFailureError` for other rollback failures, `VerificationFailedError` on post-apply verification failure, `OperationTimeoutError` on timeouts, and `PermissionDeniedError` on access denied.
+  2. Catch `WinbearableError` in `cli/handlers.py`, emit `err.to_dict()` in `--json` mode, and map categories to documented stable exit codes.
+- **Done when:** Every subclass in `models/errors.py` is either raised by a real code path with tests or deleted if unnecessary; `wb rollback --apply --json` on conflict outputs structured `{"error_type": "RollbackConflictError", "category": "conflict", ...}`.
 
-### P3-11 · P1 · `CODE` + `NEEDS-WINDOWS` — UAC elevation security & usability defects: CWD `wb.exe` hijacking, broken relative CLI paths under `System32`, ancestor junction bypass, and cross-user SID mismatch
-- **Where:** `src/winbearable/uac.py:139-290` (`resolve_elevation_target`, `_is_reparse_or_symlink`, `write_uac_output_safe`, `run_elevated_wb`), `src/winbearable/cli.py:546-552, 891-914`.
-- **Problems:**
-  1. **CWD binary hijacking (`uac.py:157-161`):** `resolve_elevation_target` checks `argv0_path = Path(raw_argv0); if argv0_path.name.lower() in {"wb.exe", "winbearable.exe"} and argv0_path.is_file(): return str(argv0_path.resolve())`. If `sys.argv[0]` is a relative `"wb.exe"`, `argv0_path.is_file()` checks the current working directory (CWD) and elevates a rogue `./wb.exe` as Administrator.
-  2. **Relative CLI paths break on elevation (`cli.py:546-552`, `uac.py:247`):** `run_elevated_wb` sets `sei.lpDirectory = C:\Windows\System32` (when `cwd=None`), but `_relay_elevated_uac` forwards `raw_argv` without resolving relative paths (`--profile ./my.toml`, `--wslconfig ./.wslconfig`, `migrate config ./old.toml`), which then resolve against `C:\Windows\System32` and fail.
-  3. **Ancestor junction / TOCTOU / OTS temp dir (`uac.py:184-236`):** `_is_reparse_or_symlink` only checks `out_path` and `out_path.parent` (not ancestor directories in `out_path.parents`), does not verify the opened file handle via `GetFinalPathNameByHandleW` after `os.open`, and fails on Over-the-Shoulder (separate Admin account) elevation where the standard user's `%LOCALAPPDATA%\Temp\wb-uac-*` is either inaccessible to the Admin or `uac-output.txt` is created with an Admin-only DACL that breaks `TemporaryDirectory` cleanup.
-  4. **Cross-user SID mismatch (`N-05`):** Elevating as a different Admin account silently applies `HKCU`, `%USERPROFILE%`, `.wslconfig`, and winget `--scope user` tweaks to the Admin's profile instead of the invoking user's.
-- **Fix:** Require `argv0_path.is_absolute()` (or resolve relative to `Path(sys.executable).resolve().parent`); resolve relative file path flags in `raw_argv` to absolute paths before calling `run_elevated_wb`; check all `out_path.parents` for reparse points and verify the opened handle path; pass `--uac-caller-sid <SID>` from parent to child and refuse user-scope mutations when the elevated token's user SID differs.
-- **Done when:** Unit tests cover all 4 cases (relative `argv0="wb.exe"` in CWD rejected; relative `--profile ./p.toml` resolved before elevation; ancestor reparse point rejected; mismatched caller SID refused for HKCU/user tweaks).
+### [ ] T1-03 · P1 · `CODE` — Unify CLI and TUI onto `run_profile_command()`
+- **Evidence:** `src/winbearable/engine/apply.py:923` (`run_profile_command`), `src/winbearable/tui.py:60` (calls it), `src/winbearable/cli/handlers.py` (never calls it; calls `apply_profile` directly with separate validation logic).
+- **Problem:** `Q2-07` was marked `[x]` even though only `tui.py` was wired to `run_profile_command()`. CLI and TUI still have separate pre-flight validation paths.
+- **Implementation:** Route `cli/handlers.py` (`plan` and `apply`) through `run_profile_command()` (and remove ad-hoc `StateStore()` default fallback from `engine/apply.py:942` — keep default `StateStore()` strictly at the CLI/TUI composition root).
+- **Done when:** Both `cli/handlers.py` and `tui.py` invoke `run_profile_command()`, and a parity test runs the same profile (including managed-device, high-risk, and irreversible cases) through both entrypoints and asserts identical outcomes.
 
-### P3-12 · P1 · `CODE` — `_communicate_bounded` thread race on timeout, ASCII trailer appended to raw UTF-16LE bytes, and false UTF-16LE NUL heuristic
-- **Where:** `src/winbearable/backends/system.py:1140-1290` (`_decode_cmd_bytes`, `_communicate_bounded`, `_run_native_cmd`).
-- **Problems:**
-  1. **Concurrent pipe read/close race on timeout (`system.py:1213-1217, 1285`):** When `proc.wait(timeout=timeout)` raises `subprocess.TimeoutExpired`, daemon threads `t_out` and `t_err` are still blocked in `stream.read(16384)` on `proc.stdout`/`proc.stderr`. In `_run_native_cmd` (`:1285`), the `except subprocess.TimeoutExpired:` handler calls `proc.communicate(timeout=2.0)` on the main thread, reading and closing the exact same `proc.stdout`/`proc.stderr` streams concurrently with `t_out`/`t_err` (`ValueError: I/O operation on closed file` / deadlock).
-  2. **ASCII truncation suffix corrupts UTF-16LE buffers (`system.py:1222-1225`):** `_communicate_bounded` appends ASCII `b"\n[... truncated ... bytes ...]"` directly to raw `out_buf`/`err_buf` *before* `_decode_cmd_bytes` decodes UTF-16LE `wsl.exe` output, turning the trailer into garbled CJK code units (and odd byte counts).
-  3. **False UTF-16LE detection on Linux stdout (`system.py:1147-1148`):** `if exe_name == "wsl.exe" and (b"\x00" in raw or ...)` decodes the entire buffer as `utf-16-le` if a Linux command run via `wsl.exe -d <distro> -- ...` emits a single NUL byte in UTF-8 stdout.
-- **Fix:** In `_run_native_cmd`'s `TimeoutExpired` block, call `proc.kill()` and `proc.wait(timeout=2.0)` (never `proc.communicate()`); return `(bytes(out_buf), bytes(err_buf), out_truncated, err_truncated)` from `_communicate_bounded` and append the truncation notice *after* `_decode_cmd_bytes`; set `WSL_UTF8=1` in `child_env` for `wsl.exe` and only use UTF-16LE decoding when BOM (`\xff\xfe`) is present or every second ASCII byte is `\x00`.
-- **Done when:** Timeout test with active stdout/stderr reader threads completes without `proc.communicate()` race; UTF-16LE truncation produces valid readable text; UTF-8 Linux output with a single NUL byte is not decoded as UTF-16LE.
+### [ ] T1-04 · P1 · `CODE` — Eliminate remaining 6 `sys.modules` monkeypatch backdoors
+- **Evidence:**
+  - `src/winbearable/backends/system_native.py:352`
+  - `src/winbearable/cli/handlers.py:93`
+  - `src/winbearable/profiles/loader.py:35`
+  - `src/winbearable/wsl/audit.py:334`
+  - `src/winbearable/wsl/config.py:142,298`
+- **Problem:** Production modules still probe `sys.modules.get("winbearable.<pkg>")` to honor legacy test monkeypatches, coupling runtime behavior to import order and hiding dependencies.
+- **Implementation:** Replace all 6 lookups with explicit dependency injection parameters (with defaults at composition roots) and update the tests that monkeypatch those facades. Add an AST lint check in `test_catalog_lint.py` forbidding `sys.modules` lookups in `src/winbearable/`.
+- **Done when:** `git grep "sys.modules" src/winbearable/` returns 0 hits and all tests pass.
 
-### P3-13 · P1 · `CODE` — `apply_file_spec` and `restore_file_snapshot` call `wsl._atomic_write_text` instead of `operations._atomic_write_bytes`, losing `ReplaceFileW` ACL preservation and leaving untracked `.bak` files
-- **Where:** `src/winbearable/operations.py:436-472` (`_atomic_write_bytes`), `operations.py:500-536` (`apply_file_spec`, `restore_file_snapshot`).
-- **Problem:** `_atomic_write_bytes` was updated in `0.12.2` to use Win32 `ReplaceFileW` (`REPLACEFILE_WRITE_THROUGH`) so target file ACLs are preserved. However, `apply_file_spec` (`:522`) and the text fallback in `restore_file_snapshot` (`:536`) still call `_atomic_write_text(target, ...)` imported from `wsl.py` with default `create_backup=True`!
-  - `_atomic_write_text` uses `os.replace`, clobbering custom file ACLs on Windows.
-  - `create_backup=True` writes an untracked `<file>.bak` (e.g., `%APPDATA%\Code\User\settings.json.bak`) directly into the user's app config directory that is never cleaned up on rollback.
-- **Fix:** Replace `_atomic_write_text(target, ...)` in `apply_file_spec` and `restore_file_snapshot` with `_atomic_write_bytes(target, content.encode("utf-8"))`. Also update `wsl._atomic_write_text` to use `ReplaceFileW` on existing Windows files.
-- **Done when:** Applying and rolling back a `FileSpec` calls `_atomic_write_bytes` (`ReplaceFileW`), preserves target file ACLs, and leaves zero `.bak` files in the target directory.
+### [ ] T1-05 · P1 · `SECURITY` — Replace global `ctypes.windll` with `ctypes.WinDLL(..., use_last_error=True)` and stop swallowing Win32 errors in `audit/win32_checks.py`
+- **Evidence:**
+  - 47 `windll` hits across `src/winbearable/audit/win32_checks.py:27,140,287,363` and `src/winbearable/backends/system_native.py:73,106,542,757,782,1013`.
+  - `src/winbearable/audit/win32_checks.py:248` (`except Exception: pass` in `check_guest_account` silently falls back to `LimitBlankPasswordUse=1` -> `ObservationState.DISABLED`).
+  - `src/winbearable/backends/system_native.py:113,574,766,1047` (bare `except Exception:` blocks).
+- **Problem:** `ctypes.windll` caches global DLL instances (mutating `argtypes`/`restype` globally) and does not capture `GetLastError()` safely via `ctypes.get_last_error()`. Bare `except Exception: pass` in `check_guest_account` hides real Win32 API errors behind an optimistic `DISABLED` finding.
+- **Implementation:**
+  1. Centralize typed `ctypes.WinDLL(..., use_last_error=True)` wrappers in a single `src/winbearable/backends/win32_ctypes.py` module (shared by `backends/` and `audit/`).
+  2. In `check_guest_account`, record the Win32 exception in evidence and return `ObservationState.UNKNOWN` (never `DISABLED`) when `NetUserGetInfo` fails unexpectedly.
+  3. Narrow `except Exception:` blocks in `system_native.py` to `(OSError, AttributeError, ValueError)`.
+- **Done when:** `git grep "ctypes.windll" src/winbearable/` returns 0 hits, `check_guest_account` returns `ObservationState.UNKNOWN` on Win32 API failure, and Windows integration tests pass.
 
-### P3-14 · P1 · `CODE` — Pre-apply backup failures (`backup_acl`, `backup_auditpol`, `export_firewall_policy`) are ignored, and `_compensate_run_record` silently skips missing `.acl` backups
-- **Where:** `src/winbearable/engine.py:727-739, 753-765, 787-792` (`_collect_pre_apply_snapshots`), `engine.py:927-933` (`_compensate_run_record`).
-- **Problem:**
-  1. In `_collect_pre_apply_snapshots`, the boolean return values of `system.backup_auditpol(Path(bak_csv))` (`:729`), `system.export_firewall_policy(Path(wfw_path))` (`:755`), and `system.backup_acl(ic_spec.path_template, Path(acl_bak))` (`:791`) are completely ignored. If `icacls /save` fails and produces no `.acl` file, `_collect_pre_apply_snapshots` still records `backup_acl_path=acl_bak` and proceeds to restrict the directory ACL.
-  2. In `_compensate_run_record` (`:927-933`), if `ic_snap.backup_acl_path` is `None` or `not Path(ic_snap.backup_acl_path).is_file()`, the condition short-circuits to `False` and **silently skips restoring the ACL without appending to `errors`**, marking the run `ROLLED_BACK` while leaving the mutated ACL in place.
-- **Fix:** Check the return values of `backup_acl` (aborting pre-apply snapshot collection if `backup_acl` fails on an existing path), only record `backup_csv_path` / `export_wfw_path` when the export succeeded and the file exists, and append an error in `_compensate_run_record` if an `IcaclsSnapshot` has a missing backup file.
-- **Done when:** A failed `backup_acl` aborts before mutating the directory ACL, and a missing `.acl` file during rollback records an error in `_compensate_run_record`.
+### [ ] T1-06 · P1 · `CODE` — Split oversized production modules exceeding 800 LOC
+- **Evidence:**
+  - `src/winbearable/operations/system_adapters.py`: **1,563 LOC** (almost 2x the 800-LOC ceiling!)
+  - `src/winbearable/backends/system_native.py`: **1,206 LOC**
+  - `src/winbearable/cli/handlers.py`: **1,153 LOC**
+  - `src/winbearable/engine/apply.py`: **959 LOC**
+- **Problem:** Creating `system_adapters.py` (1,563 LOC) reintroduced a monolith larger than the old `operations.py` (958 LOC). `system_native.py` and `cli/handlers.py` also remain > 1,100 LOC.
+- **Implementation:**
+  - Split `operations/system_adapters.py` into `operations/service_task_feature_adapters.py`, `operations/security_policy_adapters.py` (auditpol, wevtutil, firewall, icacls), and `operations/env_adapters.py` (fsutil, powercfg, git, process, onedrive).
+  - Split `backends/system_native.py` into `system_native_cmd.py` (bounded subprocess execution & decoding) and `system_native.py` (high-level wrappers).
+  - Split `cli/handlers.py` into `cli/handlers_core.py` (`doctor`, `status/plan/apply`, `rollback/recover`) and `cli/handlers_tools.py` (`init`, `list/show`, `migrate`, `wsl`, `tui`).
+  - Finishing `T1-01` will drop `engine/apply.py` below 600 LOC.
+- **Done when:** Every `.py` module in `src/winbearable/` is < 750 LOC, enforced by a soft/allowlisted AST/LOC check in `test_catalog_lint.py`.
 
-### P3-15 · P1 · `CODE` — `restore_snapshot` leaves newly created registry keys behind (`key_existed=False` ignored), and `WinregBackend._enum_key_values` / `delete_key` swallow `PermissionError`
-- **Where:** `src/winbearable/backends/registry.py:259-275` (`InMemoryRegistryBackend.restore_snapshot`), `registry.py:537-602, 632-656` (`WinregBackend.restore_snapshot`, `_enum_key_values`, `delete_key`).
-- **Problems:**
-  1. `RegistryValueSnapshot` records `key_existed: bool`, but `restore_snapshot` only calls `delete_value(...)` when `value_existed=False`, ignoring `key_existed=False`. Empty policy/service subkeys created during `apply` remain in the registry after `rollback` (affecting components and audit checks that test `key_exists`).
-  2. `WinregBackend._enum_key_values` (`:600`) and `delete_key` (`:655`) catch `except OSError:` without re-raising `PermissionError` (`winerror == 5`), so `snapshot_key` silently snapshots unreadable protected subkeys as empty (`values=()`).
-  3. `WinregBackend._enum_key_values` (`:585`) maps unknown registry types (`REG_NONE`, `REG_RESOURCE_LIST`, etc.) to `REG_SZ` while keeping `bytes` data, which crashes `SetValueEx` on restore.
-- **Fix:** In `restore_snapshot`, when `not snapshot.value_existed and not snapshot.key_existed`, delete the key if it has no remaining values or subkeys; re-raise `PermissionError` (`winerror == 5`) in `_enum_key_values` and `delete_key`.
-- **Done when:** Rolling back a value that created a new subkey removes the empty subkey; `PermissionError` in `_enum_key_values` and `delete_key` propagates instead of returning `[]` / `False`.
+### [ ] T1-07 · P1 · `CODE` — Remove all 12 inline imports from `src/winbearable/` and enforce via AST lint
+- **Evidence:** `src/winbearable/` has 12 inline imports across 8 files:
+  - `backends/system_native.py:799,814,851`
+  - `state.py:162,176`
+  - `engine/rollback.py:26,60`
+  - `wsl/audit.py:58`
+  - `profiles/generator.py:144`
+  - `cli/handlers.py:548`
+  - `backends/registry_wsl.py:104`
+  - `audit/win32_checks.py:456`
+- **Problem:** Directly violates `AGENTS.md` ("Imports at the top of the file").
+- **Implementation:** Move all 12 inline imports to module top-level (except genuine platform/optional guards, explicitly allowlisted if any) and add an AST lint test in `test_catalog_lint.py` rejecting new inline imports in `src/winbearable/`.
+- **Done when:** Zero unallowlisted inline imports remain in `src/winbearable/` and the AST lint test passes.
 
-### P3-16 · P1 · `CODE` — `WingetOperationAdapter.inspect` ignores missing `vscode_extensions` when the winget package is already installed, and `ServiceOperationAdapter.inspect` marks `"unreadable"` services as `APPLIED`
-- **Where:** `src/winbearable/operations.py:64-75` (`ServiceOperationAdapter.inspect`), `operations.py:202-221` (`WingetOperationAdapter.inspect`), `src/winbearable/engine.py:460-470, 1121`.
-- **Problems:**
-  1. In `WingetOperationAdapter.inspect` (`operations.py:213-218`), `drifted.append(...)` is inside `if not installed:`. When `Microsoft.VisualStudioCode` is already installed (`installed=True`) but `ms-vscode-remote.remote-wsl` is missing (`ext_installed=False`), `drifted` is `[]`, so `apps.install_vscode` reports `TweakStatus.APPLIED` and never installs the missing extension.
-  2. In `_execute_tweak_mutations` (`engine.py:1121`), `ext_skipped_elevated = False` is inside `for winget_spec in tweak.winget_specs:`, resetting the flag on subsequent specs.
-  3. In `ServiceOperationAdapter.inspect` (`operations.py:64-75`), when `svc_state == "unreadable"`, it appends `PlannedOperation(action="skip_unreadable")` and `continue`s without adding to `unverified` or `drifted`, causing `detect_tweak` (`engine.py:460-470`) to report `TweakStatus.APPLIED`.
-- **Fix:** Append to `drifted` whenever any `vscode_extension` is not installed; move `ext_skipped_elevated = False` before `for winget_spec in tweak.winget_specs:`; and append to `unverified` when `svc_state == "unreadable"` in `ServiceOperationAdapter.inspect`.
-- **Done when:** `detect_tweak` returns `DRIFTED` when VS Code is installed without `ms-vscode-remote.remote-wsl`, and returns `ERROR` (`unverified`) when a service state is `"unreadable"`.
+### [ ] T1-08 · P1 · `CODE` — Resolve dead `cis_control()` / `0/0` CIS score in `wb doctor`
+- **Evidence:** `src/winbearable/tweaks/helpers.py:9` (`cis_control`), `src/winbearable/tweaks/catalog.py:11,69`, `src/winbearable/engine/scoring.py:71-106`.
+- **Problem:** `cis_control()` is exported but never called by any tweak in `tweaks/categories/`, so `wb doctor` permanently prints `cis_passed: 0, cis_total: 0` and `test_catalog_lint.py:94-98` is dead code.
+- **Implementation:** Either populate verified `cis_mapping=cis_control(...)` entries for tweaks whose CIS v3.0.0 controls have been verified against the benchmark text (per `AGENTS.md` Rule #11: never fabricate CIS numbers), OR remove the dead `cis_control` / `cis_controls` scaffolding cleanly.
+- **Done when:** `wb doctor --json` either reports non-zero verified CIS controls with test assertions, or dead CIS scaffolding is removed completely.
 
-### P3-17 · P1 · `CODE` — `profiles.py` inheritance & TOML serializer defects: `include` drops `params`/`packages`/`wsl`, diamond DAGs raise false circular errors, `_chain` double-appends, and `_dict_to_toml` emits invalid TOML for `[wsl.distro.<name>]`
-- **Where:** `src/winbearable/profiles.py:456-551` (`load_profile`), `profiles.py:608-701` (`_toml_scalar`, `_dict_to_toml`, `migrate_profile_file`).
-- **Problems:**
-  1. **`include` drops everything except `tweaks` (`:493-501`):** `load_profile` only merges `inc_profile.tweaks`, silently discarding `inc_profile.params`, `inc_profile.packages`, `inc_profile.packages_remove`, `inc_profile.wsl_distros`, and transitive `inc_profile.includes`.
-  2. **Diamond DAG false circular inheritance (`:469, 487, 499`):** `visited` is mutated in-place down the `extends` chain (`_visited=visited`) and then copied into `include` (`_visited=set(visited)`). If profile A `extends = "owner"` (adding `owner` and `user-only` to `visited`) and `include = ["custom"]` where `custom` also `extends = "user-only"`, `load_profile` falsely raises `Circular profile inheritance detected`.
-  3. **Double `_chain` append (`:463, 487, 499`):** `load_profile` appends to `_chain` both at function entry (`:463`) and at the recursive call site (`:487, 499`), adding 2 entries per hop (halving `MAX_PROFILE_INHERITANCE_DEPTH` from 8 to 4 and duplicating every node in error messages).
-  4. **`_dict_to_toml` invalid TOML on 2-level nested dicts (`:628-650`):** For `[wsl.distro."Ubuntu-24.04"]` (`{"wsl": {"distro": {"Ubuntu-24.04": {"default_user": "dev"}}}}`), `_dict_to_toml` only unrolls one level of sub-tables and passes the inner dict to `_toml_scalar`, emitting `Ubuntu-24.04 = {"default_user": "dev"}` (invalid TOML).
-- **Fix:** Pass `visited | {profile_path}` (per-path ancestor set, not a cross-branch accumulated set) and append to `_chain` once per hop; merge `params`, `packages`, `packages_remove`, `wsl_distros`, and `includes` from `inc_profile`; recursively serialize nested tables in `_dict_to_toml` and validate with `tomllib.loads` in `migrate_profile_file` before atomically writing.
-- **Done when:** Tests cover diamond inheritance (`A -> extends B -> user-only` and `A -> include C -> extends user-only`), `include` with `[params]`, depth-8 chain, and `migrate_profile_file(..., output_format="toml")` with `[wsl.distro."Ubuntu-24.04"]`.
-
-### P3-18 · P1 · `CODE` — `wb recover --apply` exits `0` (`EXIT_SUCCESS`) when recovery fails, and `--only`/`--skip` reject deprecated tweak ID aliases
-- **Where:** `src/winbearable/cli.py:185-194` (`_parse_id_list`), `cli.py:953-1006` (`recover` handler).
-- **Problems:**
-  1. When `recover_incomplete_runs` encounters compensation errors, it sets `rec.state = TransactionState.FAILED` (`engine.py:1791`) and returns `recovered`. `cli.py:954-1006` prints `"Recovered run ... (state=failed)"` and unconditionally returns `0` (`EXIT_SUCCESS`) instead of `EXIT_ERROR` (`1`).
-  2. `_parse_id_list` (`cli.py:188`) checks `if tid not in TWEAK_CATALOG:` without calling `resolve_tweak_id(tid)`, raising `KeyError` when `--only` or `--skip` is given a deprecated alias (`hardening.disable_guest_and_blank_passwords`).
-- **Fix:** Return `EXIT_ERROR` (`1`) from `wb recover --apply` when any record in `reverted` has `rec.state == TransactionState.FAILED`; resolve each ID via `resolve_tweak_id` in `_parse_id_list`.
-- **Done when:** `run_cli(["recover", "--apply"])` returns `1` when compensation fails, and `--only hardening.disable_guest_and_blank_passwords` resolves to `hardening.restrict_blank_passwords`.
-
-### P3-19 · P1 · `CODE` — `wb tui` cannot apply any profile with `irreversible=True` tweaks (`paranoid`), and mismatches `allow_managed` between evaluation and apply
-- **Where:** `src/winbearable/tui.py:60-86, 102-119, 209-275, 322`.
-- **Problems:**
-  1. `_action_request_apply` (`:265`) and `_apply_worker` (`:228`) never check `item.irreversible` or pass `allow_irreversible=True` to `apply_from_tui` (`:60`). Selecting `paranoid` (or any profile with `onedrive.uninstall`, `bloat.remove_*`, or `ai.remove_copilot_app`) in `wb tui` always fails with `IrreversibleActionError` with no way for the user to confirm in `ConfirmApplyScreen`.
-  2. `launch_tui` (`:322`) and `_load_worker` (`:209`) call `evaluate_profile` (`allow_managed=True` by default), showing machine-scope tweaks as `DRIFTED` on managed devices, while `apply_from_tui` calls `apply_profile` (`allow_managed=False` by default), skipping them all and then re-displaying them as `DRIFTED`.
-  3. `format_apply_status` (`:73-86`) ignores `summary.failed_ids` and `summary.rolled_back_ids`, reporting a failed/rolled-back apply as `"No drifted tweaks applied"`.
-- **Fix:** Surface irreversible tweaks in `ConfirmApplyScreen` and pass `allow_irreversible` through `_apply_worker` -> `apply_from_tui`; align `allow_managed=False` in TUI `evaluate_profile` calls; include `failed_ids` / `rolled_back_ids` in `format_apply_status`.
-- **Done when:** Unit tests for `tui.py` cover `apply_from_tui` with irreversible tweaks, `format_apply_status` with `failed_ids`, and consistent `allow_managed` behavior.
-
-### P3-20 · P1 · `CODE` + `NEEDS-WINDOWS` — Audit false positives, false negatives, and locale violations in `audit.py`
-- **Where:** `src/winbearable/audit.py`.
-- **Problems:**
-  1. **Locale violation in `_check_guest_account` (`:307`):** Calls `netapi32.NetUserGetInfo(None, "Guest", 1, ...)` with the hardcoded English string `"Guest"`. On non-English Windows (German `"Gast"`, Swedish `"Gäst"`, French `"Invité"`), `NetUserGetInfo` returns `2221` (`NERR_UserNotFound`) and falls back to `LimitBlankPasswordUse`, missing an enabled Guest account.
-  2. **Single-try buffer allocation in `_check_listening_ports` (`:413-420`):** Calls `GetExtendedTcpTable`/`GetExtendedUdpTable` once to size `sz` and once to fill `buf`; if a socket opens in between (`ERROR_INSUFFICIENT_BUFFER = 122`), `_query_table` returns `0, []` (0 listening ports).
-  3. **Always-`ENABLED` false positives in `_check_autostart_inventory` (`:526-543`) and `_check_defender_exclusions` (`:677-700`):** Both checks only call `registry.key_exists(...)` on `Run` and `Windows Defender\Exclusions\{Paths,Processes,Extensions}`. Those keys exist by default on every clean Windows 11 install even when empty (0 values), so both checks always report `ObservationState.ENABLED`.
-  4. **Unexpanded `%ProgramFiles%` and double-backslash raw string bug in `_check_unquoted_service_paths` (`:565-575`):** Does not expand `%ProgramFiles%` / `%CommonProgramFiles%` before regex matching (missing `REG_EXPAND_SZ` paths that expand to `C:\Program Files\...`), and `r"\??\\"` on line 568 has two trailing backslashes so `\??\C:\...` is not stripped.
-  5. **False passing `_check_firewall_default_actions` (`:147-192`):** Only fails when `en_v == 0 or inb_v == 0`; when the registry values are absent (`None`), it reports `ObservationState.ENABLED` with `HIGH` confidence, and never checks `HKLM\SOFTWARE\Policies\Microsoft\WindowsFirewall`.
-- **Fix:** Resolve Guest RID `-501` via `LookupAccountSidW` (or check `SAM\Domains\Account\Users\000001F5`); retry `_query_table` on `ERROR_INSUFFICIENT_BUFFER`; enumerate values in `_check_autostart_inventory` and `_check_defender_exclusions` (including `Policies\...\Exclusions`); expand common env vars and fix `r"\??\"` in `_check_unquoted_service_paths`; and handle `None` + GPO keys in `_check_firewall_default_actions`.
-- **Done when:** Non-English Guest account test, `ERROR_INSUFFICIENT_BUFFER` retry test, empty `Run`/`Exclusions` key test, and `%ProgramFiles%\App\svc.exe` unquoted path test all pass.
-
-### P3-21 · P1 · `CODE` — Catalog & Provenance mismatches: dead `_cis()` helper (`0/0` CIS score), double `Wow6432Node` + `VIEW_32` on `onedrive.unpin_explorer`, and missing registry specs vs descriptions
-- **Where:** `src/winbearable/tweaks/catalog.py`, `src/winbearable/tweaks/provenance.py`.
-- **Problems:**
-  1. **Dead `_cis()` helper (`catalog.py:46-61`):** `_cis` is never called anywhere in `catalog.py`; 12 tweaks set `cis_id` while 0 tweaks set `cis_mapping`, making `cis_passed`/`cis_total` in `wb doctor` permanently `0/0` and rendering the CIS assertions in `test_catalog_lint.py:94-98` and `test_engine_and_tweaks.py:527-535` dead code.
-  2. **`onedrive.unpin_explorer` combines `Wow6432Node` path with `RegistryView.VIEW_32` (`catalog.py:151-159`):** Spec 2 passes `key_path=rf"Software\Classes\Wow6432Node\CLSID\{ONEDRIVE_CLSID}"` *and* `view=RegistryView.VIEW_32` (`KEY_WOW64_32KEY`).
-  3. **Concrete description/provenance vs `registry_specs` mismatches:**
-     - `hardening.disable_autorun` (`catalog.py:842-859`): description claims `"Sets NoDriveTypeAutoRun=255 and DisableAutoplay=1"`, but `registry_specs` only sets `NoDriveTypeAutoRun=255`.
-     - `hardening.enable_firewall_all_profiles` (`catalog.py:1075-1108`, `provenance.py:305`): claims `"default inbound block across all profiles"` and `"EnableFirewall=1 and DefaultInboundAction=1"`, but `registry_specs` only sets `EnableFirewall=1` (never `DefaultInboundAction=1`).
-     - `hardening.defender_cloud_and_pua` (`catalog.py:1125-1142`, `provenance.py:313`): provenance claims `"PUAProtection=1 and SpynetReporting/SubmitSamplesConsent policies"`, but `registry_specs` omits `SubmitSamplesConsent`.
-     - `hardening.enable_lsa_protection` (`catalog.py:928`, `provenance.py:264`): catalog sets `RunAsPPL=2`, provenance says `RunAsPPL=1`.
-- **Fix:** Align the 4 tweak descriptions/provenance/specs; fix `onedrive.unpin_explorer` key path / view; and either remove the dead `_cis()` / `cis_controls` scaffolding or populate verified `cis_mapping` entries (and fix the loop bug in `test_catalog_lint.py:93`).
-- **Done when:** Catalog specs and provenance descriptions match 100%, and `test_catalog_lint.py` has zero dead loop branches.
-
-### P3-22 · P1 · `CODE` — Non-atomic `/etc/wsl.conf` `tee` truncation, disconnected `plan_or_apply_wsl` (dead version gating & missing rollback), and `chezmoi` flag injection in `wsl.py`
-- **Where:** `src/winbearable/wsl.py:481, 551-643, 1240-1245, 1319`.
-- **Problems:**
-  1. `apply_distro_wsl_conf` (`:557-560`) and `apply_wsl_linux_baseline` (`:1240-1243`) pipe into `tee /etc/wsl.conf` (`O_TRUNC` in place); if `wsl.exe` times out or verification fails (`:567`), `/etc/wsl.conf` is left truncated/corrupted and is not restored from `d_plan.probe.content`.
-  2. Both `prepare_wsl_plan` (`:481`) and `plan_or_apply_wsl` (`:595`) call `build_wslconfig_sections(spec, host_memory_bytes, warnings=warnings)` without passing `installed_wsl_version=env.wsl_version`, making `WSL_MIN_VERSION_BY_OPTION` filtering (`:223-234`) dead code in real runs!
-  3. In `plan_or_apply_wsl` (`:639-642`), if `.wslconfig` did not exist beforehand (`backup_path is None`) and distro apply fails, the newly created `.wslconfig` is not unlinked.
-  4. In `apply_wsl_linux_baseline` (`:1319`), `["-d", distro, "--", "chezmoi", "init", "--apply", dotfiles_repo]` does not validate or separate `dotfiles_repo` with `--`, allowing flag injection if `dotfiles_repo` starts with `-`.
-- **Fix:** Write `/etc/wsl.conf` via a temp file (`sh -c 'umask 022 && cat > /etc/wsl.conf.wb.tmp && mv -f /etc/wsl.conf.wb.tmp /etc/wsl.conf'`) and restore previous content on verification failure; pass `installed_wsl_version=env.wsl_version` in `prepare_wsl_plan` and `plan_or_apply_wsl`; unlink newly created `.wslconfig` on failure when `backup_path is None`; reject `dotfiles_repo` starting with `-`.
-- **Done when:** Tests verify atomic `/etc/wsl.conf` write + rollback on verification failure, `env.wsl_version` gating in `prepare_wsl_plan`, and rejection of `dotfiles_repo="--bad-flag"`.
+### [ ] T1-09 · P1 · `CODE` — Document `operation_journal` and `WinbearableError` in CLI JSON schemas
+- **Evidence:** `src/winbearable/cli/parser.py` (`_JSON_SCHEMAS` does not document `operation_journal`, `precondition_fingerprints`, or structured `WinbearableError` error payloads).
+- **Problem:** Agents and automation tools consuming `wb ... --json` have no documented schema for the new v0.16.0 observability and error fields.
+- **Implementation:** Update `_JSON_SCHEMAS` in `cli/parser.py` (and bump `JSON_SCHEMA_VERSION` if breaking) to document `operation_journal`, `precondition_fingerprints`, and structured error payloads, with schema-conformance tests.
+- **Done when:** `wb --json` outputs match `_JSON_SCHEMAS` and a test validates all CLI JSON responses against the schema definitions.
 
 ---
 
-## 4. P2 / P3 — Medium & Polish Defects
+## Priority 2 — Test Suite Credibility & Hygiene
 
-- **P3-23 · P2 · `CODE` (`engine.py:1363, 1469-1533`) — `ApplySummary.results` retains stale `TweakStatus.DRIFTED` after successful `apply`:** `_apply_profile_locked` updates `final_results[idx]` on `ERROR` (`:1497`, though dropping `operations` and consequence flags instead of using `replace(res, ...)`), but never updates `final_results[idx]` to `TweakStatus.APPLIED` when `_execute_tweak_mutations` succeeds (`:1531`).
-- **P3-24 · P2 · `CODE` (`profiles.py:358-439`) — `_validate_raw_profile` missing type checks on `packages.*`, `include` items, `extends`, and `[wsl]`:** If `packages.install = 123`, iterating raises unhandled `TypeError`; if `packages.remove = "foo"`, iterating yields `'f', 'o', 'o'` as 3 package names! Also validate `[wsl]` and `extends` inside `_validate_raw_profile` so `migrate_profile_file` catches invalid `[wsl]` sections.
-- **P3-25 · P2 · `CODE` (`state.py:303-313, 380-383`) — `state.json.bak` is overwritten on every intermediate `PLANNED`/`APPLYING` journal write:** `_save_runs_unlocked` copies `state.json` to `state.json.bak` via non-atomic `shutil.copy2` on every `upsert_run`, clobbering the last clean `COMMITTED` backup as soon as `PLANNED` followed by `APPLYING` is written.
-- **P3-26 · P2 · `CODE` (`operations.py:367-402, 781-811`) — `_merge_toml_top_level` corrupts multi-line TOML values, and `FileConfigOperationAdapter.inspect` skips `MAX_FILE_SNAPSHOT_BYTES`:** Replacing only `top_lines[matches[0]]` leaves trailing lines of multi-line arrays/strings dangling; `FileConfigOperationAdapter.inspect` does not check `MAX_FILE_SNAPSHOT_BYTES` (`512 KiB`), so a large file reports `DRIFTED` in `wb plan` and crashes `wb apply`.
-- **P3-27 · P2 · `CODE` (`backends/registry.py:169-275, 703-780`, `backends/system.py:247-255, 1947-1959`) — Backend parsing & view fidelity:**
-  - `InMemoryRegistryBackend` ignores `view: RegistryView` in its storage keys (`(hive, norm, value_name)`), hiding 32-bit vs 64-bit view bugs in tests.
-  - `WslInteropRegistryBackend` checks English `"access is denied"` (`:729, 738, 762`) and splits `reg.exe query` lines with `.split(None, 2)` (`:765`), breaking on value names containing spaces.
-  - `_observe_defender` (`system.py:249`) matches `r":\s*4\b"` anywhere in `sc.exe query WinDefend` output (matching `WIN32_EXIT_CODE : 4` or `CHECKPOINT : 4` even when `STATE` is `1 STOPPED`).
-  - `is_dir_case_sensitive` (`system.py:1956`) checks English `"enabled"` on `fsutil.exe` output.
-- **P3-28 · P2 · `CODE` (`.github/workflows/ci.yml:80, 211-318`, `Makefile:57, 86`) — CI workflow & `AGENTS.md` Rule #4 contradictions:**
-  - `ci.yml:80` runs `os: [ubuntu-latest, windows-latest]` on every push and PR, directly violating `AGENTS.md` Mandatory Rule #4 ("Never add `windows-latest` runners for PR/push CI or test jobs") while not even setting `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1` (so the Windows integration tests are skipped on those paid runners!).
-  - `ci.yml:268, 287` allows `workflow_dispatch` `job=publish` but immediately exits `1` because `github.ref_type != "tag"`; line 298 rebuilds wheel/sdist during `publish` so PyPI hashes differ from `SHA256SUMS.txt`.
-  - `Makefile:57` runs unpinned `uv run --with pyinstaller` instead of `uv run --group release --frozen`, and `Makefile:86` runs `trivy fs` without `--scanners vuln --skip-dirs .venv,...`.
-- **P3-29 · P3 · `CODE` (`cli.py:208-251, 565, 890-929, 1080-1090, 1388-1418`) — CLI polish & consistency:**
-  - Interactive UAC prompt in `wb apply` (`:893-914`) prompts to elevate *before* checking `--i-know-what-im-doing` / `--allow-irreversible` / incomplete journal state.
-  - `wb wsl apply --apply` (`:1394`) mutates `.wslconfig` and `/etc/wsl.conf` without recording a `RunRecord` in `StateStore`.
-  - `wb show` (`:1082`) reports `status: error` on parameterized tweaks (`dev.case_sensitive_dirs`, `hardening.update_active_hours`).
-  - Remove remaining internal ticket/decision IDs (`DEC-01` in `pyproject.toml:4`, `ENG-09` in `bin/gen_docs.py:1`, `DEC-03`/`DEC-04` in `profiles/*.toml`, `TWK-*` in `catalog.py`) per `AGENTS.md`.
+### [ ] T2-01 · P1 · `TESTS` — Replace weakened / tautological tests in `test_lifecycle_and_safety.py`
+- **Evidence:**
+  - `src/tests/test_lifecycle_and_safety.py:230`: `assert Path(exe).name.lower() != "wb.exe" or Path(exe).is_absolute()` — tautological; does not create a rogue `./wb.exe` in `tmp_path` with `monkeypatch.chdir(tmp_path)` to prove CWD hijacking is blocked.
+  - `src/tests/test_lifecycle_and_safety.py:190-194`: patches `is_scheduled_task_enabled`, `is_optional_feature_enabled`, and `is_hibernate_enabled` to `return_value=None` instead of testing real third-party state conflicts; omits assertions for `firewall_group`, `fsutil`, and `registry_key` conflicts.
+- **Problem:** These tests give false confidence on P0 security and rollback conflict invariants.
+- **Implementation:**
+  1. Create an actual `tmp_path / "wb.exe"` file, `chdir` into `tmp_path`, call `resolve_elevation_target(["doctor"], argv0="wb.exe")`, and assert `Path(exe).resolve() != (tmp_path / "wb.exe").resolve()`.
+  2. Test real non-`None` state conflicts (and fix `InMemorySystemBackend` if its default return values hide absent targets) for every mutable operation kind including `firewall_group`, `fsutil`, `registry_key`, `wslconfig`, and `wsl_distro`.
+- **Done when:** Zero `return_value=None` conflict workarounds remain in `test_lifecycle_and_safety.py`, and every mutable operation kind has a genuine conflict + `force=True` assertion.
 
----
+### [ ] T2-02 · P1 · `TESTS` — Add backend contract tests verifying `InMemory*` fakes match real `WinregBackend` / `NativeSystemBackend`
+- **Evidence:** `src/winbearable/backends/system_memory.py` (`is_scheduled_task_enabled` returns `False` for unknown keys instead of `None`; `is_optional_feature_enabled` returns `False` instead of `None`; `run_wsl_command` does not simulate `/etc/wsl.conf` reads accurately).
+- **Problem:** Divergences between `InMemory*` fakes and real Windows backends have repeatedly caused bugs that passed all unit tests and failed on real Windows (and forced ad-hoc `patch.object` workarounds in tests).
+- **Implementation:** Align `InMemorySystemBackend` return semantics (`None` for unknown tasks/features/auditpol, faithful `/etc/wsl.conf` `cat`/`mv` handling) with `NativeSystemBackend`, and write a shared parametrized contract test suite verifying identical return types and edge-case semantics.
+- **Done when:** Parametrized contract tests run against `InMemoryRegistryBackend` + `WinregBackend` (with mocked `winreg`) and `InMemorySystemBackend` + `NativeSystemBackend` (with mocked subprocesses) with identical assertions.
 
-## 5. Recommended Execution Order
+### [ ] T2-03 · P2 · `TESTS` — Break up the 15 giant grab-bag test functions (>= 100 LOC) and 3 oversized test files (> 750 LOC)
+- **Evidence:**
+  - Oversized files: `test_posture_and_recovery_domain.py` (**1,240 LOC**), `test_wsl_and_native_wrappers.py` (**903 LOC**), `test_engine_and_tweaks.py` (**898 LOC**).
+  - Worst grab-bag functions: `test_native_system_backend_linux_and_simulated_win32` (165 LOC), `test_recovery_failure_model_irreversible_and_backend_gate` (159 LOC), `test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro` (152 LOC), `test_system_backend_native_tool_wrappers` (141 LOC), `test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning` (125 LOC), plus 10 more >= 100 LOC.
+- **Problem:** When a 150-line test fails at line 40, the remaining 110 lines of unrelated assertions never run and failures are hard to diagnose.
+- **Implementation:** Decompose each >= 100-LOC test into focused, single-behavior `def test_<subject>_<behavior>()` functions using shared fixtures in `src/tests/conftest.py`, and keep every test file <= 750 LOC.
+- **Done when:** Zero test functions exceed 80 LOC (excluding parametrized data tables) and zero test files exceed 750 LOC, with equal or higher coverage.
 
-1. **Batch 1 — P0 Data & Execution Safety (`P3-01`..`P3-04`, `P3-06`, `P3-07`):**
-   - Deep-merge dicts in `merge_file_content` (`P3-01`).
-   - Implement real `RegistryBackend.list_values` for `is_firewall_group_enabled` (`P3-02`).
-   - Guard `export_registry_backup` with `registry.key_exists` (`P3-03`).
-   - Skip absent services in `_collect_pre_apply_snapshots` & `_execute_tweak_mutations` (`P3-04`).
-   - Stream SHA-256 with `hashlib.file_digest` and escape `distro` glob in `export_wsl_distro` (`P3-06`).
-   - Use injected `store` under `transaction_lock` in `wb wsl firewall --apply` (`P3-07`).
-2. **Batch 2 — P0 Win32 `ctypes` Signatures & Winget Release Integrity (`P3-05`, `P3-08`, `P3-28`):**
-   - Add explicit `argtypes`/`restype` to all Win32 `ctypes` calls in `audit.py` and `system.py` (`P3-05`).
-   - Fix `bin/build_winget.py` deterministic zip timestamps, `bin/bump_version.py`, `installer.yaml` SHA-256 verification, and `ci.yml` (`P3-08`, `P3-28`).
-3. **Batch 3 — P1 Rollback, File/Registry Atomicity & WSL (`P3-09`, `P3-10`, `P3-12`..`P3-16`, `P3-22`):**
-   - Resolve single-conflict `FAILED` deadlock (`P3-09`), WSL `.wslconfig` rollback & `PermissionError` compensation (`P3-10`), `_communicate_bounded` timeout race & UTF-16LE truncation (`P3-12`), `apply_file_spec` `_atomic_write_bytes` (`P3-13`), pre-apply backup checks (`P3-14`), `restore_snapshot` `key_existed` cleanup (`P3-15`), and `WingetOperationAdapter`/`ServiceOperationAdapter` drift detection (`P3-16`).
-4. **Batch 4 — P1 UAC, Profiles, CLI, TUI, Audit & Catalog (`P3-11`, `P3-17`..`P3-21`, `P3-23`..`P3-29`).**
+### [ ] T2-04 · P2 · `TESTS` — Move 290 inline imports in `src/tests/` to top-of-file
+- **Evidence:** Static AST scan found **290 inline imports across 16 test files** (worst: `test_posture_and_recovery_domain.py` 59, `test_recovery_and_concurrency.py` 56, `test_uac_and_locale_security.py` 43, `test_wsl_and_native_wrappers.py` 32).
+- **Problem:** Directly violates `AGENTS.md` ("Imports at the top of the file") and obscures test dependencies.
+- **Implementation:** Move all non-optional inline imports in `src/tests/` to module top-level, then extend the AST lint test from `T1-07` to cover `src/tests/` as well.
+- **Done when:** Zero unallowlisted inline imports remain across both `src/winbearable/` and `src/tests/`.
 
----
-
-## 6. Modularization & Software Architecture Roadmap (Breaking Up >1,000-Line Monoliths)
-
-### Why This Matters
-Nine production modules (`catalog.py` 3,468 LOC, `backends/system.py` 2,225 LOC, `engine.py` 2,116 LOC, `cli.py` 1,513 LOC, `wsl.py` 1,386 LOC, `audit.py` 1,295 LOC, `models.py` 1,175 LOC, `provenance.py` 1,071 LOC, `backends/registry.py` 1,020 LOC) and three test files (`test_system_uac_and_recovery.py` 2,237 LOC, `test_backends_and_coverage.py` 1,853 LOC, `test_new_features.py` 1,207 LOC) exceed 1,000 lines. Several Pass-2 and Pass-3 bugs (`P3-02`, `P3-04`, `P3-13`, `P3-14`, `P3-21`) were direct consequences of splitting cohesive concepts across parallel giant files (e.g. `catalog.py` vs `provenance.py`, or `operations.py` only owning `inspect()` while `engine.py` duplicates per-operation loops across `_collect_pre_apply_snapshots`, `_execute_tweak_mutations`, and `_compensate_run_record`).
-
-### Core Software Engineering Principles & Invariants
-
-1. **Bounded Module Size & Single Responsibility (SRP):**
-   - Target **300–500 lines** per module, with a hard ceiling of **800 lines** (enforced by a repository lint test).
-   - Each module owns one cohesive domain concept or one vertical slice.
-2. **Strict Acyclic Layered Dependency Graph (DAG):**
-   - **Layer 0 (`const.py`):** Constants and version metadata only (zero internal imports).
-   - **Layer 1 (`models/`):** Immutable dataclasses, enums, specs, snapshots, and pure serialization helpers (zero I/O, subprocess, or backend imports).
-   - **Layer 2 (`backends/`):** OS boundary abstractions (`Protocol`s), Win32 `ctypes` bindings, `winreg` / `wsl.exe` / native CLI wrappers, and deterministic in-memory test doubles.
-   - **Layer 3 (`operations/`, `tweaks/`, `wsl/`):** Declarative catalog definitions, file/INI/TOML mergers, and full-lifecycle operation adapters.
-   - **Layer 4 (`state.py`, `profiles/`):** Journal persistence, schema migrations, and TOML/JSON profile resolution.
-   - **Layer 5 (`engine/`, `audit/`):** Transaction orchestration, drift evaluation, rollback/recovery state machine, hardening scoring, and read-only posture checks.
-   - **Layer 6 (`cli/`, `tui.py`, `uac.py`):** Argument parsing, user interaction, Markdown/JSON rendering, and UAC elevation relay.
-3. **Symmetrical Full-Lifecycle `OperationAdapter` Protocol (Open-Closed Principle):**
-   - Extend `OperationAdapter` from a 1-method (`inspect`) protocol into a 4-method lifecycle contract (`inspect`, `snapshot`, `apply`, `compensate`).
-   - Adding or modifying an operation kind (e.g., `service`, `icacls`, `file_config`, `firewall_group`) happens inside a single adapter class rather than four separate 200-line `for`-loop blocks across `operations.py` and `engine.py`.
-4. **Colocated Tweak Definitions & Provenance (High Cohesion):**
-   - Colocate each tweak's `TweakDefinition` and `TweakProvenance` in per-category modules (`tweaks/categories/*.py`) so specs and provenance descriptions never drift apart (`P3-21`).
-5. **Backwards-Compatible Package Facades:**
-   - Package `__init__.py` files (`winbearable.engine`, `winbearable.models`, `winbearable.backends`, `winbearable.tweaks`, `winbearable.wsl`, `winbearable.audit`, `winbearable.cli`) re-export existing public symbols (`__all__`) so external callers and existing imports remain unbroken during and after refactoring.
+### [ ] T2-05 · P2 · `CODE` — Strip remaining internal ticket/decision IDs from source, profiles, tests, and changelog
+- **Evidence:** Static scan found:
+  - `src/winbearable/audit/runner.py:105` (`MGD-01`)
+  - `bin/gen_docs.py:1` (`ENG-09`)
+  - `profiles/dev-comfort.toml:3` (`DEC-04`), `profiles/edge-quiet.toml:2` (`DEC-03`), `profiles/privacy.toml:3` (`TWK-B`)
+  - `src/tests/` (**112 lines**, e.g. `test_catalog_lint.py:1,150`, `test_cli.py:398`, `test_engine_and_tweaks.py:422`)
+  - `CHANGELOG.md` (**21 lines**, e.g. `P3-01`..`P3-29`, `DEC-01`, `P0.1`)
+- **Problem:** Violates `AGENTS.md` ("No Transient TODO/Ticket IDs in Source or Docs").
+- **Implementation:** Replace all ticket/decision IDs with plain behavioral descriptions and add a regex lint test in `test_catalog_lint.py` (excluding `TODO.md` and `CHANGELOG.md` historical entries if desired, or cleaning `CHANGELOG.md` too).
+- **Done when:** Zero ticket IDs exist in `src/winbearable/`, `src/tests/`, `profiles/`, and `bin/`, enforced by CI lint.
 
 ---
 
-### Concrete Refactoring Tasks (`MOD-01`..`MOD-10`)
+## Priority 2 / 3 — Project Setup, Tooling, Packaging & Repo Hygiene
 
-#### MOD-01 · P2 · Split `tweaks/catalog.py` (3,468 LOC) + `tweaks/provenance.py` (1,071 LOC) into `tweaks/categories/` — [RESOLVED]
-- **Structure:**
-  - `src/winbearable/tweaks/categories/{apps,onedrive,search,start,taskbar,explorer,ai,privacy,bloat,telemetry,hardening,dev,power,services,edge,input,terminal}.py`
-  - `src/winbearable/tweaks/catalog.py`: ~100-line registry assembling `TWEAK_CATALOG`, `TWEAK_ID_ALIASES`, `get_tweak`, `get_all_tweaks`, `resolve_tweak_id`.
-- **Design:** Define each tweak with its `provenance=TweakProvenance(...)` inline (or adjacent in the same category module), eliminating the fragile cross-file runtime attachment loop in `catalog.py`.
-- **Done when:** No file in `src/winbearable/tweaks/` exceeds 600 lines; `validate_catalog(TWEAK_CATALOG) == []`; all existing imports from `winbearable.tweaks` work unchanged.
+### [ ] T2-06 · P1 · `SETUP` — Refresh `uv.lock` on version bumps so editable/locked version stays in sync with `const.__version__`
+- **Evidence:** `uv.lock:634-636` still locks `winbearable == 0.15.0` while `src/winbearable/const.py:5` is `0.16.0` (observed during `uv sync`: `+ winbearable==0.15.0`).
+- **Problem:** `bin/bump_version.py` does not run `uv lock`, causing `uv sync --frozen` in CI/Winget builds to install stale package metadata (`0.15.0` instead of `0.16.0`).
+- **Implementation:** Update `bin/bump_version.py` to run `uv lock` (or update `uv.lock`) after bumping `const.py`, and add a check in `test_catalog_lint.py` asserting `uv.lock` matches `const.__version__`.
+- **Done when:** `uv.lock` records `version = "0.16.0"` (matching `const.__version__`) and `test_catalog_lint.py` catches any future drift.
 
-#### MOD-02 · P2 · Refactor `operations.py` (958 LOC) + `engine.py` (2,116 LOC) into Focused Submodules — [RESOLVED]
-- **Structure:**
-  - `src/winbearable/operations/base.py`: `OperationAdapter` protocol (`inspect`, `snapshot`, `apply`, `compensate`).
-  - `src/winbearable/operations/mergers.py`: JSON/JSONC/INI/TOML content mergers (`merge_file_content`, `_deep_merge_dicts`, `_merge_toml_top_level`), `_atomic_write_bytes`, `snapshot_file_spec`, `apply_file_spec`, `restore_file_snapshot`.
-  - `src/winbearable/operations/adapters.py`: Concrete adapters (`RegistryOperationAdapter`, `ServiceOperationAdapter`, `TaskOperationAdapter`, `FeatureOperationAdapter`, `WingetOperationAdapter`, `AuditpolOperationAdapter`, `WevtutilOperationAdapter`, `FirewallGroupOperationAdapter`, `FsutilOperationAdapter`, `PowercfgOperationAdapter`, `GitConfigOperationAdapter`, `IcaclsOperationAdapter`, `FileConfigOperationAdapter`).
-  - `src/winbearable/engine/`:
-    - `params.py`: `resolve_tweak_params` and parameter validators.
-    - `evaluate.py`: `detect_tweak`, `evaluate_profile`.
-    - `apply.py`: `apply_profile`, `_apply_profile_locked`, `_execute_tweak_mutations`, `_collect_pre_apply_snapshots`.
-    - `rollback.py`: `rollback_runs`, `recover_incomplete_runs`, `_compensate_run_record`.
-    - `scoring.py`: `calculate_hardening_score`, `_summarize_dimension`.
-- **Done when:** No module in `operations/` or `engine/` exceeds 600 lines, and `engine/apply.py` + `engine/rollback.py` delegate per-operation work through the adapter registry.
+### [ ] T2-07 · P2 · `SETUP` — Make `Makefile` and `.githooks/pre-commit` cross-platform (Windows + WSL + Linux)
+- **Evidence:**
+  - `Makefile:15-46` hardcodes `.venv/bin/ruff`, `.venv/bin/mypy`, `.venv/bin/pytest`, `.venv/bin/python3` — fails on native Windows (`.venv/Scripts/`).
+  - `.githooks/pre-commit:77,86,97` hardcodes WSL distro name `Ubuntu-24.04` (fails on hosts whose distro is `Ubuntu` or `AlmaLinux-10`).
+  - `.githooks/pre-commit:94,97` skips `.venv` in Trivy but not `.venv-win`.
+  - `.venv` created in a Linux devcontainer leaves a `.venv/lib64` symlink that causes `uv run` on Windows to fail with `os error 5 (Access is denied)`.
+- **Implementation:**
+  1. In `Makefile`, use `uv run --group dev ...` (or detect OS `VENV_BIN`) instead of hardcoded `.venv/bin/`.
+  2. In `.githooks/pre-commit`, use default `wsl.exe -- ...` (or `${WSL_DISTRO:-}` env override) instead of hardcoded `-d Ubuntu-24.04`, add `.venv-win` to Trivy `--skip-dirs`, and respect `UV_PROJECT_ENVIRONMENT`.
+- **Done when:** `.githooks/pre-commit` and `make lint` / `make test` work out of the box on both Windows and Linux without manual env workarounds.
 
-#### MOD-03 · P2 · Split `backends/system.py` (2,225 LOC) and `backends/registry.py` (1,020 LOC) — [RESOLVED]
-- **Structure:**
-  - `src/winbearable/backends/win32_ctypes.py`: Centralized, typed `ctypes` structures (`_PROCESSENTRY32W`, etc.) and pre-configured `WinDLL` function signatures (`argtypes`/`restype`) shared by `backends/` and `audit/`.
-  - `src/winbearable/backends/posture.py`: Read-only environment & security posture probes (`_observe_defender`, `_observe_tamper_protection`, `_observe_vbs_hvci`, `_observe_bitlocker`, `_observe_secure_boot`, `_observe_edr`, `_observe_mdm`, `_observe_domain`, `_observe_applocker`, `_observe_wdac`).
-  - `src/winbearable/backends/system_protocol.py`: `SystemBackend` protocol and `CommandResult`.
-  - `src/winbearable/backends/system_memory.py`: `InMemorySystemBackend` test double.
-  - `src/winbearable/backends/system_native.py`: `NativeSystemBackend` (subprocess execution, services, tasks, features, winget/vscode, auditpol, wevtutil, firewall, fsutil, powercfg, git, icacls).
-  - `src/winbearable/backends/registry_memory.py`, `registry_winreg.py`, `registry_wsl.py`: Separate `InMemoryRegistryBackend`, `WinregBackend`, and `WslInteropRegistryBackend`.
-- **Done when:** `backends/system.py` and `backends/registry.py` are replaced by focused submodules (< 650 lines each) re-exported cleanly from `winbearable.backends`.
+### [ ] T2-08 · P2 · `SETUP` — Enforce LF (`newline="\n"`) in `bin/bump_version.py` and `bin/gen_docs.py`
+- **Evidence:** Running `bin/bump_version.py` and `bin/gen_docs.py` on Windows wrote CRLF to `const.py`, `SECURITY.md`, `packaging/winget/*.yaml`, and `docs/tweaks-reference.md`, triggering Git CRLF warnings against `.gitattributes` (`* text=auto eol=lf`).
+- **Implementation:** Pass `newline="\n"` to `Path.write_text(..., encoding="utf-8", newline="\n")` in `bin/bump_version.py` and `bin/gen_docs.py` (and any other repo generators).
+- **Done when:** Running `bin/bump_version.py` and `bin/gen_docs.py` on Windows produces LF-only files with zero Git CRLF warnings.
 
-#### MOD-04 · P2 · Split `models.py` (1,175 LOC) into Domain Submodules — [RESOLVED]
-- **Structure:**
-  - `src/winbearable/models/enums.py`: `RiskLevel`, `TweakStatus`, `TransactionState`, `AuditDimension`, `ObservationState`, `ObservationConfidence`, `OperationStatus`, `RegistryView`.
-  - `src/winbearable/models/specs.py`: `RegistrySpec`, `ServiceSpec`, `ScheduledTaskSpec`, `OptionalFeatureSpec`, `WingetSpec`, `AuditpolSpec`, `WevtutilSpec`, `FirewallGroupSpec`, `FsutilCaseSensitiveSpec`, `PowercfgHibernateSpec`, `GitConfigSpec`, `IcaclsUserOnlySpec`, `FileSpec`, `TweakProvenance`, `CisControlMapping`, `TweakDefinition`, `WslConfigSpec`, `ProfileSpec`.
-  - `src/winbearable/models/snapshots.py`: All `*Snapshot` dataclasses, `RunRecord`, and `_encode_registry_data` / `_decode_registry_data`.
-  - `src/winbearable/models/results.py`: `OperationOutcome`, `PostureObservation`, `EnvironmentInfo`, `RegistryChangeDetail`, `PlannedOperation`, `TweakCheckResult`.
-- **Done when:** Every submodule in `models/` is < 450 lines and `from winbearable.models import ...` re-exports all symbols.
+### [ ] T2-09 · P2 · `SETUP` — Reconcile `AGENTS.md` contradictions and relocate `src/tests/` / `src/generate_badge.py`
+- **Evidence:**
+  - `AGENTS.md:20` says `--cov-fail-under=80`, while `Makefile:23`, `.githooks/pre-commit:63,66`, and `.github/workflows/ci.yml` enforce `--cov-fail-under=89`.
+  - `src/tests/` and `src/generate_badge.py` live inside `src/` rather than top-level `tests/` and `bin/generate_badge.py`.
+- **Implementation:**
+  1. Update `AGENTS.md:20` to `--cov-fail-under=89` (matching `Makefile`, `.githooks/pre-commit`, and `ci.yml`).
+  2. Move `src/generate_badge.py` -> `bin/generate_badge.py` and update `Makefile:24` / CI references.
+  3. Move `src/tests/` -> `tests/` and update `pyproject.toml` (`testpaths = ["tests"]`) and `Makefile:27`.
+- **Done when:** `AGENTS.md`, `Makefile`, `.githooks/pre-commit`, and `ci.yml` agree on coverage thresholds and paths, and `src/` contains only the installable `winbearable` package.
 
-#### MOD-05 · P2 · Split `wsl.py` (1,386 LOC) into `wsl/` Package — [RESOLVED]
-- **Structure:**
-  - `src/winbearable/wsl/ini.py`: `merge_ini_preserving_comments`, `lint_wsl_conf_lf`, `_parse_ini_sections`, `_atomic_write_text`.
-  - `src/winbearable/wsl/config.py`: `build_wslconfig_sections`, `build_distro_wsl_conf_sections`, `prepare_wsl_plan`, `apply_wslconfig_target`, `apply_distro_wsl_conf`, `plan_or_apply_wsl`.
-  - `src/winbearable/wsl/audit.py`: `audit_wsl`, `deep_audit_wsl_distro`, `detect_wsl_policies`, `detect_default_wsl_distro`.
-  - `src/winbearable/wsl/lifecycle.py`: `install_wsl_distro`, `export_wsl_distro`, `import_wsl_distro`, `set_default_wsl_distro`, `set_wsl_distro_sparse`, `update_wsl`, `apply_wsl_linux_baseline`.
-- **Done when:** No module in `wsl/` exceeds 450 lines and `winbearable.wsl` re-exports the public API.
+### [ ] T3-01 · P3 · `SETUP` — Clean up 30+ merged local git branches and stale `.pyc` artifacts
+- **Evidence:** `git branch` shows 35+ merged local branches (`chore/bump-v0.9.10`, `feat/bloat-remove-appx`, etc.) and `src/` contains stale Python 3.14 `.pyc` files alongside Python 3.15 `.pyc` files.
+- **Implementation:** Prune merged local branches (`git branch --merged main | grep -v '^\*\|main' | xargs git branch -d`) and run `make clean` (or remove `__pycache__`).
+- **Done when:** Only active branches remain locally.
 
-#### MOD-06 · P2 · Split `audit.py` (1,295 LOC) into `audit/` Package — [RESOLVED]
-- **Structure:**
-  - `src/winbearable/audit/models.py`: `AuditFinding` and shared registry/observation helpers (`_safe_val`, `_obs_from_reg`).
-  - `src/winbearable/audit/win32_checks.py`: `_check_local_admins`, `_check_guest_account`, `_check_listening_ports`, `_check_open_shares` (using `backends/win32_ctypes.py`).
-  - `src/winbearable/audit/registry_checks.py`: Firewall, SMB, TLS, LLMNR/NetBIOS/WPAD, UAC, LSA/Credential Guard, Defender/ASR/Exclusions, Autostart, Unquoted service paths, PowerShell/EventLog, Pending reboot.
-  - `src/winbearable/audit/runner.py`: `run_security_audit` and `detect_environment_blockers`.
-- **Done when:** No module in `audit/` exceeds 500 lines.
+---
 
-#### MOD-07 · P2 · Split `cli.py` (1,513 LOC) into `cli/` Package — [RESOLVED]
-- **Structure:**
-  - `src/winbearable/cli/parser.py`: `build_parser`, `_JSON_SCHEMAS`, `_parse_id_list`.
-  - `src/winbearable/cli/render.py`: `_print_json`, `_format_summary_markdown`, `_escape_md_cell`, `_compute_exit_code`.
-  - `src/winbearable/cli/handlers.py`: Per-command handler functions (`handle_doctor`, `handle_status_plan_apply`, `handle_rollback_recover`, `handle_init`, `handle_list_show`, `handle_migrate`, `handle_wsl`).
-  - `src/winbearable/cli/__init__.py`: `run_cli`, `main`, `_relay_elevated_uac`, `_absolutize_elevated_argv`.
-- **Done when:** `cli/__init__.py` and all submodules are < 500 lines each, replacing the 900-line `if/elif` chain in `_run_cli_body` with a command dispatch table.
+## Agent Execution Protocol
 
-#### MOD-08 · P3 · Split `profiles.py` (788 LOC) into `profiles/` or Focused Helpers — [RESOLVED]
-- **Structure:** Separate `profiles/schema_migration.py` (`migrate_profile_payload`, `migrate_profile_file`, `_dict_to_toml`), `profiles/loader.py` (`resolve_profile_path`, `load_profile`, `_validate_raw_profile`, `_parse_wsl_section`), and `profiles/generator.py` (`generate_init_profile_toml`, `generate_init_profile_json`).
-- **Done when:** Each file is < 350 lines.
-
-#### MOD-09 · P3 · Split Oversized Catch-All Test Files (>1,200 LOC) by Domain Subject — [RESOLVED]
-- **Problem:** `test_system_uac_and_recovery.py` (2,237 LOC), `test_backends_and_coverage.py` (1,853 LOC), and `test_new_features.py` (1,207 LOC) are chronological grab-bags mixing UAC, WSL, registry, audit, TUI, and engine tests.
-- **Structure:** Organize `src/tests/` by domain module under test:
-  - `test_registry_backends.py`, `test_system_backend.py`, `test_uac.py`, `test_state_and_journal.py`, `test_engine_apply_and_rollback.py`, `test_wsl_config_and_lifecycle.py`, `test_audit_checks.py`, `test_profiles_and_migration.py`, `test_cli_and_tui.py`.
-- **Done when:** No test file exceeds 750 lines, and test filenames directly reflect the module/behavior under test.
-
-#### MOD-10 · P3 · Add Layer-Boundary Lint Gate in `test_catalog_lint.py` — [RESOLVED]
-- **Rule:** Add a fast AST import-layer test (`test_architectural_layer_boundaries`) in `test_catalog_lint.py` enforcing the 7-layer acyclic dependency DAG (`const` -> `models` -> `backends` -> `packages`/`tweaks`/`wsl`/`operations` -> `profiles`/`state` -> `engine`/`audit` -> `uac`/`tui`/`cli`) without enforcing brittle hard file-length limits.
-- **Done when:** `test_architectural_layer_boundaries` is active in `pytest` and `.githooks/pre-commit`.
-
-
-
-## Agent execution rules
-- Start with the highest priority task and reproduce it on the current commit before patching.
-- Write a failing regression test first. Do not use in-memory tests as evidence for Windows-only behavior.
-- One cohesive task per PR; avoid unrelated cleanup.
-- Preserve public API and tweak IDs unless a migration is explicitly included.
-- Do not suppress lint, type, test, or architecture checks to make the task green.
-- Include exact commands run and distinguish Linux/unit evidence from Windows integration evidence.
-- For security fixes, document threat, trust boundary, and failure-closed behavior.
-- Never mark a task complete based only on implementation; attach tests or host verification evidence.
+1. **One cohesive group or item per PR.** Do not bundle unrelated refactors with security fixes.
+2. **Confirm & write a failing regression test first** before patching code.
+3. **Never write `T0-*`/`T1-*`/`T2-*`/`T3-*` IDs** into source code, comments, test names, or user-facing docs (`AGENTS.md`).
+4. **All imports at the top of the file** in both `src/winbearable/` and `tests/`.
+5. **Run `./.githooks/pre-commit` locally** (never `--no-verify`) and report exact Linux unit vs Windows integration test evidence in the PR body.
+6. **Do not check off `[x]`** until every **Done when** criterion is verified.

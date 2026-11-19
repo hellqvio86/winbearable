@@ -102,7 +102,7 @@ def build_doctor_blockers(
     registry: RegistryBackend,
     findings: list[AuditFinding],
 ) -> list[dict[str, str]]:
-    """Build structured MGD-01 blockers list for `wb doctor --json` and plan/apply notices."""
+    """Build structured blockers list for `wb doctor --json` and plan/apply notices."""
     blockers: list[dict[str, str]] = []
     if not env.is_admin:
         blockers.append(

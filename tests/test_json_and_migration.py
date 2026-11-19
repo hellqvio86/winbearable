@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
 from winbearable.cli import run_cli
 from winbearable.const import ENV_PROFILE_DIR, ENV_STATE_PATH, PROFILE_SCHEMA_VERSION, STATE_SCHEMA_VERSION
 from winbearable.models import TransactionState
@@ -266,15 +267,17 @@ def test_cli_init_json_and_migrate_commands(
     )
     monkeypatch.setenv(ENV_STATE_PATH, str(state_file))
 
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_windows=False, wsl_installed=False)
     init_out = tmp_path / "local.json"
-    rc_init = run_cli(["init", "--output", str(init_out), "--format", "json"])
+    rc_init = run_cli(["init", "--output", str(init_out), "--format", "json"], registry=reg, system=sys_b)
     assert rc_init == 0
     capsys.readouterr()
     init_data = json.loads(init_out.read_text(encoding="utf-8"))
     assert init_data["schema_version"] == PROFILE_SCHEMA_VERSION
     assert init_data["name"] == "local"
 
-    rc_plan = run_cli(["plan", "--profile", str(init_out), "--json"])
+    rc_plan = run_cli(["plan", "--profile", str(init_out), "--json"], registry=reg, system=sys_b)
     assert rc_plan in (0, 2, 3)
     plan_payload = json.loads(capsys.readouterr().out)
     assert plan_payload["profile_name"] == "local"

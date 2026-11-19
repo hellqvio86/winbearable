@@ -105,7 +105,7 @@ jobs:
 
       - name: Generate coverage badge
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
-        run: uv run python src/generate_badge.py
+        run: uv run python bin/generate_badge.py
 
       - name: Upload coverage report and badge
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'

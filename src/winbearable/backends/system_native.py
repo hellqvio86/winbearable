@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import contextlib
-import csv
 import ctypes
 import os
 import platform
 import re
 import subprocess
 import sys
-import tempfile
-import threading
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,29 +27,51 @@ from ..models import EnvironmentInfo, OperationOutcome, OperationStatus, Registr
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS, ONEDRIVE_SETUP_CANDIDATES
 from .posture import collect_posture_observations, safe_get_reg
 from .registry import RegistryBackend, find_wsl_reg_exe, is_wsl2
+from .system_native_cmd import (
+    classify_cmd_failure,
+    communicate_bounded_with_truncation,
+    decode_cmd_bytes,
+    is_process_running_win32,
+    is_user_writable_binary,
+    resolve_code_cmd,
+    resolve_git_exe,
+    resolve_winget_exe,
+    sys32_exe,
+    terminate_process_tree,
+    truncate_text,
+)
+from .system_native_sec import (
+    backup_acl,
+    get_auditpol_subcategory,
+    get_current_user_sid,
+    get_event_log_config,
+    get_git_global_config,
+    is_dir_case_sensitive,
+    is_firewall_group_enabled,
+    is_sddl_restricted_to_sid,
+    is_ssh_acl_restricted,
+    restore_acl,
+    restrict_acl_to_current_user,
+    set_auditpol_subcategory,
+    set_dir_case_sensitive,
+    set_event_log_config,
+    set_firewall_group_enabled,
+    set_git_global_config,
+)
+from .system_native_sec import (
+    backup_auditpol as _sec_backup_auditpol,
+)
+from .system_native_sec import (
+    export_firewall_policy as _sec_export_firewall_policy,
+)
+from .system_native_sec import (
+    import_firewall_policy as _sec_import_firewall_policy,
+)
+from .system_native_sec import (
+    restore_auditpol as _sec_restore_auditpol,
+)
 from .system_protocol import GIB_BYTES, CommandResult, read_service_start_state
-
-_TH32CS_SNAPPROCESS = 0x00000002
-
-
-_MAX_PATH = 260
-
-
-class _PROCESSENTRY32W(ctypes.Structure):
-    """Win32 PROCESSENTRY32W structure for native process enumeration."""
-
-    _fields_ = [
-        ("dwSize", ctypes.c_uint32),
-        ("cntUsage", ctypes.c_uint32),
-        ("th32ProcessID", ctypes.c_uint32),
-        ("th32DefaultHeapID", ctypes.c_size_t),
-        ("th32ModuleID", ctypes.c_uint32),
-        ("cntThreads", ctypes.c_uint32),
-        ("th32ParentProcessID", ctypes.c_uint32),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", ctypes.c_uint32),
-        ("szExeFile", ctypes.c_wchar * _MAX_PATH),
-    ]
+from .win32_ctypes import get_win32_dll
 
 
 class NativeSystemBackend:
@@ -68,13 +88,28 @@ class NativeSystemBackend:
         platform_override: str | None = None,
         windll_override: Any | None = None,
         setup_candidates: tuple[str, ...] = ONEDRIVE_SETUP_CANDIDATES,
+        popen_factory: Callable[..., Any] | None = None,
+        wsl2_fn: Callable[[], bool] | None = None,
+        find_reg_fn: Callable[[], str | None] | None = None,
     ) -> None:
         self._platform = platform_override or sys.platform
-        self._windll = windll_override if windll_override is not None else getattr(ctypes, "windll", None)
+        self._windll_override = windll_override
         self._setup_candidates = setup_candidates
+        self._popen_factory: Callable[..., Any] = popen_factory or subprocess.Popen
+        self._wsl2_fn: Callable[[], bool] = wsl2_fn or is_wsl2
+        self._find_reg_fn: Callable[[], str | None] = find_reg_fn or find_wsl_reg_exe
         self._winget_installed_cache: dict[str, bool] = {}
         self.last_outcome: OperationOutcome | None = None
         self.command_history: list[dict[str, Any]] = []
+
+    def _get_dll(self, name: str) -> Any | None:
+        """Return a Win32 DLL handle via WinDLL or injected test override, or None when unavailable."""
+        if self._windll_override is None and self._platform != "win32":
+            return None
+        try:
+            return get_win32_dll(name, self._windll_override)
+        except OSError, AttributeError:
+            return None
 
     def _resolve_timeout(self, requested: float) -> float:
         raw = os.environ.get(ENV_CMD_TIMEOUT)
@@ -103,144 +138,25 @@ class NativeSystemBackend:
         override = os.environ.get(ENV_ADMIN_OVERRIDE)
         if override is not None:
             return override.lower() in ("1", "true", "yes", "on")
-        if self._platform == "win32" and self._windll is not None:
+        shell32 = self._get_dll("shell32")
+        if self._platform == "win32" and shell32 is not None:
             try:
-                fn = self._windll.shell32.IsUserAnAdmin
+                fn = shell32.IsUserAnAdmin
                 with contextlib.suppress(AttributeError, TypeError):
                     fn.argtypes = []
                     fn.restype = ctypes.c_int
                 return bool(fn())
-            except Exception:
+            except OSError, AttributeError, TypeError, ctypes.ArgumentError:
                 return False
         return False
 
-    @staticmethod
-    def _classify_cmd_failure(returncode: int, stdout: str, stderr: str) -> OperationStatus:
-        """Classify non-zero native command failures using exit codes and HRESULT hex codes only (locale-safe)."""
-        low_err = f"{stderr}\n{stdout}".lower()
-        if (
-            returncode in (5, 740, 1314, -2147024891)
-            or "0x80070005" in low_err
-            or "0x00000522" in low_err
-            or "win32 error 5" in low_err
-        ):
-            return OperationStatus.ACCESS_DENIED
-        if returncode in (1260, 1625, -2147023636) or "0x800704ec" in low_err:
-            return OperationStatus.BLOCKED_BY_POLICY
-        if returncode in (2, 3, 9009, -2147024894) or "0x80070002" in low_err:
-            return OperationStatus.TOOL_MISSING
-        if returncode in (124, 1460):
-            return OperationStatus.TIMEOUT
-        return OperationStatus.UNKNOWN
+    _classify_cmd_failure = staticmethod(classify_cmd_failure)
+    _truncate_text = staticmethod(truncate_text)
+    _decode_cmd_bytes = staticmethod(decode_cmd_bytes)
+    _communicate_bounded_with_truncation = staticmethod(communicate_bounded_with_truncation)
 
     def _terminate_process_tree(self, pid: int) -> None:
-        """Attempt best-effort process-tree termination on timeout (detached COM children cannot be tracked)."""
-        if self._platform == "win32":
-            with contextlib.suppress(OSError, subprocess.SubprocessError):
-                subprocess.run(
-                    [self._sys32_exe("taskkill.exe"), "/T", "/F", "/PID", str(pid)],
-                    capture_output=True,
-                    shell=False,
-                    check=False,
-                    timeout=5.0,
-                )
-
-    @staticmethod
-    def _truncate_text(text: str, limit: int, label: str = "output") -> str:
-        if len(text) <= limit:
-            return text
-        return f"{text[:limit]}\n...[{label} truncated at {limit} chars]\n"
-
-    @staticmethod
-    def _decode_cmd_bytes(raw: bytes | str | None, args: list[str], oem_encoding: str = "oem") -> str:
-        """Decode native command output bytes using UTF-16LE for wsl.exe or UTF-8/OEM fallback."""
-        if raw is None:
-            return ""
-        if isinstance(raw, str):
-            return raw
-        exe_name = os.path.basename(args[0]).lower() if args else ""
-        is_utf16le_bom = raw.startswith(b"\xff\xfe")
-        # wsl.exe host messages emit UTF-16LE (ASCII chars interleaved with NUL at odd indices) unless WSL_UTF8=1.
-        looks_utf16le_ascii = (
-            exe_name == "wsl.exe" and len(raw) >= 4 and len(raw) % 2 == 0 and raw[1::2].count(0) > len(raw) // 4
-        )
-        if is_utf16le_bom or looks_utf16le_ascii:
-            return raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                return raw.decode(oem_encoding, errors="replace")
-            except LookupError:
-                return raw.decode("cp850", errors="replace")
-
-    @staticmethod
-    def _communicate_bounded_with_truncation(
-        proc: subprocess.Popen[bytes],
-        input_bytes: bytes | None,
-        timeout: float,
-        max_bytes: int = MAX_CMD_OUTPUT_CHARS + 4096,
-    ) -> tuple[bytes, bytes, int, int]:
-        """Drain stdout/stderr in bounded memory while enforcing timeout, returning (out, err, drop_out, drop_err)."""
-        if not isinstance(subprocess.Popen, type) or not isinstance(proc, subprocess.Popen):
-            out, err = proc.communicate(input=input_bytes, timeout=timeout)
-            return out or b"", err or b"", 0, 0
-        stdout_pipe = proc.stdout
-        stderr_pipe = proc.stderr
-        stdin_pipe = proc.stdin
-
-        out_buf = bytearray()
-        err_buf = bytearray()
-        dropped = {"out": 0, "err": 0}
-
-        def _drain(stream: Any, buf: bytearray, key: str) -> None:
-            if stream is None:
-                return
-            try:
-                while True:
-                    chunk = stream.read(16384)
-                    if not chunk:
-                        break
-                    room = max_bytes - len(buf)
-                    if room > 0:
-                        buf.extend(chunk[:room])
-                    if len(chunk) > room:
-                        dropped[key] += len(chunk) - max(0, room)
-            finally:
-                with contextlib.suppress(OSError):
-                    stream.close()
-
-        def _feed() -> None:
-            if stdin_pipe is None:
-                return
-            try:
-                if input_bytes is not None:
-                    stdin_pipe.write(input_bytes)
-                    stdin_pipe.flush()
-            except OSError:
-                pass
-            finally:
-                with contextlib.suppress(OSError):
-                    stdin_pipe.close()
-
-        t_out = threading.Thread(target=_drain, args=(stdout_pipe, out_buf, "out"), daemon=True)
-        t_err = threading.Thread(target=_drain, args=(stderr_pipe, err_buf, "err"), daemon=True)
-        t_in = threading.Thread(target=_feed, daemon=True) if stdin_pipe is not None else None
-        t_out.start()
-        t_err.start()
-        if t_in is not None:
-            t_in.start()
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            raise subprocess.TimeoutExpired(
-                cmd=proc.args, timeout=timeout, output=bytes(out_buf), stderr=bytes(err_buf)
-            ) from exc
-        if t_in is not None:
-            t_in.join(timeout=1.0)
-        t_out.join(timeout=2.0)
-        t_err.join(timeout=2.0)
-        return bytes(out_buf), bytes(err_buf), dropped["out"], dropped["err"]
+        terminate_process_tree(pid, self._platform, self._windll_override)
 
     def _run_native_cmd(
         self,
@@ -256,7 +172,7 @@ class NativeSystemBackend:
             child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
             if args and os.path.basename(args[0]).lower() == "wsl.exe":
                 child_env["WSL_UTF8"] = "1"
-            proc = subprocess.Popen(
+            proc = self._popen_factory(
                 args,
                 stdin=subprocess.PIPE if input_text is not None else None,
                 stdout=subprocess.PIPE,
@@ -349,10 +265,7 @@ class NativeSystemBackend:
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         is_win = self._platform == "win32"
-        facade = sys.modules.get("winbearable.backends.system")
-        wsl2_fn = getattr(facade, "is_wsl2", is_wsl2) if facade is not None else is_wsl2
-        find_reg_fn = getattr(facade, "find_wsl_reg_exe", find_wsl_reg_exe) if facade is not None else find_wsl_reg_exe
-        wsl_interop_audit = (self._platform == "linux") and wsl2_fn() and (find_reg_fn() is not None)
+        wsl_interop_audit = (self._platform == "linux") and self._wsl2_fn() and (self._find_reg_fn() is not None)
         can_audit_windows = is_win or wsl_interop_audit
         build_override = os.environ.get(ENV_BUILD_OVERRIDE)
 
@@ -447,7 +360,7 @@ class NativeSystemBackend:
                 return False
         try:
             registry.set_value(HIVE_HKLM, svc_key, "Start", start_type, REG_DWORD)
-        except Exception as exc:
+        except OSError as exc:
             if self._platform == "win32" and prev_val in start_map:
                 self._run_native_cmd(
                     [self._sys32_exe("sc.exe"), "config", service_name, f"start={start_map[prev_val]}"]
@@ -538,41 +451,7 @@ class NativeSystemBackend:
         return res.returncode == 0
 
     def _is_process_running_win32(self, process_name: str) -> bool | None:
-        """Enumerate running processes via Win32 Toolhelp32 snapshot (avoids slow tasklist.exe/WMI)."""
-        if self._windll is None:
-            return None
-        kernel32 = getattr(self._windll, "kernel32", None)
-        if kernel32 is None or not hasattr(kernel32, "CreateToolhelp32Snapshot"):
-            return None
-        try:
-            with contextlib.suppress(AttributeError, TypeError):
-                kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
-                kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
-                kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
-                kernel32.Process32FirstW.restype = ctypes.c_int
-                kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
-                kernel32.Process32NextW.restype = ctypes.c_int
-                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-                kernel32.CloseHandle.restype = ctypes.c_int
-            snap = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
-            invalid_handle = ctypes.c_void_p(-1).value
-            if snap in (None, 0, invalid_handle, -1):
-                return None
-            target = process_name.lower()
-            entry = _PROCESSENTRY32W()
-            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
-            snap_handle = ctypes.c_void_p(snap)
-            try:
-                ok = kernel32.Process32FirstW(snap_handle, ctypes.byref(entry))
-                while ok:
-                    if entry.szExeFile.lower() == target:
-                        return True
-                    ok = kernel32.Process32NextW(snap_handle, ctypes.byref(entry))
-                return False
-            finally:
-                kernel32.CloseHandle(snap_handle)
-        except Exception:
-            return None
+        return is_process_running_win32(process_name, self._get_dll("kernel32"))
 
     def is_process_running(self, process_name: str) -> bool:
         if self._platform != "win32":
@@ -679,17 +558,7 @@ class NativeSystemBackend:
         self._winget_installed_cache[package_id.lower()] = True
         return True
 
-    @staticmethod
-    def _is_user_writable_binary(exe_path: str) -> bool:
-        """Return True if *exe_path* resides inside a user-writable profile directory."""
-        norm = os.path.normcase(os.path.abspath(exe_path))
-        for env_key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
-            base = os.environ.get(env_key, "").strip()
-            if base:
-                norm_base = os.path.normcase(os.path.abspath(base)).rstrip("\\/") + os.sep
-                if norm.startswith(norm_base):
-                    return True
-        return False
+    _is_user_writable_binary = staticmethod(is_user_writable_binary)
 
     def _guard_elevated_code_cmd(self) -> str | None:
         code_cmd = self._resolve_code_cmd()
@@ -754,16 +623,17 @@ class NativeSystemBackend:
         return self._run_native_cmd([self._sys32_exe("wsl.exe"), *args], input_text=input_text, timeout=timeout)
 
     def get_total_memory_bytes(self) -> int:
-        if self._platform == "win32" and self._windll is not None:
+        kernel32 = self._get_dll("kernel32")
+        if self._platform == "win32" and kernel32 is not None:
             try:
-                mem_fn = self._windll.kernel32.GetPhysicallyInstalledSystemMemory
+                mem_fn = kernel32.GetPhysicallyInstalledSystemMemory
                 with contextlib.suppress(AttributeError, TypeError):
                     mem_fn.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
                     mem_fn.restype = ctypes.c_int
                 mem_kb = ctypes.c_ulonglong(0)
                 if mem_fn(ctypes.byref(mem_kb)):
                     return max(4 * GIB_BYTES, int(mem_kb.value) * 1024)
-            except Exception:
+            except OSError, AttributeError, TypeError, ctypes.ArgumentError:
                 pass
         sysconf = getattr(os, "sysconf", None)
         if callable(sysconf):
@@ -775,164 +645,27 @@ class NativeSystemBackend:
                 pass
         return 16 * GIB_BYTES
 
-    @staticmethod
-    def _sys32_exe(exe_name: str) -> str:
-        """Resolve a system binary from Win32 GetSystemDirectoryW (or %SystemRoot%\\System32 off-Windows)."""
-        if sys.platform == "win32":
-            windll: Any = getattr(ctypes, "windll", None)
-            if windll is not None:
-                get_sys_dir = windll.kernel32.GetSystemDirectoryW
-                get_sys_dir.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
-                get_sys_dir.restype = ctypes.c_uint
-                buf = ctypes.create_unicode_buffer(260)
-                if get_sys_dir(buf, 260) > 0:
-                    return f"{buf.value.rstrip('/\\')}\\{exe_name}"
-        sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
-        if sys_root.endswith("\\") or sys_root.endswith("/"):
-            sys_root = sys_root[:-1]
-        sep = "\\" if "\\" in sys_root or (len(sys_root) >= 2 and sys_root[1] == ":") else "/"
-        return f"{sys_root}{sep}System32{sep}{exe_name}"
+    def _sys32_exe(self, exe_name: str) -> str:
+        return sys32_exe(exe_name, self._windll_override)
 
-    @staticmethod
-    def _resolve_winget_exe() -> str:
-        """Resolve winget.exe from %LOCALAPPDATA%\\Microsoft\\WindowsApps first, then PATH."""
-        import shutil
-
-        local_app = os.environ.get("LOCALAPPDATA", "")
-        if local_app:
-            cand = Path(local_app) / "Microsoft" / "WindowsApps" / "winget.exe"
-            if cand.is_file():
-                return str(cand)
-        trusted_winget_dir = f"{local_app}\\Microsoft\\WindowsApps" if local_app else ""
-        return (shutil.which("winget.exe", path=trusted_winget_dir) if trusted_winget_dir else None) or (
-            f"{local_app}\\Microsoft\\WindowsApps\\winget.exe" if local_app else r"C:\Windows\System32\winget.exe"
-        )
-
-    @staticmethod
-    def _resolve_code_cmd() -> str:
-        """Resolve VS Code CLI (code.cmd) from trusted install directories first, then PATH."""
-        import shutil
-
-        local_app = os.environ.get("LOCALAPPDATA", "")
-        prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        candidates = [
-            Path(local_app) / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd" if local_app else None,
-            Path(prog) / "Microsoft VS Code" / "bin" / "code.cmd",
-        ]
-        for cand in candidates:
-            if cand is not None and cand.is_file():
-                return str(cand)
-        trusted_code_dirs = os.pathsep.join(
-            p
-            for p in (
-                f"{local_app}\\Programs\\Microsoft VS Code\\bin" if local_app else "",
-                rf"{prog}\Microsoft VS Code\bin",
-            )
-            if p
-        )
-        return shutil.which("code.cmd", path=trusted_code_dirs) or (
-            f"{local_app}\\Programs\\Microsoft VS Code\\bin\\code.cmd"
-            if local_app
-            else rf"{prog}\Microsoft VS Code\bin\code.cmd"
-        )
-
-    @staticmethod
-    def _resolve_git_exe() -> str | None:
-        """Resolve git.exe from trusted Program Files / user Winget paths first, then PATH."""
-        prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        local_app = os.environ.get("LOCALAPPDATA", "")
-        candidates = [
-            Path(prog) / "Git" / "cmd" / "git.exe",
-            Path(local_app) / "Programs" / "Git" / "cmd" / "git.exe" if local_app else None,
-        ]
-        for cand in candidates:
-            if cand is not None and cand.is_file():
-                return str(cand)
-        import shutil
-
-        trusted_git_dirs = os.pathsep.join(
-            p
-            for p in (
-                rf"{prog}\Git\cmd",
-                f"{local_app}\\Programs\\Git\\cmd" if local_app else "",
-            )
-            if p
-        )
-        return shutil.which("git.exe", path=trusted_git_dirs) or (
-            shutil.which("git", path="/usr/bin:/bin:/usr/local/bin") if sys.platform != "win32" else None
-        )
+    _resolve_winget_exe = staticmethod(resolve_winget_exe)
+    _resolve_code_cmd = staticmethod(resolve_code_cmd)
+    _resolve_git_exe = staticmethod(resolve_git_exe)
 
     def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
-        if self._platform != "win32":
-            return None
-        guid_arg = subcategory_guid if subcategory_guid.startswith("{") else f"{{{subcategory_guid}}}"
-        res = self._run_native_cmd([self._sys32_exe("auditpol.exe"), "/get", f"/subcategory:{guid_arg}", "/r", "/v"])
-        if res.returncode != 0:
-            return None
-        value_map = {
-            "0": "No Auditing",
-            "1": "Success",
-            "2": "Failure",
-            "3": "Success and Failure",
-        }
-        for line in res.stdout.splitlines():
-            if guid_arg.lower() in line.lower():
-                parts = [p.strip().strip('"') for p in line.split(",")]
-                if parts and parts[-1] in value_map:
-                    return value_map[parts[-1]]
-                if len(parts) >= 5:
-                    return parts[4]
-        return None
+        return get_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid)
 
     def set_auditpol_subcategory(self, subcategory_guid: str, success: bool, failure: bool) -> bool:
-        if self._platform != "win32":
-            return False
-        guid_arg = subcategory_guid if subcategory_guid.startswith("{") else f"{{{subcategory_guid}}}"
-        succ_flag = "enable" if success else "disable"
-        fail_flag = "enable" if failure else "disable"
-        res = self._run_native_cmd(
-            [
-                self._sys32_exe("auditpol.exe"),
-                "/set",
-                f"/subcategory:{guid_arg}",
-                f"/success:{succ_flag}",
-                f"/failure:{fail_flag}",
-            ]
-        )
-        return res.returncode == 0
+        return set_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid, success, failure)
 
     def backup_auditpol(self, output_csv: Path) -> bool:
-        if self._platform != "win32":
-            return False
-        output_csv.parent.mkdir(parents=True, exist_ok=True)
-        if output_csv.exists():
-            output_csv.unlink()
-        res = self._run_native_cmd([self._sys32_exe("auditpol.exe"), "/backup", f"/file:{output_csv}"])
-        return res.returncode == 0
+        return _sec_backup_auditpol(self._run_native_cmd, self._platform, output_csv)
 
     def restore_auditpol(self, input_csv: Path) -> bool:
-        if self._platform != "win32" or not input_csv.is_file():
-            return False
-        res = self._run_native_cmd([self._sys32_exe("auditpol.exe"), "/restore", f"/file:{input_csv}"])
-        return res.returncode == 0
+        return _sec_restore_auditpol(self._run_native_cmd, self._platform, input_csv)
 
     def get_event_log_config(self, channel: str) -> tuple[bool | None, int | None]:
-        if self._platform != "win32":
-            return None, None
-        res = self._run_native_cmd([self._sys32_exe("wevtutil.exe"), "gl", channel, "/f:xml"])
-        if res.returncode != 0:
-            return None, None
-        out = res.stdout
-        en_attr = re.search(r'<channel\b[^>]*\benabled="(true|false)"', out, re.IGNORECASE)
-        en_tag = re.search(r"<enabled>\s*(true|false)\s*</enabled>", out, re.IGNORECASE)
-        enabled: bool | None = None
-        if en_attr is not None:
-            enabled = en_attr.group(1).lower() == "true"
-        elif en_tag is not None:
-            enabled = en_tag.group(1).lower() == "true"
-        sz_match = re.search(r"<maxSize>\s*(\d+)\s*</maxSize>", out, re.IGNORECASE)
-        max_size = int(sz_match.group(1)) if sz_match is not None else None
-        return enabled, max_size
+        return get_event_log_config(self._run_native_cmd, self._platform, channel)
 
     def set_event_log_config(
         self,
@@ -940,124 +673,25 @@ class NativeSystemBackend:
         enabled: bool | None = None,
         max_size_bytes: int | None = None,
     ) -> bool:
-        if self._platform != "win32":
-            return False
-        cmd = [self._sys32_exe("wevtutil.exe"), "sl", channel]
-        if enabled is not None:
-            cmd.append(f"/e:{'true' if enabled else 'false'}")
-        if max_size_bytes is not None:
-            cmd.append(f"/ms:{max_size_bytes}")
-        res = self._run_native_cmd(cmd)
-        return res.returncode == 0
+        return set_event_log_config(self._run_native_cmd, self._platform, channel, enabled, max_size_bytes)
 
     def is_firewall_group_enabled(self, registry: RegistryBackend, group_resource_id: str) -> bool | None:
-        fw_rules_key = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
-        target_embed = f"embedctxt={group_resource_id.lower()}"
-        matched = False
-        for _, vdata, _ in registry.list_values(HIVE_HKLM, fw_rules_key):
-            if isinstance(vdata, str):
-                low_val = vdata.lower()
-                if target_embed in low_val:
-                    matched = True
-                    if "active=true" in low_val:
-                        return True
-        if matched:
-            return False
-        return False
+        return is_firewall_group_enabled(registry, group_resource_id)
 
     def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
-        if self._platform != "win32":
-            return False
-        en_str = "yes" if enabled else "no"
-        res = self._run_native_cmd(
-            [
-                self._sys32_exe("netsh.exe"),
-                "advfirewall",
-                "firewall",
-                "set",
-                "rule",
-                f"group={group_resource_id}",
-                "new",
-                f"enable={en_str}",
-            ]
-        )
-        return res.returncode == 0
+        return set_firewall_group_enabled(self._run_native_cmd, self._platform, group_resource_id, enabled)
 
     def export_firewall_policy(self, output_wfw: Path) -> bool:
-        if self._platform != "win32":
-            return False
-        output_wfw.parent.mkdir(parents=True, exist_ok=True)
-        if output_wfw.exists():
-            output_wfw.unlink()
-        res = self._run_native_cmd([self._sys32_exe("netsh.exe"), "advfirewall", "export", str(output_wfw)])
-        return res.returncode == 0
+        return _sec_export_firewall_policy(self._run_native_cmd, self._platform, output_wfw)
 
     def import_firewall_policy(self, input_wfw: Path) -> bool:
-        if self._platform != "win32" or not input_wfw.is_file():
-            return False
-        res = self._run_native_cmd([self._sys32_exe("netsh.exe"), "advfirewall", "import", str(input_wfw)])
-        return res.returncode == 0
+        return _sec_import_firewall_policy(self._run_native_cmd, self._platform, input_wfw)
 
     def is_dir_case_sensitive(self, directory: str) -> bool | None:
-        if self._platform != "win32":
-            return None
-        res = self._run_native_cmd([self._sys32_exe("fsutil.exe"), "file", "queryCaseSensitiveInfo", directory])
-        if res.returncode != 0:
-            return None
-        low = res.stdout.strip().lower()
-        if "enabled" in low or low.endswith("1."):
-            return True
-        if "disabled" in low or low.endswith("0."):
-            return False
-        # Non-English Windows fsutil output: query Win32 FileCaseSensitiveInfo (23) directly (locale-independent).
-        if self._windll is not None:
-            try:
-                k32 = self._windll.kernel32
-                with contextlib.suppress(AttributeError, TypeError):
-                    k32.CreateFileW.argtypes = [
-                        ctypes.c_wchar_p,
-                        ctypes.c_ulong,
-                        ctypes.c_ulong,
-                        ctypes.c_void_p,
-                        ctypes.c_ulong,
-                        ctypes.c_ulong,
-                        ctypes.c_void_p,
-                    ]
-                    k32.CreateFileW.restype = ctypes.c_void_p
-                    k32.GetFileInformationByHandleEx.argtypes = [
-                        ctypes.c_void_p,
-                        ctypes.c_int,
-                        ctypes.c_void_p,
-                        ctypes.c_ulong,
-                    ]
-                    k32.GetFileInformationByHandleEx.restype = ctypes.c_int
-                    k32.CloseHandle.argtypes = [ctypes.c_void_p]
-                    k32.CloseHandle.restype = ctypes.c_int
-                handle = k32.CreateFileW(directory, 0x80, 7, None, 3, 0x02000000, None)
-                invalid = ctypes.c_void_p(-1).value
-                if handle not in (None, 0, invalid, -1):
-                    try:
-                        flags = ctypes.c_ulong(0)
-                        if k32.GetFileInformationByHandleEx(
-                            ctypes.c_void_p(handle), 23, ctypes.byref(flags), ctypes.sizeof(flags)
-                        ):
-                            return bool(flags.value & 1)
-                    finally:
-                        k32.CloseHandle(ctypes.c_void_p(handle))
-            except Exception:
-                pass
-        return None
+        return is_dir_case_sensitive(self._run_native_cmd, self._platform, directory, self._get_dll("kernel32"))
 
     def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
-        if self._platform != "win32":
-            return False
-        dir_path = Path(directory)
-        if not enabled and dir_path.is_dir() and any(dir_path.iterdir()):
-            return False
-        dir_path.mkdir(parents=True, exist_ok=True)
-        flag = "enable" if enabled else "disable"
-        res = self._run_native_cmd([self._sys32_exe("fsutil.exe"), "file", "setCaseSensitiveInfo", directory, flag])
-        return res.returncode == 0
+        return set_dir_case_sensitive(self._run_native_cmd, self._platform, directory, enabled)
 
     def is_hibernate_enabled(self, registry: RegistryBackend) -> bool | None:
         val = registry.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled")
@@ -1073,134 +707,24 @@ class NativeSystemBackend:
         return res.returncode == 0
 
     def get_git_global_config(self, key: str) -> str | None:
-        git_exe = self._resolve_git_exe()
-        if git_exe is None:
-            return None
-        res = self._run_native_cmd([git_exe, "config", "--global", "--get", key])
-        if res.returncode != 0:
-            return None
-        return res.stdout.strip()
+        return get_git_global_config(self._run_native_cmd, key, self._resolve_git_exe)
 
     def set_git_global_config(self, key: str, value: str | None) -> bool:
-        git_exe = self._resolve_git_exe()
-        if git_exe is None:
-            return False
-        if value is None:
-            res = self._run_native_cmd([git_exe, "config", "--global", "--unset", key])
-            return res.returncode in (0, 5)
-        res = self._run_native_cmd([git_exe, "config", "--global", key, value])
-        return res.returncode == 0
+        return set_git_global_config(self._run_native_cmd, key, value, self._resolve_git_exe)
 
     def _get_current_user_sid(self) -> str | None:
-        """Resolve the current process user's SID via locale-independent whoami CSV output."""
-        if self._platform != "win32":
-            return None
-        res = self._run_native_cmd([self._sys32_exe("whoami.exe"), "/user", "/fo", "csv", "/nh"])
-        if res.returncode != 0:
-            return None
-        for row in csv.reader(res.stdout.splitlines()):
-            if len(row) >= 2 and row[1].strip().startswith("S-1-"):
-                return row[1].strip()
-        return None
+        return get_current_user_sid(self._run_native_cmd, self._platform)
 
-    @staticmethod
-    def _is_sddl_restricted_to_sid(sddl: str, owner_sid: str) -> bool:
-        """Return True iff the SDDL DACL is protected (D:P) and allows only owner_sid (or OW)."""
-        dacl_idx = sddl.find("D:")
-        if dacl_idx == -1:
-            return False
-        dacl_tail = sddl[dacl_idx + 2 :]
-        sacl_idx = dacl_tail.find("S:")
-        dacl_body = dacl_tail[:sacl_idx] if sacl_idx != -1 else dacl_tail
-        flags = dacl_body.split("(", 1)[0]
-        if "P" not in flags:
-            return False
-        aces = re.findall(r"\(([^)]+)\)", dacl_body)
-        if not aces:
-            return False
-        has_owner_allow = False
-        for ace in aces:
-            parts = ace.split(";")
-            if len(parts) < 6:
-                return False
-            ace_type = parts[0].strip().upper()
-            trustee = parts[5].strip()
-            if ace_type in {"A", "OA"}:
-                if trustee not in {owner_sid, "OW"}:
-                    return False
-                has_owner_allow = True
-        return has_owner_allow
+    _is_sddl_restricted_to_sid = staticmethod(is_sddl_restricted_to_sid)
 
     def is_ssh_acl_restricted(self, path_str: str) -> bool:
-        expanded = os.path.expandvars(os.path.expanduser(path_str))
-        target = Path(expanded)
-        if not target.exists():
-            return True
-        if self._platform != "win32":
-            return False
-        owner_sid = self._get_current_user_sid()
-        if owner_sid is not None:
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                acl_file = Path(tmp_dir) / "acl.sddl"
-                save_res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/save", str(acl_file)])
-                if save_res.returncode == 0 and acl_file.is_file():
-                    raw_bytes = acl_file.read_bytes()
-                    sddl_text = (
-                        raw_bytes.decode("utf-16-le", errors="replace")
-                        if b"\x00" in raw_bytes or raw_bytes.startswith(b"\xff\xfe")
-                        else raw_bytes.decode("utf-8", errors="replace")
-                    ).lstrip("\ufeff")
-                    sddl_lines = [ln.strip() for ln in sddl_text.splitlines() if "D:" in ln]
-                    if sddl_lines:
-                        return all(self._is_sddl_restricted_to_sid(ln, owner_sid) for ln in sddl_lines)
-        res = self._run_native_cmd([self._sys32_exe("icacls.exe"), expanded])
-        if res.returncode != 0:
-            return False
-        ace_lines = [ln.strip() for ln in res.stdout.splitlines() if ":" in ln and "(" in ln]
-        if len(ace_lines) != 1:
-            return False
-        low_ace = ace_lines[0].lower()
-        return not any(broad in low_ace for broad in ("everyone:", "authenticated users:", "builtin\\users:"))
+        return is_ssh_acl_restricted(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)
 
     def backup_acl(self, path_str: str, backup_file: Path) -> bool:
-        if self._platform != "win32":
-            return False
-        expanded = os.path.expandvars(os.path.expanduser(path_str))
-        target = Path(expanded)
-        if not target.exists():
-            return True
-        backup_file.parent.mkdir(parents=True, exist_ok=True)
-        res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/save", str(backup_file)])
-        return res.returncode == 0
+        return backup_acl(self._run_native_cmd, self._platform, path_str, backup_file)
 
     def restore_acl(self, path_str: str, backup_file: Path) -> bool:
-        if self._platform != "win32" or not backup_file.is_file():
-            return False
-        expanded = os.path.expandvars(os.path.expanduser(path_str))
-        target = Path(expanded)
-        if not target.exists():
-            return False
-        res = self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target.parent), "/restore", str(backup_file)])
-        return res.returncode == 0
+        return restore_acl(self._run_native_cmd, self._platform, path_str, backup_file)
 
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
-        if self._platform != "win32":
-            return False
-        expanded = os.path.expandvars(os.path.expanduser(path_str))
-        target = Path(expanded)
-        if not target.exists():
-            return True
-        owner_sid = self._get_current_user_sid()
-        principal = f"*{owner_sid}" if owner_sid else (os.environ.get("USERNAME") or os.getlogin())
-        # Reset explicit ACEs to inherited first so /inheritance:r leaves only the current user SID.
-        self._run_native_cmd([self._sys32_exe("icacls.exe"), str(target), "/reset"])
-        res = self._run_native_cmd(
-            [
-                self._sys32_exe("icacls.exe"),
-                str(target),
-                "/inheritance:r",
-                "/grant:r",
-                f"{principal}:(OI)(CI)F" if target.is_dir() else f"{principal}:F",
-            ]
-        )
-        return res.returncode == 0
+        return restrict_acl_to_current_user(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)

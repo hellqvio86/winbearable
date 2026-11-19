@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +21,8 @@ from ..models import (
     TweakDefinition,
     WinbearableError,
 )
-from .base import OperationApplyContext, format_registry_op
+from .base import OperationApplyContext, format_registry_op, now_iso
 from .identity import registry_key_id, registry_value_id
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
 
 
 def _val_fp(existed: bool, data: Any, val_type: str | None) -> str:
@@ -58,6 +53,7 @@ class RegistryOperationAdapter:
             for reg_spec in expanded:
                 if reg_spec.action == ACTION_DELETE_KEY:
                     exists = registry.key_exists(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)
+                    kid = registry_key_id(reg_spec.hive, reg_spec.key_path, reg_spec.view)
                     ops.append(
                         format_registry_op(
                             reg_spec.full_path,
@@ -66,6 +62,7 @@ class RegistryOperationAdapter:
                             exists,
                             None,
                             tweak.irreversible,
+                            target_id=kid,
                         )
                     )
                     if exists:
@@ -82,6 +79,7 @@ class RegistryOperationAdapter:
                     else (cur_exists and cur_val == reg_spec.value_data and cur_type == reg_spec.value_type)
                 )
                 display_val = reg_spec.value_name or "(Default)"
+                vid = registry_value_id(reg_spec.hive, reg_spec.key_path, reg_spec.value_name, reg_spec.view)
                 ops.append(
                     format_registry_op(
                         reg_spec.full_path,
@@ -90,6 +88,7 @@ class RegistryOperationAdapter:
                         cur_val,
                         reg_spec.value_data,
                         tweak.irreversible,
+                        target_id=vid,
                     )
                 )
                 if not is_compliant:
@@ -117,17 +116,7 @@ class RegistryOperationAdapter:
                     kid = registry_key_id(reg_spec.hive, reg_spec.key_path, reg_spec.view)
                     if kid not in seen_ids:
                         key_snap = registry.snapshot_key(reg_spec.hive, reg_spec.key_path, view=reg_spec.view)
-                        snaps.append(
-                            RegistryKeySnapshot(
-                                hive=key_snap.hive,
-                                key_path=key_snap.key_path,
-                                existed=key_snap.existed,
-                                values=key_snap.values,
-                                subkeys=key_snap.subkeys,
-                                view=key_snap.view,
-                                post_existed=False,
-                            )
-                        )
+                        snaps.append(key_snap)
                         seen_ids.add(kid)
                 else:
                     vid = registry_value_id(reg_spec.hive, reg_spec.key_path, reg_spec.value_name, reg_spec.view)
@@ -135,22 +124,7 @@ class RegistryOperationAdapter:
                         pre = registry.snapshot_value(
                             reg_spec.hive, reg_spec.key_path, reg_spec.value_name, view=reg_spec.view
                         )
-                        post_existed = reg_spec.action != ACTION_DELETE
-                        snaps.append(
-                            RegistryValueSnapshot(
-                                hive=pre.hive,
-                                key_path=pre.key_path,
-                                value_name=pre.value_name,
-                                key_existed=pre.key_existed,
-                                value_existed=pre.value_existed,
-                                previous_data=pre.previous_data,
-                                previous_type=pre.previous_type,
-                                view=pre.view,
-                                post_existed=post_existed,
-                                post_data=reg_spec.value_data if post_existed else None,
-                                post_type=reg_spec.value_type if post_existed else None,
-                            )
-                        )
+                        snaps.append(pre)
                         seen_ids.add(vid)
         return snaps
 
@@ -165,7 +139,7 @@ class RegistryOperationAdapter:
         entries: list[OperationJournalEntry] = []
         for raw_spec in tweak.registry_specs:
             for reg_spec in expand_registry_spec(raw_spec, registry):
-                started = _now_iso()
+                started = now_iso()
                 subtree = (reg_spec.hive, reg_spec.key_path, reg_spec.view)
                 if (
                     tweak.requires_admin
@@ -205,7 +179,7 @@ class RegistryOperationAdapter:
                         pre_fingerprint="present" if pre_exists else "absent",
                         post_fingerprint="absent",
                         started_at=started,
-                        ended_at=_now_iso(),
+                        ended_at=now_iso(),
                         verification_status="verified",
                     )
                     entries.append(entry)
@@ -226,7 +200,7 @@ class RegistryOperationAdapter:
                         pre_fingerprint=_val_fp(pre is not None, pre[0] if pre else None, pre[1] if pre else None),
                         post_fingerprint="absent",
                         started_at=started,
-                        ended_at=_now_iso(),
+                        ended_at=now_iso(),
                         verification_status="verified",
                     )
                     entries.append(entry)
@@ -254,7 +228,7 @@ class RegistryOperationAdapter:
                         pre_fingerprint=_val_fp(pre is not None, pre[0] if pre else None, pre[1] if pre else None),
                         post_fingerprint=_val_fp(True, reg_spec.value_data, reg_spec.value_type),
                         started_at=started,
-                        ended_at=_now_iso(),
+                        ended_at=now_iso(),
                         verification_status="verified",
                     )
                     entries.append(entry)
@@ -280,10 +254,14 @@ class RegistryOperationAdapter:
         force: bool = False,
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
+        attempted_targets: set[str] | None = None,
     ) -> list[str]:
         errors: list[str] = []
         for snap in reversed(snapshots):
             if isinstance(snap, RegistryValueSnapshot):
+                vid = registry_value_id(snap.hive, snap.key_path, snap.value_name, snap.view)
+                if attempted_targets is not None and vid not in attempted_targets:
+                    continue
                 try:
                     if not force and snap.post_existed is not None:
                         cur_val = registry.get_value(snap.hive, snap.key_path, snap.value_name, view=snap.view)
@@ -310,6 +288,9 @@ class RegistryOperationAdapter:
                 except Exception as exc:
                     errors.append(f"registry {snap.full_key_path} [{snap.display_value_name}]: {exc}")
             elif isinstance(snap, RegistryKeySnapshot):
+                kid = registry_key_id(snap.hive, snap.key_path, snap.view)
+                if attempted_targets is not None and kid not in attempted_targets:
+                    continue
                 try:
                     if not force and snap.post_existed is not None:
                         cur_exists = registry.key_exists(snap.hive, snap.key_path, view=snap.view)

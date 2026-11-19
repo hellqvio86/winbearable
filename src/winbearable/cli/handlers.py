@@ -1,4 +1,4 @@
-"""CLI subcommand handlers, dispatch table, UAC relay, and entrypoint."""
+"""Core CLI subcommand handlers, dispatch table, UAC relay, and entrypoint."""
 
 from __future__ import annotations
 
@@ -8,8 +8,7 @@ import io
 import json
 import os
 import sys
-import uuid
-from datetime import UTC, datetime
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,55 +31,47 @@ from ..engine import (
     HighRiskConfirmationError,
     IncompleteJournalError,
     IrreversibleActionError,
-    apply_profile,
-    calculate_hardening_score,
-    detect_tweak,
     evaluate_profile,
     inspect_defender_smartscreen_posture,
     inspect_vbs_credential_guard_posture,
     is_managed_device,
     recover_incomplete_runs,
     rollback_runs,
+    run_profile_command,
+    summarize_elevation_requirements,
 )
-from ..hyperv_firewall import set_wsl_hyperv_firewall_setting
 from ..models import (
     EnvironmentInfo,
-    HypervFirewallSnapshot,
     ObservationState,
-    RunRecord,
+    PermissionDeniedError,
     TransactionState,
     TweakStatus,
     UnsupportedPlatformError,
-    WslConfigSpec,
+    WinbearableError,
 )
-from ..profiles import (
-    ProfileValidationError,
-    generate_init_profile_json,
-    generate_init_profile_toml,
-    get_builtin_profiles_dir,
-    get_default_user_profile_path,
-    load_profile,
-    migrate_profile_file,
-)
+from ..profiles import ProfileValidationError, load_profile
 from ..state import StateStore, StateStoreError
-from ..tui import launch_tui
-from ..tweaks import get_all_tweaks, get_tweak
-from ..uac import UacCancelledError, UacElevationError, run_elevated_wb, set_console_title, write_uac_output_safe
-from ..wsl import (
-    WslOperationError,
-    apply_wsl_linux_baseline,
-    audit_wsl,
-    export_wsl_distro,
-    import_wsl_distro,
-    install_wsl_distro,
-    plan_or_apply_wsl,
-    set_default_wsl_distro,
-    set_wsl_distro_sparse,
-    update_wsl,
+from ..uac import (
+    UacCancelledError,
+    UacElevationError,
+    sanitize_elevated_python_env,
+    set_console_title,
+    write_uac_output_safe,
+)
+from ..wsl import WslOperationError
+from .handlers_tools import (
+    CliDeps,
+    handle_audit,
+    handle_init,
+    handle_list,
+    handle_migrate,
+    handle_schema,
+    handle_show,
+    handle_tui,
+    handle_wsl,
 )
 from .parser import absolutize_elevated_argv, build_parser
 from .render import (
-    JSON_SCHEMAS,
     detailed_exit_code,
     format_summary_markdown,
     parse_id_list,
@@ -89,35 +80,52 @@ from .render import (
 )
 
 
-def _cli_attr(name: str, default_fn: Any) -> Any:
-    pkg_mod = sys.modules.get("winbearable.cli")
-    return getattr(pkg_mod, name, default_fn) if pkg_mod is not None else default_fn
+def _load_expected_fingerprints(args: argparse.Namespace) -> dict[str, str] | None:
+    """Parse --expected-fingerprints (JSON string or @file) or --plan-file into a fingerprint map."""
+    raw_fp = getattr(args, "expected_fingerprints", None)
+    plan_file = getattr(args, "plan_file", None)
+    merged: dict[str, str] = {}
+    if plan_file:
+        payload = json.loads(Path(plan_file).read_text(encoding="utf-8"))
+        fp_map = payload.get("precondition_fingerprints")
+        if not isinstance(fp_map, dict):
+            raise ValueError(f"Plan file '{plan_file}' does not contain 'precondition_fingerprints'.")
+        for k, v in fp_map.items():
+            merged[str(k)] = str(v)
+    if raw_fp:
+        raw_text = Path(raw_fp[1:]).read_text(encoding="utf-8") if raw_fp.startswith("@") else raw_fp
+        fp_map = json.loads(raw_text)
+        if not isinstance(fp_map, dict):
+            raise ValueError("--expected-fingerprints must decode to a JSON object.")
+        for k, v in fp_map.items():
+            merged[str(k)] = str(v)
+    return merged if (plan_file or raw_fp) else None
 
 
 def _handle_doctor(
     args: argparse.Namespace,
-    raw_argv: list[str],
+    _raw_argv: list[str],
     reg_backend: RegistryBackend,
     sys_backend: SystemBackend,
     store: StateStore,
     env: EnvironmentInfo,
-    dry_run: bool,
+    _dry_run: bool,
+    deps: CliDeps,
 ) -> int:
-    if env.is_windows or env.host_auditable:
-        audit: dict[str, Any] = _cli_attr("calculate_hardening_score", calculate_hardening_score)(
-            env, reg_backend, sys_backend
-        )
-    else:
-        audit = {
+    audit: dict[str, Any] = (
+        deps.calc_score_fn(env, reg_backend, sys_backend)
+        if (env.is_windows or env.host_auditable)
+        else {
             "applicable": False,
-            "reason": "Not running on Windows (or WSL2 interop is disabled)",
             "passed": 0,
             "total": 0,
             "score_percent": 0.0,
             "cis_passed": 0,
             "cis_total": 0,
+            "results": [],
         }
-    wsl_info = _cli_attr("audit_wsl", audit_wsl)(env, system=sys_backend, registry=reg_backend)
+    )
+    wsl_info = deps.audit_wsl_fn(env, system=sys_backend, registry=reg_backend)
     security_findings = (
         run_security_audit(env, reg_backend, sys_backend, wsl_audit_data=wsl_info)
         if (env.is_windows or env.host_auditable)
@@ -137,18 +145,8 @@ def _handle_doctor(
         inspect_defender_smartscreen_posture(reg_backend)
         if (env.is_windows or env.host_auditable)
         else {
-            "defender_pua": {
-                "state": "unknown",
-                "confidence": "unknown",
-                "managed_by_wb": False,
-                "source": "none",
-            },
-            "smartscreen": {
-                "state": "unknown",
-                "confidence": "unknown",
-                "managed_by_wb": False,
-                "source": "none",
-            },
+            "defender_pua": {"state": "unknown", "confidence": "unknown", "managed_by_wb": False, "source": "none"},
+            "smartscreen": {"state": "unknown", "confidence": "unknown", "managed_by_wb": False, "source": "none"},
             "note": "Windows host registry unavailable.",
         }
     )
@@ -158,11 +156,7 @@ def _handle_doctor(
         else {
             "vbs": {"state": "unknown", "confidence": "unknown"},
             "hvci": {"state": "unknown", "confidence": "unknown"},
-            "credential_guard": {
-                "state": "unknown",
-                "confidence": "unknown",
-                "auto_enable_supported": False,
-            },
+            "credential_guard": {"state": "unknown", "confidence": "unknown", "auto_enable_supported": False},
             "wsl_performance_note": "Windows host registry unavailable.",
         }
     )
@@ -272,8 +266,12 @@ def _handle_doctor(
                 f"Privacy {priv.get('passed', 0)}/{priv.get('total_applicable', 0)} | "
                 f"Usability {usab.get('passed', 0)}/{usab.get('total_applicable', 0)} | "
                 f"Developer {dev.get('passed', 0)}/{dev.get('total_applicable', 0)}\n"
-                f"CIS Technical Checks (partial): {audit['cis_passed']}/{audit['cis_total']}\n"
-                f"Defender PUA: {posture['defender_pua']['state']} "
+                + (
+                    f"CIS Technical Checks (partial): {audit['cis_passed']}/{audit['cis_total']}\n"
+                    if audit.get("cis_total", 0) > 0
+                    else ""
+                )
+                + f"Defender PUA: {posture['defender_pua']['state']} "
                 f"(confidence={posture['defender_pua']['confidence']}, "
                 f"source={posture['defender_pua']['source']}) | "
                 f"SmartScreen: {posture['smartscreen']['state']} "
@@ -282,8 +280,7 @@ def _handle_doctor(
                 f"VBS/HVCI/Credential Guard: "
                 f"vbs={vbs_cg['vbs']['state']} | "
                 f"hvci={vbs_cg['hvci']['state']} | "
-                f"credential_guard={vbs_cg['credential_guard']['state']} "
-                f"(observe-only)\n"
+                f"credential_guard={vbs_cg['credential_guard']['state']} (observe-only)\n"
                 f"Linux Refugee Summary: "
                 f"build_supported={refugee_summary['windows_build_supported']} "
                 f"| enterprise_leftovers={refugee_summary['domain_or_mdm_leftovers']} "
@@ -313,12 +310,13 @@ def _handle_doctor(
 
 def _handle_status(
     args: argparse.Namespace,
-    raw_argv: list[str],
+    _raw_argv: list[str],
     reg_backend: RegistryBackend,
     sys_backend: SystemBackend,
-    store: StateStore,
+    _store: StateStore,
     env: EnvironmentInfo,
-    dry_run: bool,
+    _dry_run: bool,
+    _deps: CliDeps,
 ) -> int:
     profile = load_profile(args.profile)
     only_ids = parse_id_list(getattr(args, "only", None))
@@ -353,18 +351,19 @@ def _handle_status(
 
 def _handle_plan(
     args: argparse.Namespace,
-    raw_argv: list[str],
+    _raw_argv: list[str],
     reg_backend: RegistryBackend,
     sys_backend: SystemBackend,
     store: StateStore,
     env: EnvironmentInfo,
-    dry_run: bool,
+    _dry_run: bool,
+    _deps: CliDeps,
 ) -> int:
     profile = load_profile(args.profile)
     only_ids = parse_id_list(getattr(args, "only", None))
     skip_ids = parse_id_list(getattr(args, "skip", None))
     allow_managed = bool(getattr(args, "allow_managed", False))
-    summary = apply_profile(
+    summary = run_profile_command(
         profile=profile,
         env=env,
         registry=reg_backend,
@@ -404,7 +403,8 @@ def _handle_apply(
     sys_backend: SystemBackend,
     store: StateStore,
     env: EnvironmentInfo,
-    dry_run: bool,
+    _dry_run: bool,
+    deps: CliDeps,
 ) -> int:
     if args.apply:
         require_windows_for_mutation(env, "wb apply --apply")
@@ -412,11 +412,13 @@ def _handle_apply(
     only_ids = parse_id_list(getattr(args, "only", None))
     skip_ids = parse_id_list(getattr(args, "skip", None))
     allow_managed = bool(getattr(args, "allow_managed", False))
-    if args.apply and not env.is_admin and not args.uac_output:
-        if args.elevate:
-            return _relay_elevated_uac(raw_argv)
-        if not args.json and sys.stdin.isatty():
-            preview_eval = evaluate_profile(
+    expected_fp = _load_expected_fingerprints(args)
+
+    caller_sid = getattr(args, "uac_caller_sid", None)
+    if caller_sid:
+        current_sid = deps.caller_sid_fn()
+        if current_sid and caller_sid != current_sid:
+            preview_sid = evaluate_profile(
                 profile,
                 env,
                 reg_backend,
@@ -426,17 +428,51 @@ def _handle_apply(
                 category_filter=getattr(args, "category", None),
                 allow_managed=allow_managed,
             )
-            admin_needed = [item for item in preview_eval if item.status == TweakStatus.REQUIRES_ADMIN]
-            if admin_needed:
-                answer = input(
-                    f"{len(admin_needed)} tweak(s) require Administrator privileges. Request UAC elevation now? [Y/n] "
+            user_ops = [
+                f"{r.tweak_id}:{op.target}"
+                for r in preview_sid
+                if r.status == TweakStatus.DRIFTED
+                for op in r.operations
+                if op.scope == "user"
+            ]
+            if user_ops:
+                raise PermissionDeniedError(
+                    "Refusing user-scope tweaks after UAC elevation under a different user SID "
+                    f"(caller={caller_sid}, current={current_sid}): {', '.join(user_ops)}",
+                    context={"caller_sid": caller_sid, "current_sid": current_sid, "user_operations": user_ops},
                 )
-                if answer.strip().lower() in {"", "y", "yes"}:
-                    try:
-                        return _relay_elevated_uac(raw_argv)
-                    except UacCancelledError:
-                        sys.stderr.write("UAC elevation cancelled; continuing with non-admin tweaks only.\n")
-    summary = apply_profile(
+
+    if args.apply and not env.is_admin and not args.uac_output:
+        preview_eval = evaluate_profile(
+            profile,
+            env,
+            reg_backend,
+            sys_backend,
+            only_ids=only_ids,
+            skip_ids=skip_ids,
+            category_filter=getattr(args, "category", None),
+            allow_managed=allow_managed,
+        )
+        priv_summary = summarize_elevation_requirements(preview_eval)
+        if priv_summary["mixed_privilege"]:
+            sys.stderr.write(
+                "Notice: profile mixes machine-scope and user-scope operations; "
+                "over-the-shoulder UAC under a different admin account will block user-scope targets.\n"
+            )
+        if args.elevate:
+            return _relay_elevated_uac(raw_argv, deps)
+        if not args.json and sys.stdin.isatty() and priv_summary["requires_elevation"]:
+            admin_needed = priv_summary["admin_tweaks"]
+            answer = input(
+                f"{len(admin_needed)} tweak(s) require Administrator privileges. Request UAC elevation now? [Y/n] "
+            )
+            if answer.strip().lower() in {"", "y", "yes"}:
+                try:
+                    return _relay_elevated_uac(raw_argv, deps)
+                except UacCancelledError:
+                    sys.stderr.write("UAC elevation cancelled; continuing with non-admin tweaks only.\n")
+
+    summary = run_profile_command(
         profile=profile,
         env=env,
         registry=reg_backend,
@@ -450,6 +486,7 @@ def _handle_apply(
         only_ids=only_ids,
         skip_ids=skip_ids,
         category_filter=getattr(args, "category", None),
+        expected_fingerprints=expected_fp,
     )
     if args.json:
         print_json(summary.to_dict())
@@ -473,13 +510,14 @@ def _handle_rollback_or_recover(
     sys_backend: SystemBackend,
     store: StateStore,
     env: EnvironmentInfo,
-    dry_run: bool,
+    _dry_run: bool,
+    deps: CliDeps,
 ) -> int:
     is_recover = args.command == "recover" or bool(getattr(args, "incomplete", False))
     if args.apply:
         require_windows_for_mutation(env, f"wb {args.command} --apply")
         if args.elevate and not env.is_admin and not args.uac_output:
-            return _relay_elevated_uac(raw_argv)
+            return _relay_elevated_uac(raw_argv, deps)
     force_flag = bool(getattr(args, "force", False))
     if is_recover:
         reverted = recover_incomplete_runs(
@@ -501,12 +539,7 @@ def _handle_rollback_or_recover(
         )
     has_failed = is_recover and args.apply and any(rec.state == TransactionState.FAILED for rec in reverted)
     if args.json:
-        print_json(
-            {
-                "dry_run": not args.apply,
-                "reverted_runs": [rec.to_dict() for rec in reverted],
-            }
-        )
+        print_json({"dry_run": not args.apply, "reverted_runs": [rec.to_dict() for rec in reverted]})
     else:
         if not reverted:
             msg = (
@@ -536,496 +569,8 @@ def _handle_rollback_or_recover(
     return EXIT_ERROR if has_failed else 0
 
 
-def _handle_init(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    from dataclasses import replace as _dc_replace
-
-    target_env = _dc_replace(env, is_admin=False) if getattr(args, "no_admin", False) else env
-    fmt = getattr(args, "format", None)
-    if fmt is None:
-        fmt = "json" if args.output and str(args.output).lower().endswith(".json") else "toml"
-    profile_text = generate_init_profile_json(target_env) if fmt == "json" else generate_init_profile_toml(target_env)
-    if args.stdout:
-        sys.stdout.write(profile_text)
-        return 0
-    if args.output:
-        out_path = Path(args.output)
-    else:
-        default_path = get_default_user_profile_path()
-        out_path = default_path.with_suffix(f".{fmt}")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(profile_text, encoding="utf-8")
-    sys.stdout.write(f"Generated profile at {out_path}\n")
-    if getattr(args, "no_admin", False):
-        sys.stdout.write(
-            "\nNon-admin next steps:\n"
-            "  1. Run `wb apply --profile user-only --apply` (no admin required).\n"
-            "  2. Ask IT once to enable Windows optional features `Microsoft-Windows-Subsystem-Linux` "
-            "and `VirtualMachinePlatform` (or run `wsl --install` as Administrator).\n"
-        )
-    return 0
-
-
-def _handle_list(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    tweaks = get_all_tweaks()
-    prof_filter: set[str] | None = None
-    if args.profile:
-        loaded_p = load_profile(args.profile)
-        prof_filter = {tid for tid, enabled in loaded_p.tweaks.items() if enabled}
-    filtered = []
-    for t in tweaks:
-        if args.category and t.category.lower() != args.category.lower():
-            continue
-        if args.admin and not t.requires_admin:
-            continue
-        if args.no_admin and t.requires_admin:
-            continue
-        if args.risk and str(t.risk) != args.risk:
-            continue
-        if prof_filter is not None and t.tweak_id not in prof_filter:
-            continue
-        filtered.append(t)
-    if args.json:
-        print_json(
-            {
-                "count": len(filtered),
-                "tweaks": [
-                    {
-                        "tweak_id": t.tweak_id,
-                        "category": t.category,
-                        "title": t.title,
-                        "risk": str(t.risk),
-                        "requires_admin": t.requires_admin,
-                        "irreversible": t.irreversible,
-                    }
-                    for t in filtered
-                ],
-            }
-        )
-    else:
-        for t in filtered:
-            adm = "admin" if t.requires_admin else "user"
-            sys.stdout.write(f"{t.tweak_id} [{t.category} | {t.risk} | {adm}] - {t.title}\n")
-    return 0
-
-
-def _handle_show(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    tweak = get_tweak(args.tweak_id)
-    detect_res = detect_tweak(tweak, env, reg_backend, sys_backend, allow_managed=True)
-    memberships: list[str] = []
-    p_dir = get_builtin_profiles_dir()
-    if p_dir.is_dir():
-        profile_files = sorted([*p_dir.glob("*.toml"), *p_dir.glob("*.json")])
-        for p_file in profile_files:
-            try:
-                loaded = load_profile(str(p_file))
-            except ProfileValidationError:
-                continue
-            if loaded.tweaks.get(tweak.tweak_id):
-                memberships.append(loaded.name)
-    prov_dict: dict[str, Any] | None = None
-    if tweak.provenance is not None:
-        prov_dict = {
-            "rationale": tweak.provenance.rationale,
-            "authoritative_source": tweak.provenance.authoritative_source,
-            "risk_rationale": tweak.provenance.risk_rationale,
-            "impact": tweak.provenance.impact,
-            "reversibility": tweak.provenance.reversibility,
-            "verification_method": tweak.provenance.verification_method,
-            "review_evidence": tweak.provenance.review_evidence,
-            "supported_editions": list(tweak.provenance.supported_editions),
-        }
-    payload = {
-        "tweak_id": tweak.tweak_id,
-        "category": tweak.category,
-        "title": tweak.title,
-        "description": tweak.description,
-        "source_url": tweak.source_url,
-        "risk": str(tweak.risk),
-        "requires_admin": tweak.requires_admin,
-        "irreversible": tweak.irreversible,
-        "requires_reboot": tweak.requires_reboot,
-        "requires_explorer_restart": tweak.requires_explorer_restart,
-        "profiles": memberships,
-        "provenance": prov_dict,
-        "current_status": detect_res.to_dict(),
-    }
-    if args.json:
-        print_json(payload)
-    else:
-        sys.stdout.write(
-            f"{tweak.tweak_id}: {tweak.title}\n"
-            f"  Category: {tweak.category} | Risk: {tweak.risk} | Admin: {tweak.requires_admin}\n"
-            f"  Profiles: {', '.join(memberships) or 'opt-in'}\n"
-            f"  Status: {detect_res.status} ({detect_res.detail})\n"
-        )
-    return 0
-
-
-def _handle_schema(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    sys.stdout.write(json.dumps(JSON_SCHEMAS[args.target], indent=2, sort_keys=True) + "\n")
-    return 0
-
-
-def _handle_migrate(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    if args.migrate_target == "state":
-        report = store.migrate(dry_run=not args.apply)
-        if args.json:
-            print_json(report)
-        else:
-            if not report["exists"]:
-                sys.stdout.write(f"No state file found at {report['state_path']}.\n")
-            elif not report["migrated"]:
-                sys.stdout.write(
-                    f"State file {report['state_path']} is already at schema v{report['to_version']} "
-                    f"({report['run_count']} runs).\n"
-                )
-            elif report["dry_run"]:
-                sys.stdout.write(
-                    f"Dry-run: {report['state_path']} would be migrated from v{report['from_version']} "
-                    f"to v{report['to_version']} ({report['run_count']} runs). Pass --apply to write.\n"
-                )
-            else:
-                sys.stdout.write(
-                    f"Migrated {report['state_path']} from v{report['from_version']} "
-                    f"to v{report['to_version']} ({report['run_count']} runs).\n"
-                )
-        return 0
-
-    if args.migrate_target == "config":
-        out_p = Path(args.output) if args.output else None
-        report = migrate_profile_file(
-            Path(args.path),
-            output_path=out_p,
-            output_format=args.format,
-            dry_run=not args.apply,
-        )
-        if args.json:
-            print_json(report)
-        else:
-            if not report["changed"]:
-                sys.stdout.write(
-                    f"Config {report['source_path']} is already at schema v{report['to_version']} "
-                    f"({report['output_format']}).\n"
-                )
-            elif report["dry_run"]:
-                sys.stdout.write(
-                    f"Dry-run: {report['source_path']} (v{report['from_version']}, {report['source_format']}) "
-                    f"-> {report['output_path']} (v{report['to_version']}, {report['output_format']}). "
-                    "Pass --apply to write.\n"
-                )
-            else:
-                sys.stdout.write(
-                    f"Migrated {report['source_path']} -> {report['output_path']} "
-                    f"(v{report['from_version']} -> v{report['to_version']}, {report['output_format']}).\n"
-                )
-        return 0
-    raise ValueError(f"Unknown migrate target: {args.migrate_target}")
-
-
-def _handle_audit(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    wsl_info = _cli_attr("audit_wsl", audit_wsl)(env, system=sys_backend, registry=reg_backend)
-    findings = run_security_audit(
-        env,
-        reg_backend,
-        sys_backend,
-        category_filter=args.category,
-        wsl_audit_data=wsl_info,
-    )
-    if args.json:
-        print_json({"count": len(findings), "findings": [f.to_dict() for f in findings]})
-    else:
-        for f in findings:
-            sys.stdout.write(f"[{f.severity.upper()}] {f.check_id} ({f.observation.state}): {f.observation.evidence}\n")
-    return 0
-
-
-def _handle_tui(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    profile = load_profile(args.profile)
-    return launch_tui(profile, env, reg_backend, sys_backend, state_store=store)
-
-
-def _handle_wsl(
-    args: argparse.Namespace,
-    raw_argv: list[str],
-    reg_backend: RegistryBackend,
-    sys_backend: SystemBackend,
-    store: StateStore,
-    env: EnvironmentInfo,
-    dry_run: bool,
-) -> int:
-    wslconfig_path = Path(args.wslconfig) if getattr(args, "wslconfig", None) else None
-    if args.wsl_command == "audit":
-        wsl_report = _cli_attr("audit_wsl", audit_wsl)(
-            env,
-            wslconfig_path=wslconfig_path,
-            system=sys_backend,
-            registry=reg_backend,
-            deep=bool(getattr(args, "deep", False)),
-        )
-        if args.json:
-            print_json(wsl_report)
-        else:
-            sys.stdout.write(
-                f"WSL Installed: {wsl_report['wsl_installed']} (Version: {wsl_report['wsl_version']})\n"
-                f"Distros: {', '.join(wsl_report['distros']) or 'none'}\n"
-                f".wslconfig ({wsl_report['wslconfig_path']}): exists={wsl_report['wslconfig_exists']}, "
-                f"mirrored={wsl_report['mirrored_networking']}, firewall={wsl_report['firewall_enabled']}\n"
-            )
-            if wsl_report.get("fedora_vscode_warning"):
-                sys.stdout.write(f"WARNING: {wsl_report['fedora_vscode_warning']}\n")
-        return 0
-
-    if args.wsl_command in {
-        "install",
-        "export",
-        "import",
-        "baseline",
-        "apply",
-        "set-default",
-        "update",
-        "sparse",
-        "firewall",
-    } and bool(getattr(args, "apply", False)):
-        require_windows_for_mutation(env, f"wb wsl {args.wsl_command} --apply")
-
-    if args.wsl_command == "firewall":
-        if args.apply and not env.is_admin:
-            err_payload = {
-                "dry_run": False,
-                "error": "Administrator privileges required for `wb wsl firewall --apply`.",
-                "returncode": EXIT_BLOCKED,
-            }
-            if args.json:
-                print_json(err_payload)
-            else:
-                sys.stderr.write(f"Error: {err_payload['error']}\n")
-            return EXIT_BLOCKED
-        if bool(args.apply) and not getattr(sys_backend, "is_simulated", False):
-            require_windows_for_mutation(env, "wsl firewall --apply")
-        fw_res = _cli_attr("set_wsl_hyperv_firewall_setting", set_wsl_hyperv_firewall_setting)(
-            enabled=not bool(args.disable),
-            default_inbound=str(args.inbound),
-            default_outbound=str(args.outbound),
-            dry_run=not bool(args.apply),
-        )
-        if bool(args.apply) and fw_res["returncode"] == 0 and isinstance(fw_res.get("previous"), dict):
-            prev_fw = fw_res["previous"]
-            hv_snap = HypervFirewallSnapshot(
-                vm_creator_id=str(prev_fw.get("vm_creator_id") or fw_res["vm_creator_id"]),
-                previous_enabled=prev_fw.get("enabled"),
-                previous_inbound=prev_fw.get("default_inbound_action"),
-                previous_outbound=prev_fw.get("default_outbound_action"),
-            )
-            with store.transaction_lock():
-                store.append_run(
-                    RunRecord(
-                        run_id=f"hvfw-{uuid.uuid4().hex[:12]}",
-                        timestamp=datetime.now(UTC).isoformat(),
-                        profile_name="wsl-firewall",
-                        applied_tweaks=(),
-                        hyperv_firewall_snapshots=(hv_snap,),
-                        state=TransactionState.COMMITTED,
-                    )
-                )
-        if args.json:
-            print_json(fw_res)
-        else:
-            tag = "DRY-RUN" if fw_res["dry_run"] else "EXECUTED"
-            desired = fw_res["desired"]
-            sys.stdout.write(
-                f"[{tag}] Hyper-V firewall WSL2 ({fw_res['vm_creator_id']}): "
-                f"enabled={desired['enabled']} inbound={desired['default_inbound_action']} "
-                f"outbound={desired['default_outbound_action']}\n"
-            )
-            if fw_res.get("error"):
-                sys.stderr.write(f"Error: {fw_res['error']}\n")
-        return EXIT_ERROR if fw_res["returncode"] != 0 else EXIT_SUCCESS
-
-    if args.wsl_command == "update":
-        upd_res = update_wsl(system=sys_backend, dry_run=not args.apply)
-        if args.json:
-            print_json(upd_res)
-        else:
-            tag = "DRY-RUN" if upd_res["dry_run"] else "EXECUTED"
-            for c in upd_res["commands"]:
-                sys.stdout.write(f"[{tag}] {' '.join(c)}\n")
-        return 1 if upd_res["returncode"] != 0 else 0
-
-    if args.wsl_command == "sparse":
-        sp_res = set_wsl_distro_sparse(system=sys_backend, distro=args.distro, sparse=True, dry_run=not args.apply)
-        if args.json:
-            print_json(sp_res)
-        else:
-            tag = "DRY-RUN" if sp_res["dry_run"] else "EXECUTED"
-            sys.stdout.write(f"[{tag}] {' '.join(sp_res['command'])}\n")
-        return 1 if sp_res["returncode"] != 0 else 0
-
-    if args.wsl_command == "set-default":
-        def_res = set_default_wsl_distro(
-            system=sys_backend,
-            distro=args.distro,
-            dry_run=not args.apply,
-        )
-        if args.json:
-            print_json(def_res)
-        else:
-            tag = "DRY-RUN" if def_res["dry_run"] else "EXECUTED"
-            sys.stdout.write(f"[{tag}] {' '.join(def_res['command'])}\n")
-        return 1 if def_res["returncode"] != 0 else 0
-
-    if args.wsl_command == "install":
-        inst_res = install_wsl_distro(
-            system=sys_backend,
-            distro=args.distro,
-            web_download=bool(args.web_download),
-            dry_run=not args.apply,
-            set_default=not args.no_set_default,
-        )
-        if args.json:
-            print_json(inst_res)
-        else:
-            tag = "DRY-RUN" if inst_res["dry_run"] else "EXECUTED"
-            sys.stdout.write(f"[{tag}] {' '.join(inst_res['command'])}\n")
-        return 1 if inst_res["returncode"] != 0 else 0
-
-    if args.wsl_command == "export":
-        exp_res = export_wsl_distro(
-            system=sys_backend,
-            distro=args.distro,
-            output_file=Path(args.output),
-            dry_run=not args.apply,
-        )
-        if args.json:
-            print_json(exp_res)
-        else:
-            tag = "DRY-RUN" if exp_res["dry_run"] else "EXECUTED"
-            sys.stdout.write(f"[{tag}] {' '.join(exp_res['command'])}\n")
-        return 1 if exp_res["returncode"] != 0 else 0
-
-    if args.wsl_command == "import":
-        imp_res = import_wsl_distro(
-            system=sys_backend,
-            distro=args.distro,
-            install_dir=Path(args.install_dir),
-            tarball_file=Path(args.tarball),
-            dry_run=not args.apply,
-        )
-        if args.json:
-            print_json(imp_res)
-        else:
-            tag = "DRY-RUN" if imp_res["dry_run"] else "EXECUTED"
-            sys.stdout.write(f"[{tag}] {' '.join(imp_res['command'])}\n")
-        return 1 if imp_res["returncode"] != 0 else 0
-
-    if args.wsl_command == "baseline":
-        base_res = apply_wsl_linux_baseline(
-            system=sys_backend,
-            distro=args.distro,
-            dotfiles_repo=args.dotfiles_repo,
-            dev_packages=bool(args.dev_packages),
-            auto_patch=not bool(args.no_auto_patch),
-            dry_run=not args.apply,
-        )
-        if args.json:
-            print_json(base_res)
-        else:
-            tag = "DRY-RUN" if base_res["dry_run"] else "APPLIED"
-            sys.stdout.write(f"[{tag}] WSL Linux baseline for {args.distro}:\n")
-            for step in base_res["steps"]:
-                sys.stdout.write(f"  - {step}\n")
-        return 0
-
-    is_apply = args.wsl_command == "apply" and bool(getattr(args, "apply", False))
-    spec = WslConfigSpec(
-        enabled=True,
-        mode=args.mode,
-        memory_gb=args.memory_gb,
-    )
-    wsl_res = plan_or_apply_wsl(
-        spec=spec,
-        system=sys_backend,
-        wslconfig_path=wslconfig_path,
-        distro=args.distro,
-        dry_run=not is_apply,
-    )
-    if args.json:
-        print_json(wsl_res)
-    else:
-        mode_tag = "DRY-RUN" if wsl_res["dry_run"] else "APPLIED"
-        sys.stdout.write(
-            f"Detected Windows host RAM: {wsl_res['host_memory_gib']} GiB "
-            f"({wsl_res['host_memory_bytes']} bytes).\n"
-            f"WSL memory limit: {wsl_res['memory_limit_gib']}GB (75% of detected host RAM).\n"
-            f"[{mode_tag}] .wslconfig ({wsl_res['wslconfig_path']}) changed={wsl_res['wslconfig_changed']}\n"
-            f"{wsl_res['wslconfig_content']}\n"
-        )
-        if args.distro:
-            sys.stdout.write(
-                f"[{mode_tag}] /etc/wsl.conf ({args.distro}) changed={wsl_res['distro_changed']}\n"
-                f"{wsl_res['distro_wsl_conf_content']}\n"
-            )
-        sys.stdout.write("Restart WSL to apply: wsl.exe --shutdown\n")
-    return 0
-
-
-def _relay_elevated_uac(raw_argv: list[str]) -> int:
-    exit_code, output_text = _cli_attr("run_elevated_wb", run_elevated_wb)(absolutize_elevated_argv(raw_argv))
+def _relay_elevated_uac(raw_argv: list[str], deps: CliDeps) -> int:
+    exit_code, output_text = deps.elevate_fn(absolutize_elevated_argv(raw_argv))
     if output_text:
         sys.stdout.write(output_text)
         if not output_text.endswith("\n"):
@@ -1033,11 +578,31 @@ def _relay_elevated_uac(raw_argv: list[str]) -> int:
     return int(exit_code)
 
 
+_COMMAND_HANDLERS = {
+    "doctor": _handle_doctor,
+    "status": _handle_status,
+    "plan": _handle_plan,
+    "apply": _handle_apply,
+    "rollback": _handle_rollback_or_recover,
+    "recover": _handle_rollback_or_recover,
+    "init": handle_init,
+    "list": handle_list,
+    "show": handle_show,
+    "schema": handle_schema,
+    "migrate": handle_migrate,
+    "audit": handle_audit,
+    "tui": handle_tui,
+    "wsl": handle_wsl,
+}
+
+
 def run_cli(
     argv: list[str] | None = None,
     registry: RegistryBackend | None = None,
     system: SystemBackend | None = None,
     state_store: StateStore | None = None,
+    deps: CliDeps | None = None,
+    state_store_factory: Callable[[], StateStore] = StateStore,
 ) -> int:
     """Execute the `wb` CLI and return an exit code."""
     os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"  # noqa: SIM112
@@ -1050,6 +615,8 @@ def run_cli(
         return 0
 
     uac_out_path = Path(args.uac_output) if args.uac_output else None
+    if uac_out_path is not None:
+        sanitize_elevated_python_env()
     uac_buf = io.StringIO() if uac_out_path is not None else None
     out_cm: contextlib.AbstractContextManager[Any] = (
         contextlib.redirect_stdout(uac_buf) if uac_buf is not None else contextlib.nullcontext()
@@ -1060,31 +627,31 @@ def run_cli(
 
     with out_cm, err_cm:
         try:
-            return _run_cli_body(args, raw_argv, registry, system, state_store)
+            return _run_cli_body(
+                args,
+                raw_argv,
+                registry,
+                system,
+                state_store,
+                deps or CliDeps(),
+                state_store_factory,
+            )
         finally:
             if uac_out_path is not None and uac_buf is not None:
                 try:
                     write_uac_output_safe(uac_out_path, uac_buf.getvalue())
-                except Exception as exc:
+                except OSError as exc:
                     sys.stderr.write(f"Warning: failed to write UAC output file: {exc}\n")
 
 
-_COMMAND_HANDLERS = {
-    "doctor": _handle_doctor,
-    "status": _handle_status,
-    "plan": _handle_plan,
-    "apply": _handle_apply,
-    "rollback": _handle_rollback_or_recover,
-    "recover": _handle_rollback_or_recover,
-    "init": _handle_init,
-    "list": _handle_list,
-    "show": _handle_show,
-    "schema": _handle_schema,
-    "migrate": _handle_migrate,
-    "audit": _handle_audit,
-    "tui": _handle_tui,
-    "wsl": _handle_wsl,
-}
+def _emit_cli_error(args: argparse.Namespace, exc: BaseException) -> None:
+    """Write human-readable and optional structured JSON error payload."""
+    sys.stderr.write(f"ERROR: {exc}\n")
+    if getattr(args, "json", False):
+        if isinstance(exc, WinbearableError):
+            print_json({"ok": False, "error": str(exc), **exc.to_dict()})
+        else:
+            print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
 
 
 def _run_cli_body(
@@ -1093,32 +660,35 @@ def _run_cli_body(
     registry: RegistryBackend | None,
     system: SystemBackend | None,
     state_store: StateStore | None,
+    deps: CliDeps,
+    state_store_factory: Callable[[], StateStore],
 ) -> int:
     reg_backend = registry or create_default_registry_backend()
     sys_backend = system or create_default_system_backend()
-    store = state_store or _cli_attr("StateStore", StateStore)()
+    store = state_store or state_store_factory()
     try:
         env = sys_backend.detect_environment(reg_backend)
         dry_run = not getattr(args, "apply", False)
         handler = _COMMAND_HANDLERS.get(args.command)
         if handler is None:
             raise ValueError(f"Unknown command: {args.command}")
-        return handler(args, raw_argv, reg_backend, sys_backend, store, env, dry_run)
+        return handler(args, raw_argv, reg_backend, sys_backend, store, env, dry_run, deps)
 
     except UnsupportedPlatformError as exc:
         if getattr(args, "debug", False):
             raise
-        sys.stderr.write(f"ERROR: {exc}\n")
-        if getattr(args, "json", False):
-            print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        _emit_cli_error(args, exc)
         return EXIT_UNSUPPORTED_PLATFORM
-    except (HighRiskConfirmationError, IrreversibleActionError, IncompleteJournalError) as exc:
+    except (HighRiskConfirmationError, IrreversibleActionError, IncompleteJournalError, PermissionDeniedError) as exc:
         if getattr(args, "debug", False):
             raise
-        sys.stderr.write(f"ERROR: {exc}\n")
-        if getattr(args, "json", False):
-            print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        _emit_cli_error(args, exc)
         return EXIT_BLOCKED
+    except WinbearableError as exc:
+        if getattr(args, "debug", False):
+            raise
+        _emit_cli_error(args, exc)
+        return EXIT_ERROR
     except (
         ProfileValidationError,
         UacCancelledError,
@@ -1134,9 +704,7 @@ def _run_cli_body(
     ) as exc:
         if getattr(args, "debug", False):
             raise
-        sys.stderr.write(f"ERROR: {exc}\n")
-        if getattr(args, "json", False):
-            print_json({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        _emit_cli_error(args, exc)
         return EXIT_ERROR
     except Exception as exc:
         if getattr(args, "debug", False):

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,13 +15,11 @@ from ..models import (
     FileSnapshot,
     HypervFirewallSnapshot,
     OperationJournalEntry,
-    OperationOutcome,
     OperationStatus,
     PlannedOperation,
     TweakDefinition,
-    WinbearableError,
 )
-from .base import OperationApplyContext
+from .base import OperationApplyContext, now_iso, raise_system_error
 from .identity import file_id, hyperv_firewall_id, vscode_ext_id, winget_id
 from .mergers import (
     MAX_FILE_SNAPSHOT_BYTES,
@@ -33,21 +29,6 @@ from .mergers import (
     restore_file_snapshot,
     snapshot_file_spec,
 )
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
-
-
-def _raise_sys_err(system: SystemBackend, message: str) -> None:
-    outcome = getattr(system, "last_outcome", None)
-    if isinstance(outcome, OperationOutcome) and outcome.status != OperationStatus.OK:
-        raise WinbearableError(
-            f"{message} ({outcome.status}: {outcome.message})",
-            category="system_error",
-            status=outcome.status,
-        )
-    raise WinbearableError(message, category="system_error", status=OperationStatus.UNKNOWN)
 
 
 class WingetOperationAdapter:
@@ -64,6 +45,7 @@ class WingetOperationAdapter:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
         for winget_spec in tweak.winget_specs:
+            wid = winget_id(winget_spec.package_id, winget_spec.scope)
             installed = system.is_winget_package_installed(winget_spec.package_id)
             if winget_spec.action == "uninstall":
                 ops.append(
@@ -76,6 +58,7 @@ class WingetOperationAdapter:
                         reversible=not tweak.irreversible,
                         scope=winget_spec.scope,
                         requires_elevation=(winget_spec.scope == "machine"),
+                        target_id=wid,
                     )
                 )
                 if installed:
@@ -91,10 +74,12 @@ class WingetOperationAdapter:
                     reversible=True,
                     scope=winget_spec.scope,
                     requires_elevation=(winget_spec.scope == "machine"),
+                    target_id=wid,
                 )
             )
             missing_exts: list[str] = []
             for ext_id in winget_spec.vscode_extensions:
+                eid = vscode_ext_id(ext_id)
                 ext_installed = system.is_vscode_extension_installed(ext_id)
                 if not ext_installed:
                     missing_exts.append(ext_id)
@@ -108,6 +93,7 @@ class WingetOperationAdapter:
                         reversible=True,
                         scope="user",
                         requires_elevation=False,
+                        target_id=eid,
                     )
                 )
             if not installed:
@@ -142,12 +128,12 @@ class WingetOperationAdapter:
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
         for winget_spec in tweak.winget_specs:
-            started = _now_iso()
+            started = now_iso()
             wid = winget_id(winget_spec.package_id, winget_spec.scope)
             if winget_spec.action == "uninstall":
                 if system.is_winget_package_installed(winget_spec.package_id):
                     if not system.uninstall_winget_package(winget_spec.package_id):
-                        _raise_sys_err(system, f"Failed to uninstall winget package '{winget_spec.package_id}'.")
+                        raise_system_error(system, f"Failed to uninstall winget package '{winget_spec.package_id}'.")
                     if ctx.checkpoint_cb:
                         ctx.checkpoint_cb(f"{tweak.tweak_id}:winget_uninstall:{winget_spec.package_id}")
                     entry = OperationJournalEntry(
@@ -159,7 +145,7 @@ class WingetOperationAdapter:
                         pre_fingerprint="installed",
                         post_fingerprint="uninstalled",
                         started_at=started,
-                        ended_at=_now_iso(),
+                        ended_at=now_iso(),
                         verification_status="verified",
                     )
                     entries.append(entry)
@@ -173,7 +159,7 @@ class WingetOperationAdapter:
                     scope=winget_spec.scope,
                     vscode_extensions=(),
                 ):
-                    _raise_sys_err(system, f"Failed to install winget package '{winget_spec.package_id}'.")
+                    raise_system_error(system, f"Failed to install winget package '{winget_spec.package_id}'.")
                 ctx.newly_installed_winget.append(winget_spec.package_id)
                 if ctx.checkpoint_cb:
                     ctx.checkpoint_cb(f"{tweak.tweak_id}:winget:{winget_spec.package_id}")
@@ -186,7 +172,7 @@ class WingetOperationAdapter:
                     pre_fingerprint="missing",
                     post_fingerprint="installed",
                     started_at=started,
-                    ended_at=_now_iso(),
+                    ended_at=now_iso(),
                     verification_status="verified",
                 )
                 entries.append(entry)
@@ -202,7 +188,7 @@ class WingetOperationAdapter:
                     pre_fingerprint="installed",
                     post_fingerprint="installed",
                     started_at=started,
-                    ended_at=_now_iso(),
+                    ended_at=now_iso(),
                     verification_status="verified",
                 )
                 entries.append(skip_pkg_entry)
@@ -210,9 +196,9 @@ class WingetOperationAdapter:
                     ctx.journal_cb(skip_pkg_entry)
 
             for ext in winget_spec.vscode_extensions:
+                ext_started = now_iso()
+                eid = vscode_ext_id(ext)
                 if not system.is_vscode_extension_installed(ext):
-                    ext_started = _now_iso()
-                    eid = vscode_ext_id(ext)
                     if not system.install_vscode_extension(ext):
                         last_out = getattr(system, "last_outcome", None)
                         if (
@@ -231,7 +217,7 @@ class WingetOperationAdapter:
                                 pre_fingerprint="missing",
                                 post_fingerprint="missing",
                                 started_at=ext_started,
-                                ended_at=_now_iso(),
+                                ended_at=now_iso(),
                                 error_category="permission",
                                 error_message=last_out.message,
                             )
@@ -239,7 +225,7 @@ class WingetOperationAdapter:
                             if ctx.journal_cb:
                                 ctx.journal_cb(skip_entry)
                             continue
-                        _raise_sys_err(
+                        raise_system_error(
                             system,
                             f"Failed to install VS Code extension '{ext}' for '{winget_spec.package_id}'.",
                         )
@@ -255,12 +241,28 @@ class WingetOperationAdapter:
                         pre_fingerprint="missing",
                         post_fingerprint="installed",
                         started_at=ext_started,
-                        ended_at=_now_iso(),
+                        ended_at=now_iso(),
                         verification_status="verified",
                     )
                     entries.append(ext_entry)
                     if ctx.journal_cb:
                         ctx.journal_cb(ext_entry)
+                else:
+                    already_ext = OperationJournalEntry(
+                        target_id=eid,
+                        operation_type="vscode_extension",
+                        tweak_id=tweak.tweak_id,
+                        action="install",
+                        outcome="skipped",
+                        pre_fingerprint="installed",
+                        post_fingerprint="installed",
+                        started_at=ext_started,
+                        ended_at=now_iso(),
+                        verification_status="verified",
+                    )
+                    entries.append(already_ext)
+                    if ctx.journal_cb:
+                        ctx.journal_cb(already_ext)
         return entries
 
     def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
@@ -276,8 +278,25 @@ class WingetOperationAdapter:
         force: bool = False,
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
+        attempted_targets: set[str] | None = None,
     ) -> list[str]:
-        return []
+        if skip_package_uninstall:
+            return []
+        errors: list[str] = []
+        for item in reversed(snapshots):
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            kind_tag, target_name = item
+            if kind_tag == "vscode_extension":
+                if not system.uninstall_vscode_extension(target_name) or system.is_vscode_extension_installed(
+                    target_name
+                ):
+                    errors.append(f"vscode_extension {target_name}")
+            elif kind_tag == "winget_package" and (
+                not system.uninstall_winget_package(target_name) or system.is_winget_package_installed(target_name)
+            ):
+                errors.append(f"winget {target_name}")
+        return errors
 
 
 class FileConfigOperationAdapter:
@@ -303,6 +322,7 @@ class FileConfigOperationAdapter:
         for spec in tweak.file_specs:
             try:
                 target = self._expand(spec.path_template)
+                fid = file_id(str(target))
                 if target.is_file():
                     raw_bytes = target.read_bytes()
                     if len(raw_bytes) > MAX_FILE_SNAPSHOT_BYTES:
@@ -323,6 +343,9 @@ class FileConfigOperationAdapter:
                     before_state="compliant" if not changed else "drifted",
                     after_state=f"merged {list(spec.desired_keys.keys())}",
                     reversible=True,
+                    scope="user",
+                    requires_elevation=False,
+                    target_id=fid,
                 )
             )
             if changed:
@@ -343,11 +366,7 @@ class FileConfigOperationAdapter:
             fid = file_id(str(target))
             if fid in seen_ids:
                 continue
-            snap = snapshot_file_spec(f_spec, expand_fn=self._expand_fn)
-            existing_text = snap.previous_content or ""
-            merged = merge_file_content(existing_text, f_spec.file_format, f_spec.desired_keys)
-            post_sha = hashlib.sha256(merged.encode("utf-8")).hexdigest()
-            snaps.append(replace(snap, post_sha256=post_sha))
+            snaps.append(snapshot_file_spec(f_spec, expand_fn=self._expand_fn))
             seen_ids.add(fid)
         return snaps
 
@@ -361,7 +380,7 @@ class FileConfigOperationAdapter:
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
         for f_spec in tweak.file_specs:
-            started = _now_iso()
+            started = now_iso()
             target = self._expand(f_spec.path_template)
             target_str = str(target)
             fid = file_id(target_str)
@@ -385,7 +404,7 @@ class FileConfigOperationAdapter:
                 pre_fingerprint=expected_sha or "absent",
                 post_fingerprint=post_sha or "absent",
                 started_at=started,
-                ended_at=_now_iso(),
+                ended_at=now_iso(),
                 verification_status="verified",
             )
             entries.append(entry)
@@ -406,10 +425,13 @@ class FileConfigOperationAdapter:
         force: bool = False,
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
+        attempted_targets: set[str] | None = None,
     ) -> list[str]:
         errors: list[str] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, FileSnapshot):
+                continue
+            if attempted_targets is not None and file_id(snap.path) not in attempted_targets:
                 continue
             try:
                 if not force and snap.post_sha256 is not None:
@@ -472,10 +494,13 @@ class HypervFirewallOperationAdapter:
         force: bool = False,
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
+        attempted_targets: set[str] | None = None,
     ) -> list[str]:
         errors: list[str] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, HypervFirewallSnapshot) or snap.previous_enabled is None:
+                continue
+            if attempted_targets is not None and hyperv_firewall_id(snap.vm_creator_id) not in attempted_targets:
                 continue
             if not force and snap.post_enabled is not None:
                 live = get_wsl_hyperv_firewall_setting()

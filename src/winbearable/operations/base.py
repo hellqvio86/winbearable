@@ -1,9 +1,10 @@
-"""Operation adapter lifecycle protocol, context, and registry operation formatter."""
+"""Operation adapter lifecycle protocol, shared helpers, context, and registry operation formatter."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -13,11 +14,41 @@ from ..const import ACTION_DELETE, ACTION_DELETE_KEY
 from ..models import (
     EnvironmentInfo,
     OperationJournalEntry,
+    OperationOutcome,
+    OperationStatus,
+    OperationTimeoutError,
+    PermissionDeniedError,
     PlannedOperation,
     RegistryView,
     TweakDefinition,
     UnsupportedTargetError,
+    WinbearableError,
 )
+
+
+def now_iso() -> str:
+    """Return current UTC timestamp in ISO-8601 format."""
+    return datetime.now(tz=UTC).isoformat()
+
+
+def raise_system_error(system: SystemBackend, message: str, *, category: str = "system_error") -> None:
+    """Raise a typed WinbearableError subclass based on SystemBackend.last_outcome."""
+    outcome = getattr(system, "last_outcome", None)
+    if isinstance(outcome, OperationOutcome) and outcome.status != OperationStatus.OK:
+        detail = f"{message} ({outcome.status}: {outcome.message})"
+        if outcome.status == OperationStatus.TIMEOUT:
+            raise OperationTimeoutError(detail, context={"command": list(outcome.command)})
+        if outcome.status == OperationStatus.ACCESS_DENIED:
+            raise PermissionDeniedError(detail, context={"command": list(outcome.command)})
+        if outcome.status == OperationStatus.TOOL_MISSING:
+            raise UnsupportedTargetError(detail, context={"command": list(outcome.command)})
+        raise WinbearableError(
+            detail,
+            category=category,
+            status=outcome.status,
+            context={"command": list(outcome.command), "returncode": outcome.returncode},
+        )
+    raise WinbearableError(message, category=category, status=OperationStatus.UNKNOWN)
 
 
 @dataclass
@@ -87,6 +118,7 @@ class OperationAdapter(Protocol):
         force: bool = False,
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
+        attempted_targets: set[str] | None = None,
     ) -> list[str]:
         """Conflict-aware rollback for this operation kind; returns error strings (empty on success)."""
 
@@ -106,8 +138,12 @@ def format_registry_op(
     current_value: object,
     target_value: object,
     irreversible: bool,
+    *,
+    target_id: str = "",
 ) -> PlannedOperation:
     """Construct a PlannedOperation for a single registry spec."""
+    is_user_scope = full_key_path.upper().startswith("HKCU\\")
+    scope = "user" if is_user_scope else "machine"
     if action == ACTION_DELETE_KEY:
         return PlannedOperation(
             operation_type="registry_key",
@@ -116,6 +152,9 @@ def format_registry_op(
             before_state="present" if current_value else "<absent>",
             after_state="<key deleted>",
             reversible=not irreversible,
+            scope=scope,
+            requires_elevation=not is_user_scope,
+            target_id=target_id,
         )
     return PlannedOperation(
         operation_type="registry",
@@ -124,4 +163,7 @@ def format_registry_op(
         before_state=repr(current_value) if current_value is not None else "<absent>",
         after_state="<deleted>" if action == ACTION_DELETE else repr(target_value),
         reversible=not irreversible,
+        scope=scope,
+        requires_elevation=not is_user_scope,
+        target_id=target_id,
     )

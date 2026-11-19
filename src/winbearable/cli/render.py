@@ -160,7 +160,14 @@ JSON_SCHEMAS: dict[str, dict[str, Any]] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "wb plan / apply --json",
         "type": "object",
-        "required": ["schema_version", "profile_name", "dry_run", "applied_ids", "results"],
+        "required": [
+            "schema_version",
+            "profile_name",
+            "dry_run",
+            "applied_ids",
+            "precondition_fingerprints",
+            "results",
+        ],
     },
     "status": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

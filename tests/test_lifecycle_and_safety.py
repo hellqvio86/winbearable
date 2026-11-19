@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from winbearable.audit.win32_checks import check_listening_ports
-from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
-from winbearable.const import HIVE_HKCU, HIVE_HKLM, REG_DWORD
+from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend, NativeSystemBackend
+from winbearable.cli import CliDeps, run_cli
+from winbearable.const import EXIT_BLOCKED, HIVE_HKCU, HIVE_HKLM, REG_DWORD
 from winbearable.engine import (
     apply_profile,
     compensate_run_record,
+    evaluate_profile,
     run_profile_command,
     summarize_elevation_requirements,
 )
@@ -229,26 +233,39 @@ def test_optimistic_concurrency_aborts_on_external_drift(tmp_path: Path) -> None
             dry_run=False,
             allow_simulated=True,
             expected_fingerprints={
-                r"reg:HKCU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo|default|Enabled": "REG_DWORD:99"
+                identity.registry_value_id(
+                    HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo", "Enabled"
+                ): "REG_DWORD:99"
             },
         )
 
 
-def test_uac_threat_model_symlinks_relative_argv0_and_env_sanitization(tmp_path: Path) -> None:
+def test_uac_threat_model_symlinks_relative_argv0_and_env_sanitization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """UAC refuses relative argv0, symlinked executables/ancestors, and strips PYTHON* injection vars."""
     exe, args = resolve_elevation_target(["doctor"], argv0="wb.exe")
     assert Path(exe).name.lower() != "wb.exe" or Path(exe).is_absolute()
     assert "-I" in args or Path(exe).name.lower() == "wb.exe"
 
     fake_link = tmp_path / "wb.exe"
-    with patch("winbearable.uac._is_reparse_or_symlink", return_value=True):
-        with pytest.raises(UacElevationError, match="symlink or reparse point"):
-            resolve_elevation_target(["doctor"], executable=str(fake_link))
+    with pytest.raises(UacElevationError, match="symlink or reparse point"):
+        resolve_elevation_target(["doctor"], executable=str(fake_link), reparse_check=lambda _p: True)
 
-        uac_dir = tmp_path / "wb-uac-123"
-        uac_dir.mkdir()
-        with pytest.raises(UacElevationError, match="symlink/reparse-point"):
-            write_uac_output_safe(uac_dir / "uac-output.txt", "test")
+    uac_dir = tmp_path / "wb-uac-123"
+    uac_dir.mkdir()
+    with pytest.raises(UacElevationError, match="symlink/reparse-point"):
+        write_uac_output_safe(uac_dir / "uac-output.txt", "test", reparse_check=lambda _p: True)
+
+    # Real ./wb.exe CWD hijack guard: passing bare 'wb.exe' when CWD has a decoy wb.exe must NOT resolve CWD's wb.exe
+    decoy_dir = tmp_path / "decoy_cwd"
+    decoy_dir.mkdir()
+    decoy_wb = decoy_dir / "wb.exe"
+    decoy_wb.write_bytes(b"MZ_DECOY")
+    monkeypatch.chdir(decoy_dir)
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    resolved_exe, _ = resolve_elevation_target(["doctor"], argv0="wb.exe")
+    assert Path(resolved_exe).resolve() != decoy_wb.resolve()
 
     env = {"PYTHONPATH": "/evil", "PYTHONHOME": "/evil", "PATH": os.environ.get("PATH", "")}
     removed = sanitize_elevated_python_env(env)
@@ -285,7 +302,6 @@ def test_elevation_safety_summary_and_catalog_assembly_validation() -> None:
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_windows=True, is_admin=False)
     env = sys_b.detect_environment(reg)
-    from winbearable.engine import evaluate_profile
 
     prof = ProfileSpec(
         name="mixed",
@@ -339,7 +355,74 @@ def test_win32_listening_ports_all_tables_fail_reports_unknown(monkeypatch: pyte
         iphlpapi = _FakeIphlpapi()
 
     monkeypatch.setattr("winbearable.audit.win32_checks.sys.platform", "win32")
-    monkeypatch.setattr("winbearable.audit.win32_checks.ctypes.windll", _FakeWindll(), raising=False)
-    finding = check_listening_ports(env)
+    finding = check_listening_ports(env, windll_override=_FakeWindll())
     assert finding.observation.state == ObservationState.UNKNOWN
     assert finding.observation.confidence == ObservationConfidence.NONE
+
+
+def test_plan_file_precondition_drift_and_uac_caller_sid_enforcement(tmp_path: Path) -> None:
+    """wb apply --plan-file aborts on precondition drift and --uac-caller-sid blocks mismatched user-scope runs."""
+
+    class _CliTestReg(InMemoryRegistryBackend):
+        is_simulated = False
+
+    class _CliTestSys(InMemorySystemBackend):
+        is_simulated = False
+
+    reg = _CliTestReg()
+    sys_b = _CliTestSys(is_windows=True, is_admin=True)
+    store = StateStore(tmp_path / "state.json")
+    prof_path = tmp_path / "p.toml"
+    prof_path.write_text('name = "fp"\n[tweaks]\n"privacy.disable_advertising_id" = true\n', encoding="utf-8")
+
+    # 1. Capture plan fingerprints
+    plan_summary = run_profile_command(
+        profile=ProfileSpec(name="fp", description="fp", tweaks={"privacy.disable_advertising_id": True}),
+        env=sys_b.detect_environment(reg),
+        registry=reg,
+        system=sys_b,
+        state_store=store,
+        dry_run=True,
+    )
+    assert plan_summary.precondition_fingerprints
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps(plan_summary.to_dict()), encoding="utf-8")
+
+    # Mutate live target behind plan's back -> ExternalDriftError via CLI
+    reg.set_value(
+        HIVE_HKCU,
+        r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
+        "Enabled",
+        2,
+        REG_DWORD,
+    )
+    rc_drift = run_cli(
+        ["apply", "--profile", str(prof_path), "--plan-file", str(plan_file), "--apply", "--json"],
+        registry=reg,
+        system=sys_b,
+        state_store=store,
+    )
+    assert rc_drift == 1
+
+    # 2. --uac-caller-sid mismatch rejects user-scope tweaks cleanly with EXIT_BLOCKED
+    rc_sid = run_cli(
+        ["apply", "--profile", str(prof_path), "--uac-caller-sid", "S-1-5-21-1000", "--apply", "--json"],
+        registry=reg,
+        system=sys_b,
+        state_store=store,
+        deps=CliDeps(caller_sid_fn=lambda: "S-1-5-21-2000"),
+    )
+    assert rc_sid == EXIT_BLOCKED
+
+
+def test_backend_protocol_contract_for_unknown_targets() -> None:
+    """InMemorySystemBackend and NativeSystemBackend agree on None/failure contracts for unknown targets."""
+    mem = InMemorySystemBackend(is_windows=True)
+    nat = NativeSystemBackend(platform_override="linux")
+    assert mem.is_scheduled_task_enabled(r"\Missing\Task") is None
+    assert mem.is_optional_feature_enabled("MissingFeature") is None
+    assert (
+        nat.is_scheduled_task_enabled(r"\Missing\Task") is False
+        or nat.is_scheduled_task_enabled(r"\Missing\Task") is None
+    )
+    assert mem.run_wsl_command(["-d", "Ubuntu", "--", "cat", "/etc/wsl.conf"]).returncode != 0

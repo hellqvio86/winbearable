@@ -1,6 +1,7 @@
-"""Tests for ENG-01..11, MGD-01..03, WSL-01..07, QA-01, QA-04, and TWK-A..J."""
+"""Tests for invariant..11, invariant..03, invariant..07, invariant, invariant, and TWK-A..J."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -20,12 +21,16 @@ from winbearable.const import (
     REG_DWORD,
     REG_SZ,
 )
-from winbearable.engine import apply_profile, detect_tweak, rollback_runs
+from winbearable.engine import IrreversibleActionError, apply_profile, detect_tweak, evaluate_profile, rollback_runs
 from winbearable.models import (
     FileSpec,
+    ObservationState,
+    OperationOutcome,
+    OperationStatus,
     ProfileSpec,
     RegistrySpec,
     RiskLevel,
+    TransactionState,
     TweakDefinition,
     TweakProvenance,
     TweakStatus,
@@ -49,7 +54,7 @@ def _dummy_prov() -> TweakProvenance:
 
 
 def test_registry_key_delete_and_glob_roundtrip(state_store: StateStore) -> None:
-    """ENG-01: ACTION_DELETE_KEY and key_path_glob expand, apply, and roll back cleanly."""
+    """ACTION_DELETE_KEY and key_path_glob expand, apply, and roll back cleanly."""
     reg = InMemoryRegistryBackend(
         initial_values={
             (
@@ -140,7 +145,7 @@ def test_registry_key_delete_and_glob_roundtrip(state_store: StateStore) -> None
 def test_edition_gating_rejects_home_policy_and_all_iot_ltsc(
     registry: InMemoryRegistryBackend, state_store: StateStore
 ) -> None:
-    """ENG-02: Home skips Pro-only policy tweaks; IoT/LTSC editions are rejected everywhere."""
+    """Home skips Pro-only policy tweaks; IoT/LTSC editions are rejected everywhere."""
     home_sys = InMemorySystemBackend(edition="Core", is_admin=True)
     pro_sys = InMemorySystemBackend(edition="Professional", is_admin=True)
     iot_sys = InMemorySystemBackend(edition="IoTEnterpriseS", is_admin=True)
@@ -174,7 +179,7 @@ def test_edition_gating_rejects_home_policy_and_all_iot_ltsc(
 
 
 def test_managed_device_guard_and_edr_detection(state_store: StateStore) -> None:
-    """ENG-03 & ENG-04: Managed devices skip admin tweaks unless --allow-managed; EDR triggers doctor warning."""
+    """Managed devices skip admin tweaks unless --allow-managed; EDR triggers doctor warning."""
     reg = InMemoryRegistryBackend(
         initial_values={
             (HIVE_HKLM, r"SOFTWARE\Microsoft\Enrollments\GUID-1", "UPN"): ("user@corp.example", REG_SZ),
@@ -198,7 +203,7 @@ def test_managed_device_guard_and_edr_detection(state_store: StateStore) -> None
 
 
 def test_file_config_adapter_json_jsonc_and_hash_guard(tmp_path: Path) -> None:
-    """ENG-08: JSON/INI/TOML merge preserves keys, JSONC comments are rejected, hash drift is refused."""
+    """JSON/INI/TOML merge preserves keys, JSONC comments are rejected, hash drift is refused."""
     json_file = tmp_path / "settings.json"
     json_file.write_text('{"existing": true}\n', encoding="utf-8")
     spec = FileSpec(path_template=str(json_file), file_format="json", desired_keys={"copyOnSelect": True})
@@ -251,8 +256,7 @@ def test_new_tweaks_roundtrip_and_tamper_protection(state_store: StateStore) -> 
 
 
 def test_bloat_remove_appx_opt_in_irreversible_guard(state_store: StateStore) -> None:
-    """DEC-02: bloat.remove_* tweaks require allow_irreversible and uninstall via winget."""
-    from winbearable.engine import IrreversibleActionError
+    """bloat.remove_* tweaks require allow_irreversible and uninstall via winget."""
 
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_admin=False, installed_winget_packages={"9WZDNCRFHVFW"})
@@ -317,7 +321,6 @@ def test_vscode_settings_defaults_roundtrip_and_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """dev.vscode_settings_defaults merges JSON settings, rolls back, refuses JSONC comments, and gates on build."""
-    import json
 
     monkeypatch.setenv("APPDATA", str(tmp_path))
     settings_path = tmp_path / "Code" / "User" / "settings.json"
@@ -351,7 +354,6 @@ def test_vscode_settings_defaults_roundtrip_and_guards(
     assert comment_res.status == TweakStatus.ERROR
 
     # Unsupported build floor
-    from dataclasses import replace
 
     old_env = replace(env, windows_build=22631)
     assert detect_tweak(tweak, old_env, reg, sys_b).status == TweakStatus.UNSUPPORTED_BUILD
@@ -363,9 +365,6 @@ def test_parameterized_tweaks_and_terminal_nerd_font_roundtrip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cover dev.case_sensitive_dirs, hardening.update_active_hours, dev.terminal_settings_defaults, and nerd font."""
-    import json
-
-    from winbearable.engine import evaluate_profile
 
     reg = InMemoryRegistryBackend()
     reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
@@ -438,8 +437,6 @@ def test_parameterized_tweaks_and_terminal_error_paths(
 ) -> None:
     """Cover invalid [params], non-empty directory revert refusal, and malformed Windows Terminal JSON."""
 
-    from winbearable.engine import evaluate_profile
-
     reg = InMemoryRegistryBackend()
     reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
@@ -497,8 +494,6 @@ def test_parameterized_tweaks_and_terminal_error_paths(
 
 def test_ai_surface_tweaks_and_legacy_tls_audit_roundtrip_and_errors(state_store: StateStore) -> None:
     """Cover TWK-C AI tweaks (roundtrip + irreversible guard) and chk.legacy_tls (clean + re-enabled)."""
-    from winbearable.engine import IrreversibleActionError
-    from winbearable.models import ObservationState
 
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(
@@ -549,7 +544,6 @@ def test_ai_surface_tweaks_and_legacy_tls_audit_roundtrip_and_errors(state_store
 
 def test_defender_asr_mode_selection_block_and_invalid_param(state_store: StateStore) -> None:
     """hardening.defender_asr_audit supports [params].mode='block' (1) and rejects invalid modes with ERROR."""
-    from winbearable.engine import evaluate_profile
 
     reg = InMemoryRegistryBackend()
     reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
@@ -595,8 +589,7 @@ def test_operation_adapters_surface_structured_outcomes_on_failure(
     state_store: StateStore,
     tmp_path: Path,
 ) -> None:
-    """P0.3: Adapter failures (TIMEOUT, ACCESS_DENIED, TOOL_MISSING) surface into failure_outcomes and FAILED run."""
-    from winbearable.models import OperationOutcome, OperationStatus, TransactionState
+    """Adapter failures (TIMEOUT, ACCESS_DENIED, TOOL_MISSING) surface into failure_outcomes and FAILED run."""
 
     reg = InMemoryRegistryBackend()
     reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
@@ -631,9 +624,7 @@ def test_file_config_sha256_drift_refusal_and_managed_device_guard(
     state_store: StateStore,
     tmp_path: Path,
 ) -> None:
-    """Cover FileSpec SHA-256 drift refusal (P1.3) and MDM/corp-safe managed guards (P1.2)."""
-    from winbearable.models import FileSpec
-    from winbearable.operations import apply_file_spec, snapshot_file_spec
+    """Cover FileSpec SHA-256 drift refusal and MDM/corp-safe managed guards."""
 
     cfg = tmp_path / "settings.json"
     cfg.write_text('{"a": 1}\n', encoding="utf-8")
@@ -642,8 +633,6 @@ def test_file_config_sha256_drift_refusal_and_managed_device_guard(
     cfg.write_text('{"a": 99}\n', encoding="utf-8")
     with pytest.raises(RuntimeError, match="file hash changed"):
         apply_file_spec(spec, expected_sha256=snap.sha256)
-
-    from dataclasses import replace
 
     # Managed device (MDM) skips machine-scope tweaks unless --allow-managed
     reg = InMemoryRegistryBackend()

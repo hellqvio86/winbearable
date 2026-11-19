@@ -1,9 +1,11 @@
-"""Tests for WSL2 Hyper-V firewall JSON integration (WSL-08 / DEC-01)."""
+"""Tests for WSL2 Hyper-V firewall JSON integration."""
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 from unittest.mock import patch
 
@@ -12,8 +14,13 @@ import pytest
 from winbearable.audit import _check_hyperv_firewall
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import InMemorySystemBackend
+from winbearable.cli import CliDeps, run_cli
 from winbearable.const import EXIT_BLOCKED, EXIT_ERROR, EXIT_SUCCESS, WSL_VM_CREATOR_ID
-from winbearable.hyperv_firewall import get_wsl_hyperv_firewall_setting, set_wsl_hyperv_firewall_setting
+from winbearable.hyperv_firewall import (
+    _parse_ps_setting_json,
+    get_wsl_hyperv_firewall_setting,
+    set_wsl_hyperv_firewall_setting,
+)
 from winbearable.models import ObservationState
 
 
@@ -160,7 +167,7 @@ def test_set_wsl_hyperv_firewall_setting_dry_run_apply_and_validation() -> None:
 
 def test_check_hyperv_firewall_audit_states() -> None:
     """chk.hyperv_firewall maps live JSON state to ENABLED, DISABLED, or UNKNOWN."""
-    with patch("winbearable.hyperv_firewall.get_wsl_hyperv_firewall_setting", return_value=None):
+    with patch("winbearable.audit.win32_checks.get_wsl_hyperv_firewall_setting", return_value=None):
         f_unk = _check_hyperv_firewall()
         assert f_unk.observation.state == ObservationState.UNKNOWN
 
@@ -179,8 +186,7 @@ def test_check_hyperv_firewall_audit_states() -> None:
     assert blocked_res["returncode"] == 1
     assert "AppLocker" in str(blocked_res["error"])
 
-    # P1.7: Timeout and invalid JSON parse failures return structured errors, never success
-    import subprocess
+    # Timeout and invalid JSON parse failures return structured errors, never success
 
     def _timeout_ps(_cmd: list[str]) -> Any:
         raise subprocess.TimeoutExpired(cmd=_cmd, timeout=15.0)
@@ -197,7 +203,7 @@ def test_check_hyperv_firewall_audit_states() -> None:
     assert "PARSE_ERROR" in str(parse_res["error"])
 
     with patch(
-        "winbearable.hyperv_firewall.get_wsl_hyperv_firewall_setting",
+        "winbearable.audit.win32_checks.get_wsl_hyperv_firewall_setting",
         return_value={"enabled": True, "default_inbound_action": "Block", "default_outbound_action": "Allow"},
     ):
         f_ok = _check_hyperv_firewall()
@@ -205,7 +211,7 @@ def test_check_hyperv_firewall_audit_states() -> None:
         assert f_ok.severity == "info"
 
     with patch(
-        "winbearable.hyperv_firewall.get_wsl_hyperv_firewall_setting",
+        "winbearable.audit.win32_checks.get_wsl_hyperv_firewall_setting",
         return_value={"enabled": False, "default_inbound_action": "Allow", "default_outbound_action": "Allow"},
     ):
         f_bad = _check_hyperv_firewall()
@@ -215,17 +221,25 @@ def test_check_hyperv_firewall_audit_states() -> None:
 
 def test_cli_wsl_firewall_dry_run_admin_guard_and_apply(cli_runner: Any) -> None:
     """wb wsl firewall supports dry-run --json, enforces admin on --apply, and applies when admin."""
-    import io
-    from contextlib import redirect_stderr, redirect_stdout
-
-    from winbearable.cli import run_cli
 
     reg = InMemoryRegistryBackend()
+    sys_admin = InMemorySystemBackend(is_admin=True)
     sys_user = InMemorySystemBackend(is_admin=False)
 
-    with patch(
-        "winbearable.cli.set_wsl_hyperv_firewall_setting",
-        return_value={
+    def _run_fw(argv: list[str], fw_payload: dict[str, Any]) -> tuple[int, str, str]:
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        with redirect_stdout(out_buf), redirect_stderr(err_buf):
+            code = run_cli(
+                argv,
+                registry=reg,
+                system=sys_admin,
+                deps=CliDeps(set_hyperv_fn=lambda **_kw: fw_payload),
+            )
+        return code, out_buf.getvalue(), err_buf.getvalue()
+
+    rc, out, _ = _run_fw(
+        ["wsl", "firewall", "--json"],
+        {
             "dry_run": True,
             "vm_creator_id": WSL_VM_CREATOR_ID,
             "previous": None,
@@ -235,8 +249,7 @@ def test_cli_wsl_firewall_dry_run_admin_guard_and_apply(cli_runner: Any) -> None
             "returncode": 0,
             "error": None,
         },
-    ):
-        rc, out, _ = cli_runner(["wsl", "firewall", "--json"])
+    )
     assert rc == EXIT_SUCCESS
     assert json.loads(out)["dry_run"] is True
 
@@ -248,9 +261,9 @@ def test_cli_wsl_firewall_dry_run_admin_guard_and_apply(cli_runner: Any) -> None
     assert "Administrator" in json.loads(out_blk_buf.getvalue())["error"]
 
     # Admin --apply succeeds
-    with patch(
-        "winbearable.cli.set_wsl_hyperv_firewall_setting",
-        return_value={
+    rc_ok, out_ok, _ = _run_fw(
+        ["wsl", "firewall", "--apply", "--json"],
+        {
             "dry_run": False,
             "vm_creator_id": WSL_VM_CREATOR_ID,
             "previous": None,
@@ -260,15 +273,14 @@ def test_cli_wsl_firewall_dry_run_admin_guard_and_apply(cli_runner: Any) -> None
             "returncode": 0,
             "error": None,
         },
-    ):
-        rc_ok, out_ok, _ = cli_runner(["wsl", "firewall", "--apply", "--json"])
+    )
     assert rc_ok == EXIT_SUCCESS
     assert json.loads(out_ok)["verified"]["default_inbound_action"] == "Block"
 
     # Non-zero returncode propagates EXIT_ERROR
-    with patch(
-        "winbearable.cli.set_wsl_hyperv_firewall_setting",
-        return_value={
+    rc_err, _, _ = _run_fw(
+        ["wsl", "firewall", "--apply", "--json"],
+        {
             "dry_run": False,
             "vm_creator_id": WSL_VM_CREATOR_ID,
             "previous": None,
@@ -278,14 +290,12 @@ def test_cli_wsl_firewall_dry_run_admin_guard_and_apply(cli_runner: Any) -> None
             "returncode": 1,
             "error": "failed",
         },
-    ):
-        rc_err, _, _ = cli_runner(["wsl", "firewall", "--apply", "--json"])
+    )
     assert rc_err == EXIT_ERROR
 
 
 def test_hyperv_firewall_rejects_missing_fields_invalid_values_and_mismatches() -> None:
-    """P0.4: Reject missing Name, invalid booleans/actions, and mismatched effective state."""
-    from winbearable.hyperv_firewall import _parse_ps_setting_json
+    """Reject missing Name, invalid booleans/actions, and mismatched effective state."""
 
     # 1. Missing Name or invalid Enabled / DefaultInboundAction / LoopbackEnabled -> None
     assert (

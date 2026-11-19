@@ -1,6 +1,6 @@
 name = "dev-comfort"
 extends = "user-only"
-description = "Linux-comfort input, terminal, Explorer, and developer defaults (DEC-04: Developer Mode stays opt-in)."
+description = "Linux-comfort input, terminal, Explorer, and developer defaults (Developer Mode stays opt-in)."
 
 [tweaks]
 "input.caps_to_ctrl" = true

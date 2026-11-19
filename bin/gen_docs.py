@@ -1,4 +1,4 @@
-"""Generate docs/tweaks-reference.md from the authoritative TWEAK_CATALOG (ENG-09)."""
+"""Generate docs/tweaks-reference.md from the authoritative TWEAK_CATALOG."""
 
 from pathlib import Path
 
@@ -46,7 +46,7 @@ def render_tweaks_reference_markdown() -> str:
 def main() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     out_path = repo_root / "docs" / "tweaks-reference.md"
-    out_path.write_text(render_tweaks_reference_markdown(), encoding="utf-8")
+    out_path.write_text(render_tweaks_reference_markdown(), encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Property-based invariant tests using Hypothesis (QA-04)."""
+"""Property-based invariant tests using Hypothesis."""
 
 from __future__ import annotations
 

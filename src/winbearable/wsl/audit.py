@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..backends.registry import RegistryBackend, is_wsl2
-from ..backends.system import SystemBackend
+from ..backends.system import NativeSystemBackend, SystemBackend
 from ..const import DEFAULT_WSL_DISTRO
 from ..models import EnvironmentInfo
 from .config import lint_wsl_conf_lf, probe_distro_wsl_conf
@@ -55,8 +55,6 @@ def read_git_system_credential_helpers(git_config_path: Path | None = None) -> l
         sections = parse_ini_sections(git_config_path.read_text(encoding="utf-8", errors="replace"))
         helper = sections.get("credential", {}).get("helper", "").strip()
         return [helper] if helper else []
-    from ..backends.system import NativeSystemBackend
-
     git_exe = NativeSystemBackend._resolve_git_exe()
     if git_exe is None:
         return []
@@ -331,13 +329,7 @@ def audit_wsl(
     deep: bool = False,
 ) -> dict[str, Any]:
     """Audit host WSL2 status, distros, .wslconfig presence, policy blocks, and Linux-side configuration."""
-    pkg_mod = sys.modules.get("winbearable.wsl")
-    default_path_fn = (
-        getattr(pkg_mod, "get_default_wslconfig_path", get_default_wslconfig_path)
-        if pkg_mod is not None
-        else get_default_wslconfig_path
-    )
-    target_wslconfig = wslconfig_path or default_path_fn()
+    target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     has_wslconfig = target_wslconfig.is_file()
     wslconfig_text = target_wslconfig.read_text(encoding="utf-8") if has_wslconfig else ""
     sections = parse_ini_sections(wslconfig_text) if has_wslconfig else {}

@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"winbearable {__version__}")
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks on unexpected errors")
     parser.add_argument("--uac-output", dest="uac_output", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--uac-caller-sid", dest="uac_caller_sid", default=None, help=argparse.SUPPRESS)
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -81,6 +82,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--elevate",
         action="store_true",
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
+    )
+    apply_parser.add_argument(
+        "--expected-fingerprints",
+        dest="expected_fingerprints",
+        default=None,
+        help="JSON map (or @file) of expected target_id -> sha256/state fingerprints from `wb plan --json`",
+    )
+    apply_parser.add_argument(
+        "--plan-file",
+        dest="plan_file",
+        default=None,
+        help="Path to a `wb plan --json` output file whose precondition_fingerprints must still match",
+    )
+    apply_parser.add_argument("--uac-output", dest="uac_output", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    apply_parser.add_argument(
+        "--uac-caller-sid", dest="uac_caller_sid", default=argparse.SUPPRESS, help=argparse.SUPPRESS
     )
     apply_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     add_selection_args(apply_parser)
@@ -308,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def absolutize_elevated_argv(raw_argv: list[str]) -> list[str]:
     """Resolve relative file path arguments before UAC elevation changes CWD to System32."""
-    path_flags = {"--profile", "--wslconfig", "--output"}
+    path_flags = {"--profile", "--wslconfig", "--output", "--plan-file"}
     out: list[str] = []
     idx = 0
     while idx < len(raw_argv):

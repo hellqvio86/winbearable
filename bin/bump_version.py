@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def _update_security_and_winget(new_version: str) -> None:
         sec_text = SECURITY_PATH.read_text(encoding="utf-8")
         sec_text = re.sub(r"`\d+\.\d+\.x`", f"`{minor_series}.x`", sec_text)
         sec_text = re.sub(r"`< \d+\.\d+`", f"`< {minor_series}`", sec_text)
-        SECURITY_PATH.write_text(sec_text, encoding="utf-8")
+        SECURITY_PATH.write_text(sec_text, encoding="utf-8", newline="\n")
 
     if WINGET_DIR.is_dir():
         for yaml_path in sorted(WINGET_DIR.glob("*.yaml")):
@@ -63,7 +64,13 @@ def _update_security_and_winget(new_version: str) -> None:
                 f"/releases/download/v{new_version}/winbearable-{new_version}-win-x64.zip",
                 text,
             )
-            yaml_path.write_text(text, encoding="utf-8")
+            text = re.sub(
+                r"^(\s*InstallerSha256:\s*).+$",
+                r"\1PENDING_RELEASE_BUILD_SHA256",
+                text,
+                flags=re.MULTILINE,
+            )
+            yaml_path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def main() -> int:
@@ -81,9 +88,10 @@ def main() -> int:
         content,
         count=1,
     )
-    CONST_PATH.write_text(updated, encoding="utf-8")
+    CONST_PATH.write_text(updated, encoding="utf-8", newline="\n")
     _update_security_and_winget(new_version)
-    print(f"Bumped version {current} -> {new_version} in {CONST_PATH}, SECURITY.md, and packaging/winget/")
+    subprocess.run(["uv", "lock"], cwd=ROOT_DIR, check=True)
+    print(f"Bumped version {current} -> {new_version} in {CONST_PATH}, SECURITY.md, uv.lock, and packaging/winget/")
     print("Next: update CHANGELOG.md and InstallerSha256, then run 'make release-check'.")
     return 0
 

@@ -7,7 +7,7 @@ import json
 import uuid
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,41 +15,28 @@ from typing import Any
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
 from ..models import (
-    AuditpolSnapshot,
     EnvironmentInfo,
     ExternalDriftError,
-    FileSnapshot,
-    FirewallGroupSnapshot,
-    FsutilSnapshot,
-    GitConfigSnapshot,
-    IcaclsSnapshot,
     OperationJournalEntry,
     OperationOutcome,
     OperationStatus,
-    OptionalFeatureSnapshot,
-    PowercfgSnapshot,
     ProfileSpec,
-    RegistryKeySnapshot,
-    RegistryValueSnapshot,
     RegistryView,
     RiskLevel,
     RunRecord,
-    ScheduledTaskSnapshot,
-    ServiceSnapshot,
     TransactionState,
     TweakCheckResult,
     TweakDefinition,
     TweakStatus,
     UnsupportedPlatformError,
-    WevtutilSnapshot,
+    WinbearableError,
     WslDistroSnapshot,
 )
 from ..operations import (
-    OPERATION_ADAPTERS,
     OperationAdapter,
     OperationApplyContext,
-    atomic_write_bytes,
     get_operation_adapter,
+    identity,
 )
 from ..operations.package_and_file_adapters import FileConfigOperationAdapter
 from ..state import StateStore
@@ -61,6 +48,14 @@ from ..wsl import (
     get_wsl_distro_guid,
     prepare_wsl_plan,
 )
+from .compensation import (
+    collect_pre_apply_snapshots,
+    compute_dry_run_fingerprints,
+    compute_snapshot_fingerprints,
+)
+from .compensation import (
+    compensate_run_record as compensate_run_record,
+)
 from .evaluate import detect_tweak, evaluate_profile
 from .params import (
     ApplySummary,
@@ -69,237 +64,27 @@ from .params import (
     IrreversibleActionError,
     TweakMutationError,
     capture_failure_outcome,
+    require_native_backends,
     resolve_tweak_params,
 )
 
-
-@dataclass(frozen=True)
-class _PreApplySnapshots:
-    registry: list[RegistryValueSnapshot]
-    registry_keys: list[RegistryKeySnapshot]
-    services: list[ServiceSnapshot]
-    tasks: list[ScheduledTaskSnapshot]
-    features: list[OptionalFeatureSnapshot]
-    auditpol: list[AuditpolSnapshot]
-    wevtutil: list[WevtutilSnapshot]
-    firewall_groups: list[FirewallGroupSnapshot]
-    fsutil: list[FsutilSnapshot]
-    powercfg: list[PowercfgSnapshot]
-    git_config: list[GitConfigSnapshot]
-    icacls: list[IcaclsSnapshot]
-    files: list[FileSnapshot]
-
-
-def _collect_pre_apply_snapshots(
-    evaluations: list[TweakCheckResult],
-    registry: RegistryBackend,
-    system: SystemBackend,
-    backup_dir: Path | None = None,
-    profile_params: dict[str, dict[str, Any]] | None = None,
-    *,
-    expand_fn: Callable[[str], Path] | None = None,
-) -> _PreApplySnapshots:
-    """Capture all pre-change snapshots for drifted tweaks via OperationAdapters."""
-    reg_snapshots: list[RegistryValueSnapshot] = []
-    reg_key_snapshots: list[RegistryKeySnapshot] = []
-    svc_snapshots: list[ServiceSnapshot] = []
-    task_snapshots: list[ScheduledTaskSnapshot] = []
-    feat_snapshots: list[OptionalFeatureSnapshot] = []
-    auditpol_snapshots: list[AuditpolSnapshot] = []
-    wevtutil_snapshots: list[WevtutilSnapshot] = []
-    fw_snapshots: list[FirewallGroupSnapshot] = []
-    fsutil_snapshots: list[FsutilSnapshot] = []
-    powercfg_snapshots: list[PowercfgSnapshot] = []
-    git_snapshots: list[GitConfigSnapshot] = []
-    icacls_snapshots: list[IcaclsSnapshot] = []
-    file_snapshots: list[FileSnapshot] = []
-
-    seen_ids: set[str] = set()
-    adapters: list[OperationAdapter] = [
-        FileConfigOperationAdapter(expand_fn=expand_fn)
-        if isinstance(a, FileConfigOperationAdapter) and expand_fn is not None
-        else a
-        for a in OPERATION_ADAPTERS
-    ]
-
-    for res in evaluations:
-        if res.status != TweakStatus.DRIFTED:
-            continue
-        tweak = resolve_tweak_params(
-            get_tweak(res.tweak_id),
-            profile_params.get(res.tweak_id) if profile_params else None,
-        )
-        for adapter in adapters:
-            for snap in adapter.snapshot(tweak, registry, system, backup_dir, seen_ids):
-                if isinstance(snap, RegistryValueSnapshot):
-                    reg_snapshots.append(snap)
-                elif isinstance(snap, RegistryKeySnapshot):
-                    reg_key_snapshots.append(snap)
-                elif isinstance(snap, ServiceSnapshot):
-                    svc_snapshots.append(snap)
-                elif isinstance(snap, ScheduledTaskSnapshot):
-                    task_snapshots.append(snap)
-                elif isinstance(snap, OptionalFeatureSnapshot):
-                    feat_snapshots.append(snap)
-                elif isinstance(snap, AuditpolSnapshot):
-                    auditpol_snapshots.append(snap)
-                elif isinstance(snap, WevtutilSnapshot):
-                    wevtutil_snapshots.append(snap)
-                elif isinstance(snap, FirewallGroupSnapshot):
-                    fw_snapshots.append(snap)
-                elif isinstance(snap, FsutilSnapshot):
-                    fsutil_snapshots.append(snap)
-                elif isinstance(snap, PowercfgSnapshot):
-                    powercfg_snapshots.append(snap)
-                elif isinstance(snap, GitConfigSnapshot):
-                    git_snapshots.append(snap)
-                elif isinstance(snap, IcaclsSnapshot):
-                    icacls_snapshots.append(snap)
-                elif isinstance(snap, FileSnapshot):
-                    file_snapshots.append(snap)
-
-    return _PreApplySnapshots(
-        registry=reg_snapshots,
-        registry_keys=reg_key_snapshots,
-        services=svc_snapshots,
-        tasks=task_snapshots,
-        features=feat_snapshots,
-        auditpol=auditpol_snapshots,
-        wevtutil=wevtutil_snapshots,
-        firewall_groups=fw_snapshots,
-        fsutil=fsutil_snapshots,
-        powercfg=powercfg_snapshots,
-        git_config=git_snapshots,
-        icacls=icacls_snapshots,
-        files=file_snapshots,
-    )
-
-
-def _compute_snapshot_fingerprints(snaps: _PreApplySnapshots) -> dict[str, str]:
-    """Build a pure precondition fingerprint map for optimistic concurrency verification."""
-    fp: dict[str, str] = {}
-    for rs in snaps.registry:
-        fp[f"reg:{rs.hive}\\{rs.key_path}|{rs.view}|{rs.value_name}"] = (
-            f"{rs.previous_type}:{rs.previous_data!r}" if rs.value_existed else "absent"
-        )
-    for ks in snaps.registry_keys:
-        fp[f"regkey:{ks.hive}\\{ks.key_path}|{ks.view}"] = "present" if ks.existed else "absent"
-    for fs in snaps.files:
-        fp[f"file:{fs.path}"] = fs.sha256 or "absent"
-    for ss in snaps.services:
-        fp[f"svc:{ss.service_name}"] = str(ss.previous_start_type)
-    return fp
-
-
-def compensate_run_record(
-    run_record: RunRecord,
-    registry: RegistryBackend,
-    system: SystemBackend,
-    restore_full_policy: bool = False,
-    force_rollback: bool = False,
-    skip_package_uninstall: bool = False,
-) -> list[str]:
-    """Execute conflict-aware compensating rollback for a RunRecord via OperationAdapters."""
-    errors: list[str] = []
-    if run_record.state == TransactionState.PLANNED and not run_record.completed_operations:
-        return errors
-
-    adapter_batches: list[tuple[str, list[Any]]] = [
-        ("registry", list(run_record.registry_snapshots)),
-        ("registry", list(run_record.registry_key_snapshots)),
-        ("service", list(run_record.service_snapshots)),
-        ("scheduled_task", list(run_record.task_snapshots)),
-        ("optional_feature", list(run_record.feature_snapshots)),
-        ("auditpol", list(run_record.auditpol_snapshots)),
-        ("wevtutil", list(run_record.wevtutil_snapshots)),
-        ("firewall_group", list(run_record.firewall_group_snapshots)),
-        ("fsutil_case_sensitive", list(run_record.fsutil_snapshots)),
-        ("powercfg_hibernate", list(run_record.powercfg_snapshots)),
-        ("git_config", list(run_record.git_config_snapshots)),
-        ("icacls_acl", list(run_record.icacls_snapshots)),
-        ("hyperv_firewall", list(run_record.hyperv_firewall_snapshots)),
-        ("file_config", list(run_record.file_snapshots)),
-    ]
-    for kind, batch in adapter_batches:
-        if batch:
-            adapter = get_operation_adapter(kind)
-            errors.extend(
-                adapter.compensate(
-                    batch,
-                    registry,
-                    system,
-                    force=force_rollback,
-                    restore_full_policy=restore_full_policy,
-                    skip_package_uninstall=skip_package_uninstall,
-                )
-            )
-
-    if not skip_package_uninstall:
-        for ext_id in reversed(run_record.installed_vscode_extensions):
-            if not system.uninstall_vscode_extension(ext_id) or system.is_vscode_extension_installed(ext_id):
-                errors.append(f"vscode_extension {ext_id}")
-        for pkg_id in reversed(run_record.installed_winget_packages):
-            if not system.uninstall_winget_package(pkg_id) or system.is_winget_package_installed(pkg_id):
-                errors.append(f"winget {pkg_id}")
-
-    if run_record.wslconfig_path:
-        try:
-            target_cfg = Path(run_record.wslconfig_path)
-            has_conflict = False
-            if not force_rollback and run_record.wslconfig_post_sha256 is not None:
-                cur_sha = hashlib.sha256(target_cfg.read_bytes()).hexdigest() if target_cfg.is_file() else None
-                pre_sha: str | None = None
-                if run_record.wslconfig_existed and run_record.wsl_backup_path:
-                    bak = Path(run_record.wsl_backup_path)
-                    if bak.is_file():
-                        pre_sha = hashlib.sha256(bak.read_bytes()).hexdigest()
-                matches_pre = (cur_sha is None) if run_record.wslconfig_existed is False else (cur_sha == pre_sha)
-                if not matches_pre and cur_sha != run_record.wslconfig_post_sha256:
-                    errors.append(f"restore_conflict wslconfig {run_record.wslconfig_path}")
-                    has_conflict = True
-            if not has_conflict:
-                if run_record.wslconfig_existed is False:
-                    target_cfg.unlink(missing_ok=True)
-                elif run_record.wsl_backup_path:
-                    bak = Path(run_record.wsl_backup_path)
-                    if bak.is_file():
-                        atomic_write_bytes(target_cfg, bak.read_bytes())
-        except OSError as exc:
-            errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
-
-    for d_snap in reversed(run_record.wsl_distro_snapshots):
-        if d_snap.distro_guid is not None:
-            cur_guid = get_wsl_distro_guid(d_snap.distro, registry)
-            if cur_guid != d_snap.distro_guid:
-                errors.append(
-                    f"wsl distro '{d_snap.distro}' identity mismatch (expected {d_snap.distro_guid}, got {cur_guid})"
-                )
-                continue
-        if not force_rollback and d_snap.post_sha256 is not None:
-            probe = system.run_wsl_command(["-d", d_snap.distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-            if probe.returncode == 0:
-                cur_content = probe.stdout
-                cur_sha = hashlib.sha256(cur_content.encode("utf-8")).hexdigest()
-                pre_sha = (
-                    hashlib.sha256(d_snap.previous_content.encode("utf-8")).hexdigest() if d_snap.existed else None
-                )
-                if cur_sha == pre_sha and cur_sha != d_snap.post_sha256:
-                    continue
-                if cur_sha != d_snap.post_sha256:
-                    errors.append(f"restore_conflict wsl_distro {d_snap.distro}")
-                    continue
-        if d_snap.existed:
-            res = system.run_wsl_command(
-                ["-d", d_snap.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
-                input_text=d_snap.previous_content,
-            )
-            if res.returncode != 0:
-                errors.append(f"wsl distro '{d_snap.distro}' restore: {res.stderr or res.returncode}")
-        else:
-            res = system.run_wsl_command(["-d", d_snap.distro, "-u", "root", "--", "rm", "-f", "/etc/wsl.conf"])
-            if res.returncode != 0:
-                errors.append(f"wsl distro '{d_snap.distro}' cleanup: {res.stderr or res.returncode}")
-    return errors
+_APPLY_KIND_ORDER: tuple[str, ...] = (
+    "process_stop",
+    "registry",
+    "service",
+    "scheduled_task",
+    "optional_feature",
+    "winget_package",
+    "auditpol",
+    "wevtutil",
+    "firewall_group",
+    "fsutil_case_sensitive",
+    "powercfg_hibernate",
+    "git_config",
+    "icacls_acl",
+    "file_config",
+    "onedrive_uninstall",
+)
 
 
 def execute_tweak_mutations(
@@ -320,7 +105,7 @@ def execute_tweak_mutations(
     expand_fn: Callable[[str], Path] | None = None,
     journal_cb: Callable[[OperationJournalEntry], None] | None = None,
 ) -> list[OperationJournalEntry]:
-    """Apply all operations for a single tweak through registered OperationAdapters."""
+    """Apply and verify all operations for a single tweak through registered OperationAdapters."""
     ctx = OperationApplyContext(
         backup_dir=backup_dir,
         exported_subtrees=exported_subtrees,
@@ -333,60 +118,47 @@ def execute_tweak_mutations(
         checkpoint_cb=checkpoint_cb,
         journal_cb=journal_cb,
     )
-    ordered_kinds = (
-        "process_stop",
-        "registry",
-        "service",
-        "scheduled_task",
-        "optional_feature",
-        "winget_package",
-        "auditpol",
-        "wevtutil",
-        "firewall_group",
-        "fsutil_case_sensitive",
-        "powercfg_hibernate",
-        "git_config",
-        "icacls_acl",
-        "file_config",
-        "onedrive_uninstall",
-    )
     entries: list[OperationJournalEntry] = []
-    for kind in ordered_kinds:
+    adapters: list[OperationAdapter] = []
+    for kind in _APPLY_KIND_ORDER:
         adapter: OperationAdapter = get_operation_adapter(kind)
         if kind == "file_config" and expand_fn is not None:
             adapter = FileConfigOperationAdapter(expand_fn=expand_fn)
+        adapters.append(adapter)
         try:
             entries.extend(adapter.apply(tweak, env, registry, system, ctx))
+        except WinbearableError as exc:
+            raw_out = getattr(system, "last_outcome", None)
+            rc = raw_out.returncode if isinstance(raw_out, OperationOutcome) and not raw_out.ok else None
+            cmd = raw_out.command if isinstance(raw_out, OperationOutcome) and not raw_out.ok else ()
+            raise TweakMutationError(
+                OperationOutcome(status=exc.status, message=str(exc), returncode=rc, command=cmd)
+            ) from exc
         except Exception as exc:
-            outcome = capture_failure_outcome(system, str(exc))
-            raise TweakMutationError(outcome) from exc
+            raise TweakMutationError(capture_failure_outcome(system, str(exc))) from exc
 
     ext_skipped_elevated = any(e.operation_type == "vscode_extension" and e.outcome == "skipped" for e in entries)
-    post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
-    if post_check.status != TweakStatus.APPLIED and not (tweak.winget_specs and ext_skipped_elevated):
-        raise TweakMutationError(
-            OperationOutcome(
-                status=OperationStatus.UNKNOWN,
-                message=(
-                    f"Post-apply verification failed for '{tweak.tweak_id}': {post_check.status} ({post_check.detail})"
-                ),
+    if not (tweak.winget_specs and ext_skipped_elevated):
+        for adapter in adapters:
+            if not adapter.verify(tweak, registry, system):
+                post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
+                msg = (
+                    f"Post-apply verification failed for '{tweak.tweak_id}' ({adapter.kind}): "
+                    f"{post_check.status} ({post_check.detail})"
+                )
+                raise TweakMutationError(OperationOutcome(status=OperationStatus.UNKNOWN, message=msg))
+        post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
+        if post_check.status != TweakStatus.APPLIED:
+            raise TweakMutationError(
+                OperationOutcome(
+                    status=OperationStatus.UNKNOWN,
+                    message=(
+                        f"Post-apply verification failed for '{tweak.tweak_id}': "
+                        f"{post_check.status} ({post_check.detail})"
+                    ),
+                )
             )
-        )
     return entries
-
-
-def require_native_backends(
-    registry: RegistryBackend,
-    system: SystemBackend,
-    allow_simulated: bool,
-) -> None:
-    if allow_simulated:
-        return
-    if getattr(registry, "is_simulated", False) or getattr(system, "is_simulated", False):
-        raise UnsupportedPlatformError(
-            "Refusing mutating operation against simulated/in-memory backend. "
-            "Use native Windows backends for real changes."
-        )
 
 
 def apply_profile(
@@ -532,10 +304,13 @@ def _apply_profile_locked(
 
     run_id: str | None = None
     wsl_result: dict[str, Any] | None = None
+    precondition_fingerprints: dict[str, str] = (
+        compute_dry_run_fingerprints(evaluations, registry, system, profile.params, expand_fn) if dry_run else {}
+    )
     if not dry_run and (drifted_indices or (profile.wsl.enabled and env.wsl_installed)):
         run_id_candidate = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
         backup_dir = state_store.state_path.parent / "backups" / run_id_candidate
-        snaps = _collect_pre_apply_snapshots(
+        snaps = collect_pre_apply_snapshots(
             evaluations,
             registry,
             system,
@@ -543,7 +318,8 @@ def _apply_profile_locked(
             profile_params=profile.params,
             expand_fn=expand_fn,
         )
-        live_fingerprints = _compute_snapshot_fingerprints(snaps)
+        live_fingerprints = compute_snapshot_fingerprints(snaps)
+        precondition_fingerprints = dict(live_fingerprints)
         if expected_fingerprints is not None:
             for key, expected_fp in expected_fingerprints.items():
                 if key in live_fingerprints and live_fingerprints[key] != expected_fp:
@@ -561,7 +337,7 @@ def _apply_profile_locked(
         failure_outcomes: list[dict[str, Any]] = []
         journal_entries: list[OperationJournalEntry] = [
             OperationJournalEntry(
-                target_id=f"{res.tweak_id}:{op.operation_type}:{op.target}",
+                target_id=op.target_id or f"{res.tweak_id}:{op.operation_type}:{op.target}",
                 operation_type=op.operation_type,
                 tweak_id=res.tweak_id,
                 action=op.action,
@@ -583,7 +359,10 @@ def _apply_profile_locked(
         now_iso = datetime.now(tz=UTC).isoformat()
 
         def _populate_post_apply_states() -> None:
+            applied_target_ids = {e.target_id for e in journal_entries if e.outcome == "applied"}
             for i, rs in enumerate(snaps.registry):
+                if identity.registry_value_id(rs.hive, rs.key_path, rs.value_name, rs.view) not in applied_target_ids:
+                    continue
                 try:
                     cur = registry.get_value(rs.hive, rs.key_path, rs.value_name, view=rs.view)
                 except OSError:
@@ -595,6 +374,8 @@ def _apply_profile_locked(
                     post_type=cur[1] if cur is not None else None,
                 )
             for i, fs in enumerate(snaps.files):
+                if identity.file_id(fs.path) not in applied_target_ids:
+                    continue
                 try:
                     p = Path(fs.path)
                     post_sha = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
@@ -605,6 +386,9 @@ def _apply_profile_locked(
         def _make_record(state: TransactionState, error: str | None = None) -> RunRecord:
             if state == TransactionState.COMMITTED:
                 _populate_post_apply_states()
+                for i, entry in enumerate(journal_entries):
+                    if entry.outcome == "planned":
+                        journal_entries[i] = replace(entry, outcome="skipped")
             return RunRecord(
                 run_id=run_id_candidate,
                 timestamp=now_iso,
@@ -644,11 +428,7 @@ def _apply_profile_locked(
 
         def _record_journal_entry(entry: OperationJournalEntry) -> None:
             for i, existing in enumerate(journal_entries):
-                if (
-                    existing.tweak_id == entry.tweak_id
-                    and existing.operation_type == entry.operation_type
-                    and existing.outcome == "planned"
-                ):
+                if existing.target_id == entry.target_id and existing.outcome == "planned":
                     journal_entries[i] = entry
                     return
             journal_entries.append(entry)
@@ -698,12 +478,7 @@ def _apply_profile_locked(
                         ended_at=datetime.now(tz=UTC).isoformat(),
                     )
                 )
-                final_results[idx] = replace(
-                    res,
-                    status=TweakStatus.ERROR,
-                    detail=err_msg,
-                    outcome=outcome,
-                )
+                final_results[idx] = replace(res, status=TweakStatus.ERROR, detail=err_msg, outcome=outcome)
                 comp_errors = compensate_run_record(_make_record(TransactionState.ROLLING_BACK), registry, system)
                 rolled_back_ids.extend(applied_ids)
                 applied_ids.clear()
@@ -746,9 +521,6 @@ def _apply_profile_locked(
                     if prepared_wsl.wslconfig_changed:
                         wsl_target_path = str(prepared_wsl.target_wslconfig)
                         wslconfig_existed = prepared_wsl.target_wslconfig.is_file()
-                        wslconfig_post_sha256 = hashlib.sha256(
-                            prepared_wsl.merged_wslconfig.encode("utf-8")
-                        ).hexdigest()
                     for d_plan in prepared_wsl.distro_plans:
                         if d_plan.changed:
                             wsl_distro_snapshots.append(
@@ -757,7 +529,6 @@ def _apply_profile_locked(
                                     existed=d_plan.probe.status == "exists",
                                     previous_content=d_plan.probe.content,
                                     distro_guid=get_wsl_distro_guid(d_plan.distro, registry),
-                                    post_sha256=hashlib.sha256(d_plan.merged_content.encode("utf-8")).hexdigest(),
                                 )
                             )
                     wsl_changed = prepared_wsl.wslconfig_changed or bool(wsl_distro_snapshots)
@@ -768,12 +539,24 @@ def _apply_profile_locked(
 
                     applier(prepared_wsl)
                     if prepared_wsl.wslconfig_changed:
+                        wslconfig_post_sha256 = hashlib.sha256(
+                            prepared_wsl.merged_wslconfig.encode("utf-8")
+                        ).hexdigest()
                         state_store.upsert_run(_make_record(TransactionState.APPLYING))
 
                     distro_results: list[dict[str, Any]] = []
                     for d_plan in prepared_wsl.distro_plans:
                         apply_distro_wsl_conf(d_plan, system)
                         if d_plan.changed:
+                            snap_idx = next(
+                                (i for i, s in enumerate(wsl_distro_snapshots) if s.distro == d_plan.distro),
+                                None,
+                            )
+                            if snap_idx is not None:
+                                wsl_distro_snapshots[snap_idx] = replace(
+                                    wsl_distro_snapshots[snap_idx],
+                                    post_sha256=hashlib.sha256(d_plan.merged_content.encode("utf-8")).hexdigest(),
+                                )
                             state_store.upsert_run(_make_record(TransactionState.APPLYING))
                         distro_results.append(
                             {
@@ -823,10 +606,7 @@ def _apply_profile_locked(
                         applied_ids.clear()
                         final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
                         state_store.upsert_run(
-                            _make_record(
-                                final_st,
-                                error=f"WSL skipped due to PermissionError: {exc}",
-                            )
+                            _make_record(final_st, error=f"WSL skipped due to PermissionError: {exc}")
                         )
                         run_id = run_id_candidate
                     elif drifted_indices:
@@ -906,6 +686,7 @@ def _apply_profile_locked(
         dry_run=dry_run,
         run_id=run_id,
         plan_digest=plan_digest,
+        precondition_fingerprints=precondition_fingerprints,
         applied_ids=tuple(applied_ids),
         rolled_back_ids=tuple(rolled_back_ids),
         already_applied_ids=tuple(already_applied_ids),
@@ -926,7 +707,7 @@ def run_profile_command(
     env: EnvironmentInfo,
     registry: RegistryBackend,
     system: SystemBackend,
-    state_store: StateStore | None = None,
+    state_store: StateStore,
     dry_run: bool = True,
     allow_high_risk: bool = False,
     allow_irreversible: bool = False,
@@ -937,15 +718,15 @@ def run_profile_command(
     only_ids: set[str] | None = None,
     skip_ids: set[str] | None = None,
     category_filter: str | None = None,
+    expected_fingerprints: dict[str, str] | None = None,
 ) -> ApplySummary:
     """Shared validated command service for both CLI (`wb plan/apply`) and TUI (`wb tui`)."""
-    store = state_store if state_store is not None else StateStore()
     return apply_profile(
         profile=profile,
         env=env,
         registry=registry,
         system=system,
-        state_store=store,
+        state_store=state_store,
         dry_run=dry_run,
         allow_high_risk=allow_high_risk,
         allow_irreversible=allow_irreversible,
@@ -956,4 +737,5 @@ def run_profile_command(
         only_ids=only_ids,
         skip_ids=skip_ids,
         category_filter=category_filter,
+        expected_fingerprints=expected_fingerprints,
     )

@@ -1,6 +1,7 @@
 """Comprehensive unit tests for WinregBackend, NativeSystemBackend, StateStore, and TUI."""
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from winbearable.backends.registry import (
     InMemoryRegistryBackend,
     WinregBackend,
+    WslInteropRegistryBackend,
     create_default_registry_backend,
 )
 from winbearable.backends.system import (
@@ -29,11 +31,20 @@ from winbearable.const import (
     REG_DWORD,
     REG_SZ,
 )
+from winbearable.engine import apply_profile
 from winbearable.models import (
+    OperationOutcome,
+    OperationStatus,
     PolicyConflictPath,
+    ProfileSpec,
+    RegistryValueSnapshot,
+    RegistryView,
+    TransactionState,
+    WslConfigSpec,
 )
 from winbearable.state import StateStore
 from winbearable.tweaks import get_tweak
+from winbearable.wsl import WslOperationError
 
 
 class FakeWinregHandle:
@@ -229,7 +240,7 @@ def test_native_system_backend_linux_and_simulated_win32(tmp_path: Path) -> None
 
         def IsUserAnAdmin(self) -> int:
             if not self.admin:
-                raise RuntimeError("API error")
+                raise OSError("API error")
             return 1
 
     class FakeKernel32:
@@ -238,7 +249,7 @@ def test_native_system_backend_linux_and_simulated_win32(tmp_path: Path) -> None
 
         def GetPhysicallyInstalledSystemMemory(self, ptr: Any) -> int:
             if not self.succeed:
-                raise RuntimeError("Kernel32 error")
+                raise OSError("Kernel32 error")
             ptr._obj.value = 64 * 1024 * 1024  # 64 GiB in KiB
             return 1
 
@@ -424,8 +435,6 @@ def test_native_win32_process_snapshot_and_winget_cache() -> None:
 
 def test_registry_view_and_permission_preservation() -> None:
     """WinregBackend passes explicit WOW64 views and preserves PermissionError on key/subkey/delete."""
-    from winbearable.backends.registry import WinregBackend
-    from winbearable.models import RegistryValueSnapshot, RegistryView
 
     recorded_access: list[int] = []
 
@@ -502,15 +511,6 @@ def test_registry_view_and_permission_preservation() -> None:
 
 
 def test_wsl2_interop_readonly_registry_and_host_audit() -> None:
-    import subprocess
-    from unittest.mock import patch
-
-    from winbearable.backends.registry import (
-        WslInteropRegistryBackend,
-        create_default_registry_backend,
-    )
-    from winbearable.backends.system import NativeSystemBackend
-    from winbearable.models import RegistryValueSnapshot, RegistryView
 
     def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         cmd_str = " ".join(args)
@@ -591,32 +591,20 @@ def test_wsl2_interop_readonly_registry_and_host_audit() -> None:
         auto_backend = create_default_registry_backend("linux")
         assert isinstance(auto_backend, WslInteropRegistryBackend)
 
-    with (
-        patch("winbearable.backends.system.is_wsl2", return_value=True),
-        patch(
-            "winbearable.backends.system.find_wsl_reg_exe",
-            return_value="/mnt/c/Windows/System32/reg.exe",
-        ),
-        patch("subprocess.run", side_effect=fake_run),
-    ):
-        env = NativeSystemBackend(platform_override="linux").detect_environment(backend)
+    with patch("subprocess.run", side_effect=fake_run):
+        env = NativeSystemBackend(
+            platform_override="linux",
+            wsl2_fn=lambda: True,
+            find_reg_fn=lambda: "/mnt/c/Windows/System32/reg.exe",
+        ).detect_environment(backend)
         assert not (env.is_windows)
         assert env.host_auditable
         assert env.os_name == "Linux (WSL2 -> Windows host)"
 
 
 def test_structured_outcomes_process_tree_locale_and_wsl_tx() -> None:
-    import subprocess
-    from pathlib import Path
-    from unittest.mock import patch
 
-    from winbearable.backends.system import NativeSystemBackend
-    from winbearable.const import HIVE_HKCU
-    from winbearable.engine import apply_profile
-    from winbearable.models import OperationOutcome, OperationStatus, ProfileSpec, TransactionState, WslConfigSpec
-    from winbearable.wsl import WslOperationError
-
-    # P0.4: Locale-robust exit/Win32 code classification
+    # Locale-robust exit/Win32 code classification
     assert NativeSystemBackend._classify_cmd_failure(5, "", "Zugriff verweigert") == OperationStatus.ACCESS_DENIED
     assert (
         NativeSystemBackend._classify_cmd_failure(1260, "", "Gesperrt durch Richtlinie")
@@ -625,8 +613,7 @@ def test_structured_outcomes_process_tree_locale_and_wsl_tx() -> None:
     assert NativeSystemBackend._classify_cmd_failure(9009, "", "Befehl nicht gefunden") == OperationStatus.TOOL_MISSING
     assert NativeSystemBackend._classify_cmd_failure(1, "", "Okänt fel") == OperationStatus.UNKNOWN
 
-    # P0.2: Win32 timeout attempts taskkill /T /F /PID
-    win_sys = NativeSystemBackend(platform_override="win32")
+    # Win32 timeout attempts taskkill /T /F /PID
 
     class _HungProc:
         pid = 7777
@@ -639,17 +626,15 @@ def test_structured_outcomes_process_tree_locale_and_wsl_tx() -> None:
         def kill(self) -> None:
             return None
 
-    with (
-        patch("subprocess.Popen", return_value=_HungProc()),
-        patch("subprocess.run") as mock_taskkill,
-    ):
-        res = win_sys._run_native_cmd(["wsl.exe", "--status"], timeout=3.0)
+    hung_sys = NativeSystemBackend(platform_override="win32", popen_factory=lambda *a, **kw: _HungProc())
+    with patch("subprocess.run") as mock_taskkill:
+        res = hung_sys._run_native_cmd(["wsl.exe", "--status"], timeout=3.0)
     assert res.returncode == 124
     mock_taskkill.assert_called_once()
     assert mock_taskkill.call_args[0][0][0].endswith("taskkill.exe")
     assert mock_taskkill.call_args[0][0][1:4] == ["/T", "/F", "/PID"]
 
-    # P0.1: Engine propagates TIMEOUT, ACCESS_DENIED, TOOL_MISSING into TweakCheckResult & RunRecord
+    # Engine propagates TIMEOUT, ACCESS_DENIED, TOOL_MISSING into TweakCheckResult & RunRecord
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
     env = sys_b.detect_environment(reg)
@@ -681,7 +666,7 @@ def test_structured_outcomes_process_tree_locale_and_wsl_tx() -> None:
             assert runs[-1].state == TransactionState.ROLLED_BACK
             assert runs[-1].failure_outcomes[0]["status"] == str(expected_status)
 
-    # P0.3: WSL failure inside apply_profile compensates earlier registry mutations & marks FAILED
+    # WSL failure inside apply_profile compensates earlier registry mutations & marks FAILED
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         store = StateStore(root / "state.json")

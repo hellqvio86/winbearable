@@ -12,6 +12,11 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
 from .const import APP_NAME, ENV_STATE_PATH, STATE_SCHEMA_VERSION
 from .models import (
     InvalidStateTransitionError,
@@ -159,8 +164,6 @@ class StateStore:
         lock_path = self.state_path.with_suffix(suffix)
         with open(lock_path, "a+", encoding="utf-8") as lock_file:
             if sys.platform == "win32":
-                import msvcrt
-
                 lock_file.seek(0)
                 try:
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
@@ -173,8 +176,6 @@ class StateStore:
                     with suppress(OSError):
                         msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
-
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
                     yield

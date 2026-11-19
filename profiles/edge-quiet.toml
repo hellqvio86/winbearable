@@ -1,5 +1,5 @@
 name = "edge-quiet"
-description = "Opt-in Microsoft Edge quieting preset (DEC-03; shows 'Managed by your organization' in Edge)."
+description = "Opt-in Microsoft Edge quieting preset (shows 'Managed by your organization' in Edge)."
 
 [wsl]
 enabled = false

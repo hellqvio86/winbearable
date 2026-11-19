@@ -2,6 +2,22 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.17.0] - 2026-11-19
+
+### Added & Changed
+
+- **Engine, Adapters & Rollback Integrity:**
+  - Enforced `OperationAdapter.verify()` in `execute_tweak_mutations()`, wired `rollback_runs()` to update `operation_journal` (`rollback_outcome`) and raise `RollbackConflictError` / `RollbackFailureError`, and routed `wb plan` / `wb apply` through `run_profile_command()`.
+  - Fixed `inspect()` canonical `target_id`s, prevented `snapshot()` from pre-populating `post_*` state, respected `attempted_targets` during partial-failure compensation, delegated winget/VS Code rollback to `WingetOperationAdapter.compensate()`, and hardened WSL `/etc/wsl.conf` rollback with atomic temp-file swaps and fail-closed probe handling.
+  - Replaced `isinstance` snapshot ladders with mapping dispatch (`_SNAPSHOT_FIELD_BY_TYPE`) and centralized `now_iso()` / `raise_system_error()`.
+- **UAC, CLI & Win32 Security Hardening:**
+  - Refactored `uac.py` into a dedicated `winbearable.uac` package (`win32`, `output`, `elevation`) and centralized Win32 DLL loading (`WinDLL(..., use_last_error=True)`) and token SID lookup in `backends/win32_ctypes.py`.
+  - Wired `sanitize_elevated_python_env()`, `summarize_elevation_requirements()`, `--uac-caller-sid` enforcement for user-scope operations (`HKCU` scope accuracy in `format_registry_op`), and `--plan-file` / `--expected-fingerprints` (`precondition_fingerprints`) end-to-end in CLI handlers.
+  - Narrowed `check_guest_account` exception handling to fail closed (`ObservationState.UNKNOWN`), eliminated `sys.modules` lookups via explicit DI (`CliDeps`, `NativeSystemBackend`), and suppressed misleading `0/0` CIS output in `wb doctor`.
+- **Modularity, Tests & Tooling:**
+  - Split oversized production and test modules under 750 LOC (`engine/compensation.py`, `backends/system_native_cmd.py`, `backends/system_native_sec.py`, `cli/handlers_tools.py`, `operations/{service_task_feature,security_policy,env}_adapters.py`), moved `src/tests/` -> `tests/` and `src/generate_badge.py` -> `bin/generate_badge.py`, hoisted all inline imports to module top-level, removed internal ticket IDs, and added AST lint gates in `tests/test_catalog_lint.py`.
+  - Updated `bin/bump_version.py` (LF line endings, `uv lock`, `PENDING_RELEASE_BUILD_SHA256`), `bin/gen_docs.py` (LF line endings), `Makefile`, and `.githooks/pre-commit`.
+
 ## [0.16.0] - 2026-11-18
 
 ### Added & Changed

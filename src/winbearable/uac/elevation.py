@@ -1,0 +1,214 @@
+"""UAC elevation target resolution, environment sanitization, and ShellExecuteExW runner."""
+
+from __future__ import annotations
+
+import ctypes
+import os
+import subprocess
+import sys
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from ..backends.win32_ctypes import get_current_process_user_sid
+from ..backends.win32_fs import is_reparse_or_symlink
+from ..const import ERROR_CANCELLED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT
+from .output import read_bounded_uac_output
+from .win32 import (
+    DEFAULT_UAC_TERMINATE_GRACE_MS,
+    DEFAULT_UAC_TIMEOUT_MS,
+    ENV_UAC_TIMEOUT_MS,
+    SEE_MASK_NOCLOSEPROCESS,
+    SW_HIDE,
+    ShellExecuteInfoW,
+    UacCancelledError,
+    UacElevationError,
+    UacTimeoutError,
+    get_win32_dlls,
+    last_win32_error,
+    resolve_trusted_system32,
+)
+
+
+def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
+    """Remove Python import/runtime injection variables in an elevated child environment."""
+    target_env = env if env is not None else os.environ
+    removed: list[str] = []
+    for var in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP"):
+        if var in target_env:
+            del target_env[var]
+            removed.append(var)
+    return removed
+
+
+def build_elevated_cmdline_args(
+    argv: list[str],
+    uac_output_path: Path,
+    *,
+    caller_sid: str | None = None,
+) -> list[str]:
+    """Strip --elevate / prior --uac-output / --uac-caller-sid flags and append capture & caller SID."""
+    cleaned: list[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--elevate":
+            continue
+        if arg in {"--uac-output", "--uac-caller-sid"}:
+            skip_next = True
+            continue
+        if arg.startswith(("--uac-output=", "--uac-caller-sid=")):
+            continue
+        cleaned.append(arg)
+    result = [*cleaned, "--uac-output", str(uac_output_path)]
+    if caller_sid:
+        result.extend(["--uac-caller-sid", caller_sid])
+    return result
+
+
+def _is_wb_launcher(path: Path) -> bool:
+    """Return True if *path* is a standalone or script-shim `wb` / `winbearable` executable."""
+    return path.name.lower() in {"wb.exe", "winbearable.exe", "wb", "winbearable"}
+
+
+def _validate_elevation_executable(
+    path: Path,
+    *,
+    check_symlinks: bool = True,
+    reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+) -> Path:
+    """Resolve *path* and reject symlinks/reparse points on the target or its ancestors."""
+    resolved = path.resolve()
+    if check_symlinks and (reparse_check(path) or any(reparse_check(p) for p in path.parents)):
+        raise UacElevationError(f"Refusing elevation target with symlink or reparse point: {path}")
+    return resolved
+
+
+def resolve_elevation_target(
+    elevated_args: list[str],
+    executable: str | None = None,
+    argv0: str | None = None,
+    *,
+    reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+) -> tuple[str, list[str]]:
+    """Resolve the UAC target executable and argument list.
+
+    Prefers a frozen `wb.exe` or `uv`/`pip` `wb.exe` script launcher over `python.exe`
+    so Windows UAC displays `wb.exe` / `winbearable` instead of `Python`.
+    """
+    if executable is not None:
+        target = _validate_elevation_executable(Path(executable), reparse_check=reparse_check)
+        args = elevated_args if _is_wb_launcher(target) else ["-I", "-m", "winbearable", *elevated_args]
+        return str(target), args
+
+    if getattr(sys, "frozen", False):
+        return str(_validate_elevation_executable(Path(sys.executable), reparse_check=reparse_check)), elevated_args
+
+    raw_argv0 = argv0 if argv0 is not None else (sys.argv[0] if sys.argv else "")
+    if raw_argv0:
+        argv0_path = Path(raw_argv0)
+        if (
+            argv0_path.is_absolute()
+            and argv0_path.name.lower() in {"wb.exe", "winbearable.exe"}
+            and argv0_path.is_file()
+        ):
+            return str(_validate_elevation_executable(argv0_path, reparse_check=reparse_check)), elevated_args
+
+    sibling_wb = Path(sys.executable).resolve().with_name("wb.exe")
+    if sibling_wb.is_file():
+        return str(_validate_elevation_executable(sibling_wb, reparse_check=reparse_check)), elevated_args
+
+    # Linux/macOS virtualenvs always symlink .venv/bin/python to the base interpreter; enforce symlink check on Win32.
+    return (
+        str(
+            _validate_elevation_executable(
+                Path(sys.executable),
+                check_symlinks=(sys.platform == "win32"),
+                reparse_check=reparse_check,
+            )
+        ),
+        ["-I", "-m", "winbearable", *elevated_args],
+    )
+
+
+def run_elevated_wb(
+    argv: list[str],
+    executable: str | None = None,
+    cwd: str | None = None,
+    windll_override: Any = None,
+    timeout_ms: int | None = None,
+) -> tuple[int, str]:
+    """Re-launch `wb` elevated via ShellExecuteExW('runas'), wait up to *timeout_ms*, and return (exit_code, output)."""
+    if timeout_ms is None:
+        raw_env_timeout = os.environ.get(ENV_UAC_TIMEOUT_MS, "").strip()
+        effective_timeout_ms = (
+            int(raw_env_timeout) if raw_env_timeout.isdigit() and int(raw_env_timeout) > 0 else DEFAULT_UAC_TIMEOUT_MS
+        )
+    else:
+        effective_timeout_ms = timeout_ms
+    if effective_timeout_ms <= 0 or effective_timeout_ms >= 0xFFFFFFFF:
+        raise ValueError("timeout_ms must be a positive integer (< 4294967295).")
+
+    shell32, kernel32 = get_win32_dlls(windll_override)
+
+    try:
+        caller_sid = get_current_process_user_sid(windll_override)
+    except AttributeError, OSError, TypeError:
+        caller_sid = None
+    with tempfile.TemporaryDirectory(prefix="wb-uac-", ignore_cleanup_errors=True) as tmp_dir:
+        out_path = Path(tmp_dir) / "uac-output.txt"
+        elevated_args = build_elevated_cmdline_args(argv, out_path, caller_sid=caller_sid)
+        resolved_exe, launch_args = resolve_elevation_target(elevated_args, executable=executable)
+        params = subprocess.list2cmdline(launch_args)
+
+        sei = ShellExecuteInfoW()
+        sei.cbSize = ctypes.sizeof(ShellExecuteInfoW)
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS
+        sei.hwnd = None
+        sei.lpVerb = "runas"
+        sei.lpFile = resolved_exe
+        sei.lpParameters = params
+        sei.lpDirectory = cwd or resolve_trusted_system32(kernel32)
+        sei.nShow = SW_HIDE
+
+        ok = shell32.ShellExecuteExW(ctypes.byref(sei))
+        if not ok:
+            err_code = last_win32_error(kernel32)
+            if err_code == ERROR_CANCELLED:
+                raise UacCancelledError("UAC elevation was cancelled by the user.")
+            raise UacElevationError(f"Windows UAC elevation failed (Win32 error {err_code}).")
+
+        if not sei.hProcess:
+            raise UacElevationError("Windows UAC elevation succeeded without returning a process handle.")
+
+        exit_code = ctypes.c_ulong(1)
+        try:
+            wait_res = int(kernel32.WaitForSingleObject(sei.hProcess, effective_timeout_ms))
+            if wait_res == WAIT_TIMEOUT:
+                term_ok = bool(kernel32.TerminateProcess(sei.hProcess, 1))
+                if term_ok:
+                    kernel32.WaitForSingleObject(sei.hProcess, DEFAULT_UAC_TERMINATE_GRACE_MS)
+                    raise UacTimeoutError(
+                        f"Elevated winbearable process timed out after {effective_timeout_ms} ms and was terminated; "
+                        "host state may have been partially modified. Run `wb doctor` and `wb recover` before retrying."
+                    )
+                term_err = last_win32_error(kernel32)
+                raise UacTimeoutError(
+                    f"Elevated winbearable process timed out after {effective_timeout_ms} ms and could not be "
+                    f"terminated (Win32 error {term_err}); it may still be running and holding the transaction lock. "
+                    "Wait for completion or inspect Task Manager before running `wb recover`."
+                )
+            if wait_res != WAIT_OBJECT_0:
+                err_code = last_win32_error(kernel32) if wait_res == WAIT_FAILED else 0
+                raise UacElevationError(
+                    f"Waiting for elevated winbearable process failed (wait_result={wait_res}, Win32 error {err_code})."
+                )
+            if not kernel32.GetExitCodeProcess(sei.hProcess, ctypes.byref(exit_code)):
+                raise UacElevationError("Failed to read exit code from elevated winbearable process.")
+        finally:
+            kernel32.CloseHandle(sei.hProcess)
+
+        return int(exit_code.value), read_bounded_uac_output(out_path)

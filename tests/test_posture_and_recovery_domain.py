@@ -1,7 +1,7 @@
 """Comprehensive unit tests for WinregBackend, NativeSystemBackend, StateStore, and TUI."""
 
 import os
-import tempfile
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -13,32 +13,48 @@ from winbearable.backends.registry import (
 )
 from winbearable.backends.system import (
     GIB_BYTES,
+    CommandResult,
     InMemorySystemBackend,
     NativeSystemBackend,
 )
 from winbearable.const import (
+    BITLOCKER_STATUS_KEY,
+    DEFENDER_KEY,
     ENV_CONFIG_PATH,
     ENV_PROFILE_DIR,
     ENV_STATE_PATH,
     HIVE_HKCU,
     HIVE_HKLM,
+    REG_BINARY,
     REG_DWORD,
+    REG_MULTI_SZ,
     REG_SZ,
 )
+from winbearable.engine import (
+    apply_profile,
+    detect_tweak,
+)
 from winbearable.models import (
+    ObservationState,
     OptionalFeatureSnapshot,
+    ProfileSpec,
     RegistrySpec,
     ScheduledTaskSnapshot,
     ServiceSnapshot,
     ServiceSpec,
+    TweakDefinition,
+    TweakStatus,
+    UnsupportedPlatformError,
+    WslConfigSpec,
 )
 from winbearable.profiles import (
     ProfileValidationError,
+    generate_init_profile_toml,
     get_builtin_profiles_dir,
     get_default_user_profile_path,
     load_profile,
 )
-from winbearable.state import StateStore, resolve_state_path
+from winbearable.state import StateStore, StateStoreError, resolve_state_path
 from winbearable.tui import (
     apply_from_tui,
     format_apply_status,
@@ -48,10 +64,15 @@ from winbearable.tui import (
 )
 from winbearable.tweaks import get_tweak
 from winbearable.wsl import (
+    WslOperationError,
     _atomic_write_text,
+    apply_wsl_linux_baseline,
+    audit_linux_side,
+    audit_wsl,
     calculate_wsl_memory_gib,
     format_host_memory_gib,
     get_default_wslconfig_path,
+    plan_or_apply_wsl,
 )
 
 
@@ -234,16 +255,9 @@ def test_models_and_tui_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> None:
-    """Cover P1.1, P1.2, P1.4, P1.5, P1.6, P1.7, P1.8, P1.9, and P1.10 contracts."""
-    import subprocess
+    """Cover registry fidelity, state validation, WSL plan, and timeout contracts."""
 
-    from winbearable.const import HIVE_HKCU, REG_BINARY, REG_MULTI_SZ
-    from winbearable.engine import apply_profile, detect_tweak
-    from winbearable.models import RegistrySpec, TweakDefinition, TweakStatus
-    from winbearable.state import StateStoreError
-    from winbearable.wsl import WslOperationError, apply_wsl_linux_baseline, audit_wsl, plan_or_apply_wsl
-
-    # P1.1: Lossless REG_BINARY & REG_MULTI_SZ snapshot/restore + type mismatch drift
+    # Lossless REG_BINARY & REG_MULTI_SZ snapshot/restore + type mismatch drift
     reg = InMemoryRegistryBackend()
     reg.set_value(HIVE_HKCU, r"Software\Test", "BinVal", b"\x01\x02\x03", REG_BINARY)
     reg.set_value(HIVE_HKCU, r"Software\Test", "MultiVal", ["a", "b"], REG_MULTI_SZ)
@@ -256,7 +270,7 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
     assert roundtrip_bin.previous_data == b"\x01\x02\x03"
     assert roundtrip_multi.previous_data == ["a", "b"]
 
-    # P1.7: Corrupt / wrong-version state.json raises StateStoreError
+    # Corrupt / wrong-version state.json raises StateStoreError
     store.state_path.write_text("{bad json", encoding="utf-8")
     with pytest.raises(StateStoreError):
         store.load_runs()
@@ -265,7 +279,7 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
         store.load_runs()
     store.state_path.unlink()
 
-    # P1.6: Strict profile validation rejects string booleans, floats, unknown wsl keys
+    # Strict profile validation rejects string booleans, floats, unknown wsl keys
     bad_prof = tmp_dir / "bad.toml"
     bad_prof.write_text('name = "bad"\n[wsl]\nenabled = "false"\n', encoding="utf-8")
     with pytest.raises(ProfileValidationError):
@@ -277,7 +291,7 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
     with pytest.raises(ProfileValidationError):
         load_profile(str(bad_prof))
 
-    # P1.8 & P1.5: audit_wsl ignores comments/unrelated sections; WSL write failures raise
+    # audit_wsl ignores comments/unrelated sections; WSL write failures raise
     wslcfg = tmp_dir / ".wslconfig"
     wslcfg.write_text("# networkingMode=mirrored\n[other]\nfirewall=true\n", encoding="utf-8")
     sys_b = InMemorySystemBackend()
@@ -286,7 +300,7 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
     assert not (aud["mirrored_networking"])
     assert not (aud["firewall_enabled"])
 
-    # P1.4: apply_profile integrates [wsl] when wslconfig_path is supplied
+    # apply_profile integrates [wsl] when wslconfig_path is supplied
     prof = load_profile("user-only")
     summary = apply_profile(
         profile=prof,
@@ -301,7 +315,7 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
     assert summary.wsl_result is not None
     assert wslcfg.is_file()
 
-    # P1.5: WSL command failure raises WslOperationError
+    # WSL command failure raises WslOperationError
     sys_b.run_wsl_command = lambda args, input_text=None: type(  # type: ignore[method-assign]
         "Res", (), {"args": tuple(args), "returncode": 1, "stdout": "", "stderr": "boom"}
     )()
@@ -310,7 +324,7 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
     with pytest.raises(WslOperationError):
         plan_or_apply_wsl(prof.wsl, sys_b, wslconfig_path=wslcfg, distro="Ubuntu-24.04", dry_run=False)
 
-    # P1.1: Type mismatch is reported as DRIFTED
+    # Type mismatch is reported as DRIFTED
     reg.set_value(HIVE_HKCU, r"Software\Test", "Num", "1", REG_SZ)
     tw = TweakDefinition(
         tweak_id="test.type_check",
@@ -327,8 +341,7 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
     )
     assert detect_tweak(tw, env, reg, sys_b).status == TweakStatus.DRIFTED
 
-    # P1.9: TimeoutExpired returns structured returncode 124
-    native = NativeSystemBackend(platform_override="linux")
+    # TimeoutExpired returns structured returncode 124
 
     class _TimeoutPopen:
         pid = 4242
@@ -341,12 +354,12 @@ def test_registry_fidelity_state_validation_wsl_and_timeouts(tmp_path: Path) -> 
         def kill(self) -> None:
             return None
 
-    with patch("subprocess.Popen", return_value=_TimeoutPopen()):
-        tout = native._run_native_cmd(["sleep", "5"], timeout=1.0)
-        assert tout.returncode == 124
-        assert "timed out" in tout.stderr
+    timeout_native = NativeSystemBackend(platform_override="win32", popen_factory=lambda *_a, **_kw: _TimeoutPopen())
+    tout = timeout_native._run_native_cmd(["sleep", "5"], timeout=1.0)
+    assert tout.returncode == 124
+    assert "timed out" in tout.stderr
 
-    # P1.10: XML task detection is locale-independent
+    # XML task detection is locale-independent
     win_native = NativeSystemBackend(platform_override="win32")
     with patch.object(
         win_native,
@@ -372,11 +385,8 @@ def test_profile_and_wsl_edge_cases(tmp_path: Path) -> None:
     with patch.dict(os.environ, {ENV_PROFILE_DIR: str(tmp_path)}):
         assert get_builtin_profiles_dir() == tmp_path
 
-    with (
-        patch.dict(os.environ, {"HOME": str(tmp_dir), "USERPROFILE": str(tmp_dir)}, clear=True),
-        patch("winbearable.profiles.REPO_PROFILES_DIR", tmp_path / "missing_repo_profiles"),
-    ):
-        assert str(get_builtin_profiles_dir()).endswith("profiles")
+    with patch.dict(os.environ, {"HOME": str(tmp_dir), "USERPROFILE": str(tmp_dir)}, clear=True):
+        assert str(get_builtin_profiles_dir(repo_profiles_dir=tmp_path / "missing_repo_profiles")).endswith("profiles")
 
     with patch.dict(os.environ, {ENV_CONFIG_PATH: str(tmp_path / "cfg.toml")}):
         assert get_default_user_profile_path() == tmp_path / "cfg.toml"
@@ -456,9 +466,6 @@ def test_profile_and_wsl_edge_cases(tmp_path: Path) -> None:
 
 def test_evidence_based_posture_observations() -> None:
     """Posture detection handles missing values, access denied, conflicts, and unsupported editions."""
-    from winbearable.const import DEFENDER_KEY
-    from winbearable.models import ObservationState
-    from winbearable.profiles import generate_init_profile_toml
 
     # 1. Missing values -> Defender/SecureBoot/BitLocker are UNKNOWN (None), not assumed True
     reg = InMemoryRegistryBackend()
@@ -486,7 +493,6 @@ def test_evidence_based_posture_observations() -> None:
     assert 'extends = "user-only"' in toml_out
 
     # 3. Conflicting Defender indicators (DisableAntiSpyware=1 + WinDefend RUNNING) -> UNKNOWN
-    from winbearable.const import BITLOCKER_STATUS_KEY
 
     reg_conflict = InMemoryRegistryBackend(
         initial_values={
@@ -518,10 +524,6 @@ def test_evidence_based_posture_observations() -> None:
 
 
 def test_audit_linux_side_and_wsl_doctor(tmp_path: Path) -> None:
-    import os
-    from unittest.mock import patch
-
-    from winbearable.wsl import audit_linux_side
 
     tmp = tmp_path
     root = tmp
@@ -594,14 +596,6 @@ def test_audit_linux_side_and_wsl_doctor(tmp_path: Path) -> None:
 
 
 def test_review_fixes_tui_exitcode_journal_wsl_winget_git(tmp_path: Path) -> None:
-    from unittest.mock import patch
-
-    from winbearable.backends.system import CommandResult
-    from winbearable.engine import apply_profile
-    from winbearable.models import ProfileSpec, TweakStatus, UnsupportedPlatformError, WslConfigSpec
-    from winbearable.state import StateStore
-    from winbearable.tui import apply_from_tui
-    from winbearable.wsl import apply_wsl_linux_baseline
 
     tmp = tmp_path
     root = tmp
@@ -680,561 +674,3 @@ def test_review_fixes_tui_exitcode_journal_wsl_winget_git(tmp_path: Path) -> Non
         apply_wsl_linux_baseline(win_sys, distro="Ubuntu", dry_run=False)
     assert len(unset_calls) == 1
     assert "git-credential-manager.exe" in unset_calls[0][-1]
-
-
-def test_uac_elevation_and_cli_relay(tmp_path: Path) -> None:
-    import ctypes
-    from pathlib import Path
-    from unittest.mock import patch
-
-    from winbearable.cli import run_cli
-    from winbearable.state import StateStore
-    from winbearable.uac import (
-        ERROR_CANCELLED,
-        UacCancelledError,
-        build_elevated_cmdline_args,
-        run_elevated_wb,
-    )
-
-    # 1. Argument rewriting strips --elevate and prior --uac-output
-    args = build_elevated_cmdline_args(
-        ["apply", "--profile", "owner", "--apply", "--elevate", "--uac-output", "old.txt"],
-        Path("new.txt"),
-    )
-    assert args == ["apply", "--profile", "owner", "--apply", "--uac-output", "new.txt"]
-
-    # 2. Successful ShellExecuteExW("runas") + output relay
-    class FakeShell32:
-        def __init__(self, succeed: bool = True) -> None:
-            self.succeed = succeed
-            self.last_verb: str | None = None
-
-        def ShellExecuteExW(self, sei_ptr: object) -> int:
-            sei = sei_ptr._obj  # type: ignore[attr-defined]
-            self.last_verb = sei.lpVerb
-            if not self.succeed:
-                return 0
-            # Extract --uac-output path from lpParameters and write simulated output
-            out_marker = '--uac-output "'
-            if out_marker in sei.lpParameters:
-                out_p = sei.lpParameters.split(out_marker, 1)[1].split('"', 1)[0]
-            else:
-                out_p = sei.lpParameters.rsplit(" ", 1)[-1]
-            Path(out_p).write_text("Elevated OK\n", encoding="utf-8")
-            sei.hProcess = 1234
-            return 1
-
-    class FakeKernel32:
-        def __init__(self, err: int = 0) -> None:
-            self.err = err
-            self.closed = False
-
-        def GetLastError(self) -> int:
-            return self.err
-
-        def WaitForSingleObject(self, handle: int, timeout: int) -> int:
-            return 0
-
-        def GetExitCodeProcess(self, handle: int, code_ptr: object) -> int:
-            code_ptr._obj.value = 0  # type: ignore[attr-defined]
-            return 1
-
-        def CloseHandle(self, handle: int) -> int:
-            self.closed = True
-            return 1
-
-    class FakeWinDLL:
-        def __init__(self, succeed: bool = True, err: int = 0) -> None:
-            self.shell32 = FakeShell32(succeed=succeed)
-            self.kernel32 = FakeKernel32(err=err)
-
-    fake_dll = FakeWinDLL(succeed=True)
-    code, out = run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=fake_dll)
-    assert code == 0
-    assert out.replace("\r\n", "\n") == "Elevated OK\n"
-    assert fake_dll.shell32.last_verb == "runas"
-    assert fake_dll.kernel32.closed
-
-    # 3. Cancelled UAC (ERROR_CANCELLED = 1223) raises UacCancelledError
-    cancelled_dll = FakeWinDLL(succeed=False, err=ERROR_CANCELLED)
-    with (
-        patch.object(ctypes, "get_last_error", return_value=ERROR_CANCELLED, create=True),
-        pytest.raises(UacCancelledError),
-    ):
-        run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=cancelled_dll)
-
-    # 4. CLI --elevate triggers run_elevated_wb when non-admin on Windows
-    tmp = tmp_path
-    reg = InMemoryRegistryBackend()
-    non_admin_win = InMemorySystemBackend(is_windows=True, is_admin=False)
-    store = StateStore(tmp / "state.json")
-    with patch("winbearable.cli.run_elevated_wb", return_value=(0, "ELEVATED DONE\n")) as mock_uac:
-        rc = run_cli(
-            ["apply", "--profile", "owner", "--apply", "--elevate"],
-            registry=reg,
-            system=non_admin_win,
-            state_store=store,
-        )
-    assert rc == 0
-    mock_uac.assert_called_once()
-
-
-def test_recovery_failure_model_irreversible_and_backend_gate(tmp_path: Path) -> None:
-    import subprocess
-    from unittest.mock import patch
-
-    from winbearable.cli import run_cli
-    from winbearable.const import HIVE_HKCU
-    from winbearable.engine import IrreversibleActionError, apply_profile, recover_incomplete_runs
-    from winbearable.models import (
-        OperationStatus,
-        ProfileSpec,
-        RegistryValueSnapshot,
-        RunRecord,
-        TransactionState,
-        UnsupportedPlatformError,
-    )
-    from winbearable.state import StateStore, StateStoreError
-
-    tmp = tmp_path
-    root = tmp
-    store = StateStore(root / "state.json")
-    reg = InMemoryRegistryBackend()
-    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True)
-    env = sys_b.detect_environment(reg)
-
-    # P0.4: Fail closed on simulated backend when allow_simulated=False
-    prof = ProfileSpec(
-        name="p0",
-        description="p0",
-        tweaks={"privacy.disable_advertising_id": True},
-    )
-    with pytest.raises(UnsupportedPlatformError):
-        apply_profile(prof, env, reg, sys_b, store, dry_run=False)
-
-    # P0.3: Irreversible error names exact action & plan lists side effects
-    irrev_prof = ProfileSpec(name="irrev", description="irrev", tweaks={"onedrive.uninstall": True})
-    with pytest.raises(IrreversibleActionError) as ctx:
-        apply_profile(irrev_prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True)
-    assert "OneDriveSetup.exe /uninstall" in str(ctx.value)
-
-    # P0.1: Crash injection — PLANNED (empty ops), APPLYING (crash after 1st op), ROLLING_BACK
-    reg.set_value(
-        HIVE_HKCU,
-        r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
-        "Enabled",
-        1,
-        REG_DWORD,
-    )
-    planned_rec = RunRecord(
-        run_id="run-planned",
-        timestamp="2026-11-14T00:00:00Z",
-        profile_name="p0",
-        applied_tweaks=(),
-        state=TransactionState.PLANNED,
-    )
-    applying_rec = RunRecord(
-        run_id="run-applying",
-        timestamp="2026-11-14T00:01:00Z",
-        profile_name="p0",
-        applied_tweaks=("privacy.disable_advertising_id",),
-        registry_snapshots=(
-            RegistryValueSnapshot(
-                hive=HIVE_HKCU,
-                key_path=r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
-                value_name="Enabled",
-                key_existed=True,
-                value_existed=True,
-                previous_data=1,
-                previous_type=REG_DWORD,
-            ),
-        ),
-        completed_operations=("privacy.disable_advertising_id:registry",),
-        state=TransactionState.APPLYING,
-    )
-    # Simulate mutated registry left behind by crashed APPLYING run
-    reg.set_value(
-        HIVE_HKCU,
-        r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
-        "Enabled",
-        0,
-        REG_DWORD,
-    )
-    store.upsert_run(planned_rec)
-    store.upsert_run(applying_rec)
-
-    # apply_profile refuses new apply while incomplete runs exist
-    with pytest.raises(StateStoreError):
-        apply_profile(prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True)
-
-    # Recover dry-run returns incomplete runs without modifying state
-    dry_rec = recover_incomplete_runs(store, reg, sys_b, dry_run=True)
-    assert len(dry_rec) == 2
-    assert reg.get_value(
-        HIVE_HKCU,
-        r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
-        "Enabled",
-    ) == (0, REG_DWORD)
-
-    # Real recovery restores original registry value and marks both ROLLED_BACK
-    done_rec = recover_incomplete_runs(store, reg, sys_b, dry_run=False, allow_simulated=True)
-    assert len(done_rec) == 2
-    assert all(r.state == TransactionState.ROLLED_BACK for r in done_rec)
-    assert reg.get_value(
-        HIVE_HKCU,
-        r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo",
-        "Enabled",
-    ) == (1, REG_DWORD)
-
-    # Idempotent: second recover is a no-op
-    assert recover_incomplete_runs(store, reg, sys_b, dry_run=False, allow_simulated=True) == []
-
-    # CLI `wb recover --json` works cleanly
-    rc = run_cli(["recover", "--json"], registry=reg, system=sys_b, state_store=store)
-    assert rc == 0
-
-    # P0.2: NativeSystemBackend._run_native_cmd classifies TIMEOUT, TOOL_MISSING, ACCESS_DENIED
-    native_sys = NativeSystemBackend(platform_override="linux")
-
-    class _FakeTimeoutProc:
-        pid = 9991
-        killed = False
-
-        def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
-            if timeout == 5.0:
-                raise subprocess.TimeoutExpired(["sc.exe"], 5.0)
-            return ("", "")
-
-        def kill(self) -> None:
-            self.killed = True
-
-    timeout_proc = _FakeTimeoutProc()
-    with patch("subprocess.Popen", return_value=timeout_proc):
-        native_sys._run_native_cmd(["sc.exe"], timeout=5.0)
-    assert native_sys.last_outcome is not None
-    assert native_sys.last_outcome.status == OperationStatus.TIMEOUT
-    assert timeout_proc.killed
-
-    with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
-        native_sys._run_native_cmd(["missing.exe"])
-    assert native_sys.last_outcome is not None
-    assert str(native_sys.last_outcome.status) == str(OperationStatus.TOOL_MISSING)
-
-    class _FakeResultProc:
-        pid = 9992
-
-        def __init__(self, rc: int, out: str, err: str) -> None:
-            self.returncode = rc
-            self._out = out
-            self._err = err
-
-        def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
-            return (self._out, self._err)
-
-        def kill(self) -> None:
-            return None
-
-    with patch("subprocess.Popen", return_value=_FakeResultProc(5, "", "Access is denied.")):
-        native_sys._run_native_cmd(["sc.exe"])
-    assert native_sys.last_outcome is not None
-    assert str(native_sys.last_outcome.status) == str(OperationStatus.ACCESS_DENIED)
-
-
-def test_registry_observations_wsl_timeouts_and_state_rotation(tmp_path: Path) -> None:
-    import os
-    from unittest.mock import patch
-
-    from winbearable.const import (
-        ENV_CMD_TIMEOUT,
-        HIVE_HKCU,
-        REG_BINARY,
-        REG_MULTI_SZ,
-        REG_QWORD,
-        REG_SZ,
-    )
-    from winbearable.engine import apply_profile, detect_tweak
-    from winbearable.models import ProfileSpec, RunRecord, TransactionState, TweakStatus, WslConfigSpec
-    from winbearable.state import StateStore, StateStoreError
-    from winbearable.tweaks import get_tweak
-    from winbearable.wsl import WslOperationError, calculate_wsl_memory_gib, merge_ini_preserving_comments
-
-    reg = InMemoryRegistryBackend()
-    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True)
-    env = sys_b.detect_environment(reg)
-
-    # P1.1: Round-trip snapshot -> mutate -> restore for QWORD, BINARY, MULTI_SZ, and (Default)
-    for val_name, orig_val, orig_type, new_val in (
-        ("q", 2**40 + 3, REG_QWORD, 99),
-        ("b", b"\x01\x02", REG_BINARY, b"\xff"),
-        ("m", ["a", "b"], REG_MULTI_SZ, ["c"]),
-        ("", "orig-default", REG_SZ, "changed"),
-    ):
-        reg.set_value(HIVE_HKCU, r"Software\P1Test", val_name, orig_val, orig_type)
-        snap = reg.snapshot_value(HIVE_HKCU, r"Software\P1Test", val_name)
-        reg.set_value(HIVE_HKCU, r"Software\P1Test", val_name, new_val, orig_type)
-        reg.restore_snapshot(snap)
-        assert reg.get_value(HIVE_HKCU, r"Software\P1Test", val_name) == (orig_val, orig_type)
-
-    # Wrong type on existing value is DRIFTED, never APPLIED
-    tweak_adv = get_tweak("privacy.disable_advertising_id")
-    reg.set_value(
-        HIVE_HKCU,
-        tweak_adv.registry_specs[0].key_path,
-        tweak_adv.registry_specs[0].value_name,
-        "0",
-        REG_SZ,
-    )
-    assert detect_tweak(tweak_adv, env, reg, sys_b).status == TweakStatus.DRIFTED
-
-    # P1.2: Unknown/inaccessible task or feature never counts as APPLIED
-    tweak_tasks = get_tweak("telemetry.disable_scheduled_tasks")
-    with patch.object(sys_b, "is_scheduled_task_enabled", return_value=None):
-        assert detect_tweak(tweak_tasks, env, reg, sys_b).status != TweakStatus.APPLIED
-
-    # P1.3: WSL memory edge cases, comment preservation, and failure propagation into failed_ids
-    assert calculate_wsl_memory_gib(1 * 1024**3) == 1
-    assert calculate_wsl_memory_gib(3 * 1024**3) == 3
-    assert calculate_wsl_memory_gib(17 * 1024**3) == 13
-    merged = merge_ini_preserving_comments("# keep comment\n[wsl2]\nmemory=4GB\n", {"wsl2": {"memory": "8GB"}})
-    assert "# keep comment" in merged
-    assert "memory=8GB" in merged
-
-    tmp = tmp_path
-    root = tmp
-    store = StateStore(root / "state.json")
-    wsl_prof = ProfileSpec(name="w", description="w", wsl=WslConfigSpec(enabled=True), tweaks={})
-
-    def _boom_planner(*_args: object, **_kwargs: object) -> object:
-        raise WslOperationError("wsl boom")
-
-    wsl_fail = apply_profile(
-        wsl_prof, env, reg, sys_b, store, dry_run=False, allow_simulated=True, wsl_planner=_boom_planner
-    )
-    assert "wsl" in wsl_fail.failed_ids
-    assert "wsl boom" in str(wsl_fail.wsl_result)
-
-    # P1.4: WB_CMD_TIMEOUT env override and command_history
-    native_sys = NativeSystemBackend(platform_override="linux")
-    with patch.dict(os.environ, {ENV_CMD_TIMEOUT: "12.5"}):
-        assert native_sys._resolve_timeout(60.0) == 12.5
-    native_sys._record_cmd_history(["reg.exe", "query"], 0, "ok", "")  # type: ignore[arg-type]
-    assert len(native_sys.command_history) == 1
-
-    # P1.5: Backup restore on corruption & rotation preserving incomplete runs
-    rec_ok = RunRecord("r1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED)
-    rec_ok2 = RunRecord("r2", "2026-11-14T00:01:00Z", "p", (), state=TransactionState.COMMITTED)
-    store.save_runs([rec_ok])
-    store.save_runs([rec_ok, rec_ok2])  # creates .json.bak with [rec_ok]
-    store.state_path.write_text("{corrupt", encoding="utf-8")
-    with pytest.raises(StateStoreError):
-        store.load_runs()
-    assert store.restore_from_backup()
-    assert len(store.load_runs()) == 1
-
-    many = [RunRecord(f"c{i}", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED) for i in range(105)]
-    inc = RunRecord("inc1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.APPLYING)
-    pruned = store._prune_old_runs([inc, *many], max_runs=100)
-    assert len(pruned) == 100
-    assert "inc1" in [r.run_id for r in pruned]
-
-
-def test_audit_confidence_tui_irreversible_and_backup_pruning(tmp_path: Path) -> None:
-    import os
-
-    from winbearable.engine import IrreversibleActionError, calculate_hardening_score
-    from winbearable.models import ProfileSpec, RunRecord, TransactionState
-    from winbearable.state import StateStore
-    from winbearable.tui import apply_from_tui
-
-    reg = InMemoryRegistryBackend()
-    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
-    env = sys_b.detect_environment(reg)
-    audit = calculate_hardening_score(env, reg, sys_b)
-    assert "confidence" in audit["dimensions"]["security"]
-    assert isinstance(audit["cis_controls"]["controls"], list)
-
-    tmp = tmp_path
-    root = tmp
-    store = StateStore(root / "state.json")
-    irrev_prof = ProfileSpec(
-        name="irrev",
-        description="irrev",
-        tweaks={"onedrive.uninstall": True},
-    )
-    with pytest.raises(IrreversibleActionError):
-        apply_from_tui(irrev_prof, env, reg, sys_b, store, allow_simulated=True)
-
-    backups_root = root / "backups"
-    for name in ("inc1", "old1", "new1", "new2"):
-        (backups_root / name).mkdir(parents=True, exist_ok=True)
-    os.utime(backups_root / "old1", (1000, 1000))
-    os.utime(backups_root / "new1", (2000, 2000))
-    os.utime(backups_root / "new2", (3000, 3000))
-    runs = [
-        RunRecord("inc1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.APPLYING),
-        RunRecord("old1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED),
-        RunRecord("new1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED),
-        RunRecord("new2", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED),
-    ]
-    store._prune_old_backups_unlocked(runs, max_backup_dirs=2)
-    assert (backups_root / "inc1").exists()
-    assert not ((backups_root / "old1").exists())
-    assert (backups_root / "new1").exists()
-    assert (backups_root / "new2").exists()
-
-
-def test_compensation_residuals_type_mismatch_and_disk_full(tmp_path: Path) -> None:
-    from unittest.mock import patch
-
-    from winbearable.const import HIVE_HKCU
-    from winbearable.engine import _compensate_run_record, detect_tweak
-    from winbearable.models import RunRecord, TransactionState, TweakStatus
-    from winbearable.state import StateStore, StateStoreError
-    from winbearable.tweaks import get_tweak
-
-    reg = InMemoryRegistryBackend()
-    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
-    env = sys_b.detect_environment(reg)
-
-    # P1.1: Residual winget package after uninstall reports compensation error
-    rec = RunRecord(
-        run_id="res-1",
-        timestamp="2026-11-14T00:00:00Z",
-        profile_name="p",
-        applied_tweaks=(),
-        installed_winget_packages=("Microsoft.VisualStudioCode",),
-        state=TransactionState.ROLLING_BACK,
-    )
-    with (
-        patch.object(sys_b, "uninstall_winget_package", return_value=True),
-        patch.object(sys_b, "is_winget_package_installed", return_value=True),
-    ):
-        comp_errors = _compensate_run_record(rec, reg, sys_b)
-    assert "winget Microsoft.VisualStudioCode" in comp_errors
-
-    # P1.2: Type mismatch (REG_DWORD vs REG_SZ) never reports APPLIED
-    reg.set_value(
-        HIVE_HKCU,
-        r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32",
-        "",
-        1,
-        REG_DWORD,
-    )
-    res = detect_tweak(get_tweak("explorer.classic_context_menu"), env, reg, sys_b)
-    assert res.status != TweakStatus.APPLIED
-    assert res.status == TweakStatus.DRIFTED
-
-    # P1.6: Disk-full error during os.replace leaves prior state.json intact
-    tmp = tmp_path
-    store = StateStore(tmp / "state.json")
-    r1 = RunRecord("ok-1", "2026-11-14T00:00:00Z", "p", (), state=TransactionState.COMMITTED)
-    r2 = RunRecord("ok-2", "2026-11-14T01:00:00Z", "p", (), state=TransactionState.COMMITTED)
-    store.save_runs([r1])
-    with (
-        patch("os.replace", side_effect=OSError("No space left on device")),
-        pytest.raises((OSError, StateStoreError)),
-    ):
-        store.save_runs([r1, r2])
-    loaded = store.load_runs()
-    assert [r.run_id for r in loaded] == ["ok-1"]
-    existing_val = reg.get_value(
-        HIVE_HKCU,
-        r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32",
-        "",
-    )
-    assert existing_val is not None
-    assert existing_val[1] == REG_DWORD
-
-
-def test_linux_sysctl_credential_hygiene_refugee_summary_and_autopatch() -> None:
-    import io
-    from contextlib import redirect_stdout
-    from pathlib import Path
-
-    from winbearable.cli import run_cli
-    from winbearable.wsl import WSL_LINUX_SYSCTL_CONF, apply_wsl_linux_baseline, audit_linux_side
-
-    for key in (
-        "kernel.yama.ptrace_scope = 1",
-        "fs.protected_hardlinks = 1",
-        "fs.protected_symlinks = 1",
-        "vm.swappiness = 10",
-        "kernel.unprivileged_bpf_disabled = 1",
-    ):
-        assert key in WSL_LINUX_SYSCTL_CONF
-
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        proc_sys = root / "proc_sys"
-        (proc_sys / "kernel" / "yama").mkdir(parents=True)
-        (proc_sys / "fs").mkdir(parents=True)
-        (proc_sys / "vm").mkdir(parents=True)
-        (proc_sys / "net" / "ipv4" / "conf" / "all").mkdir(parents=True)
-        (proc_sys / "net" / "ipv4" / "conf" / "default").mkdir(parents=True)
-        (proc_sys / "kernel" / "kptr_restrict").write_text("2\n", encoding="utf-8")
-        (proc_sys / "kernel" / "dmesg_restrict").write_text("1\n", encoding="utf-8")
-        (proc_sys / "kernel" / "yama" / "ptrace_scope").write_text("1\n", encoding="utf-8")
-        (proc_sys / "kernel" / "unprivileged_bpf_disabled").write_text("1\n", encoding="utf-8")
-        (proc_sys / "fs" / "protected_hardlinks").write_text("1\n", encoding="utf-8")
-        (proc_sys / "fs" / "protected_symlinks").write_text("1\n", encoding="utf-8")
-        (proc_sys / "vm" / "swappiness").write_text("10\n", encoding="utf-8")
-        (proc_sys / "net" / "ipv4" / "conf" / "all" / "rp_filter").write_text("1\n", encoding="utf-8")
-        (proc_sys / "net" / "ipv4" / "conf" / "default" / "rp_filter").write_text("1\n", encoding="utf-8")
-
-        git_cfg = root / "gitconfig"
-        git_cfg.write_text(
-            "[credential]\n\thelper = /mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe\n",
-            encoding="utf-8",
-        )
-        ssh_dir = root / ".ssh"
-        ssh_dir.mkdir()
-        audit_res = audit_linux_side(
-            wsl_conf_path=root / "wsl.conf",
-            sysctl_conf_path=root / "99.conf",
-            proc_sys_root=proc_sys,
-            systemd_marker_path=root / "systemd",
-            git_config_path=git_cfg,
-            platform_override="linux",
-            ssh_dir=ssh_dir,
-            env_vars={"SSH_AUTH_SOCK": "/mnt/c/temp/ssh.sock"},
-        )
-        assert audit_res["sysctl_baseline_applied"]
-        hyg = audit_res["credential_hygiene"]
-        assert not (hyg["clean"])
-        assert hyg["ssh_agent_windows_leak"]
-        assert len(hyg["windows_git_helpers"]) == 1
-
-    # Auto-patch is enabled by default, opt-out via auto_patch=False; dev_packages is opt-in
-    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
-    reg = InMemoryRegistryBackend()
-    default_base = apply_wsl_linux_baseline(sys_b, "Ubuntu", dry_run=True)
-    assert default_base["auto_patch"]
-    assert not (default_base["dev_packages"])
-    assert any("unattended-upgrades" in s for s in default_base["steps"])
-    opt_out_base = apply_wsl_linux_baseline(sys_b, "Ubuntu", auto_patch=False, dev_packages=True, dry_run=True)
-    assert not (opt_out_base["auto_patch"])
-    assert opt_out_base["dev_packages"]
-    assert not (any("unattended-upgrades" in s for s in opt_out_base["steps"]))
-    assert any("dev packages" in s for s in opt_out_base["steps"])
-
-    # Doctor JSON exposes refugee_summary
-    from winbearable.state import StateStore
-
-    buf = io.StringIO()
-    with (
-        tempfile.TemporaryDirectory() as tmp_doc,
-        patch.dict(os.environ, {"USERPROFILE": tmp_doc}),
-        redirect_stdout(buf),
-    ):
-        code = run_cli(
-            ["doctor", "--json"],
-            registry=reg,
-            system=sys_b,
-            state_store=StateStore(Path(tmp_doc) / "state.json"),
-        )
-    assert code == 0
-    import json as json_mod
-
-    doc_payload = json_mod.loads(buf.getvalue())
-    assert "refugee_summary" in doc_payload
-    assert "mirrored_firewall_note" in doc_payload["refugee_summary"]

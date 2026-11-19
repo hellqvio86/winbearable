@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import platform
 from pathlib import Path
 
@@ -55,7 +56,9 @@ class InMemorySystemBackend:
             }
         )
         self.optional_features: dict[str, bool] = dict(
-            optional_features if optional_features is not None else {"SMB1Protocol": True}
+            optional_features
+            if optional_features is not None
+            else {"SMB1Protocol": True, "Containers": False, "Recall": True}
         )
         self.exported_backups: list[tuple[str, str, str]] = []
         self.wsl_installed = wsl_installed
@@ -137,14 +140,14 @@ class InMemorySystemBackend:
         return True
 
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
-        return self.scheduled_tasks.get(task_path, False)
+        return self.scheduled_tasks.get(task_path)
 
     def set_scheduled_task_enabled(self, task_path: str, enabled: bool) -> bool:
         self.scheduled_tasks[task_path] = enabled
         return True
 
     def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
-        return self.optional_features.get(feature_name, False)
+        return self.optional_features.get(feature_name)
 
     def set_optional_feature_enabled(self, feature_name: str, enabled: bool) -> bool:
         self.optional_features[feature_name] = enabled
@@ -213,27 +216,44 @@ class InMemorySystemBackend:
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
         self.wsl_commands_executed.append((args, input_text))
-        if "-d" in args and "cat" in args and "/etc/wsl.conf" in args:
-            distro_idx = args.index("-d") + 1
-            distro_name = args[distro_idx]
-            existing = self.wsl_etc_conf.get(distro_name, "")
-            return CommandResult(args=tuple(args), returncode=0, stdout=existing, stderr="")
+        distro_name = args[args.index("-d") + 1] if "-d" in args and args.index("-d") + 1 < len(args) else ""
+        if distro_name and "cat" in args and "/etc/wsl.conf" in args:
+            if distro_name not in self.wsl_etc_conf:
+                return CommandResult(
+                    args=tuple(args),
+                    returncode=1,
+                    stdout="",
+                    stderr="cat: /etc/wsl.conf: No such file or directory",
+                )
+            return CommandResult(args=tuple(args), returncode=0, stdout=self.wsl_etc_conf[distro_name], stderr="")
+        if distro_name and "rm" in args and "/etc/wsl.conf" in args:
+            self.wsl_etc_conf.pop(distro_name, None)
+            return CommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
+        if distro_name and "sh" in args and input_text is not None and any("/etc/wsl.conf" in a for a in args):
+            self.wsl_etc_conf[distro_name] = input_text
+            return CommandResult(args=tuple(args), returncode=0, stdout="", stderr="")
         if (
-            "-d" in args
+            distro_name
             and "tee" in args
             and ("/etc/wsl.conf" in args or "/etc/wsl.conf.wb.tmp" in args)
             and input_text is not None
         ):
-            distro_idx = args.index("-d") + 1
-            distro_name = args[distro_idx]
             if "/etc/wsl.conf.wb.tmp" in args:
                 self.wsl_etc_conf[f"{distro_name}:tmp"] = input_text
             else:
                 self.wsl_etc_conf[distro_name] = input_text
             return CommandResult(args=tuple(args), returncode=0, stdout=input_text, stderr="")
-        if "-d" in args and "mv" in args and "/etc/wsl.conf.wb.tmp" in args and "/etc/wsl.conf" in args:
-            distro_idx = args.index("-d") + 1
-            distro_name = args[distro_idx]
+        if distro_name and "sha256sum" in args:
+            target = "/etc/wsl.conf.wb.tmp" if "/etc/wsl.conf.wb.tmp" in args else "/etc/wsl.conf"
+            key = f"{distro_name}:tmp" if target.endswith(".tmp") else distro_name
+            data = self.wsl_etc_conf.get(key)
+            if data is None:
+                return CommandResult(
+                    args=tuple(args), returncode=1, stdout="", stderr=f"sha256sum: {target}: No such file"
+                )
+            digest = hashlib.sha256(data.encode("utf-8")).hexdigest()
+            return CommandResult(args=tuple(args), returncode=0, stdout=f"{digest}  {target}\n", stderr="")
+        if distro_name and "mv" in args and "/etc/wsl.conf.wb.tmp" in args and "/etc/wsl.conf" in args:
             tmp_data = self.wsl_etc_conf.pop(f"{distro_name}:tmp", None)
             if tmp_data is not None:
                 self.wsl_etc_conf[distro_name] = tmp_data

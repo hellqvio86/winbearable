@@ -1,6 +1,7 @@
 """Regression tests for rollback, WSL, UAC, audit, file-merge, and profile-inheritance invariants."""
 
 import json
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,7 +11,7 @@ import pytest
 from winbearable import audit
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
-from winbearable.cli import _absolutize_elevated_argv, run_cli
+from winbearable.cli import CliDeps, _absolutize_elevated_argv, run_cli
 from winbearable.const import HIVE_HKCU, HIVE_HKLM, REG_DWORD, REG_SZ
 from winbearable.engine import (
     ApplySummary,
@@ -305,11 +306,8 @@ def test_uac_security_hardening_and_cli_fixes(tmp_path: Path, monkeypatch: pytes
 
     out_dir = tmp_path / "wb-uac-123"
     out_dir.mkdir()
-    with (
-        patch("winbearable.uac._is_reparse_or_symlink", side_effect=lambda p: p == tmp_path),
-        pytest.raises(UacElevationError, match="reparse-point"),
-    ):
-        write_uac_output_safe(out_dir / "uac-output.txt", "hi")
+    with pytest.raises(UacElevationError, match="reparse-point"):
+        write_uac_output_safe(out_dir / "uac-output.txt", "hi", reparse_check=lambda p: p == tmp_path)
 
 
 def test_cli_wsl_firewall_uses_injected_store_and_recover_exit_code(tmp_path: Path) -> None:
@@ -317,17 +315,21 @@ def test_cli_wsl_firewall_uses_injected_store_and_recover_exit_code(tmp_path: Pa
     store = StateStore(tmp_path / "custom_state.json")
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_admin=True)
-    with patch(
-        "winbearable.cli.set_wsl_hyperv_firewall_setting",
-        return_value={
-            "dry_run": False,
-            "vm_creator_id": "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}",
-            "desired": {"enabled": True, "default_inbound_action": "Block", "default_outbound_action": "Allow"},
-            "previous": {"enabled": False, "default_inbound_action": "Allow", "default_outbound_action": "Allow"},
-            "returncode": 0,
-        },
-    ):
-        rc = run_cli(["wsl", "firewall", "--apply"], registry=reg, system=sys_b, state_store=store)
+    rc = run_cli(
+        ["wsl", "firewall", "--apply"],
+        registry=reg,
+        system=sys_b,
+        state_store=store,
+        deps=CliDeps(
+            set_hyperv_fn=lambda **_kw: {
+                "dry_run": False,
+                "vm_creator_id": "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}",
+                "desired": {"enabled": True, "default_inbound_action": "Block", "default_outbound_action": "Allow"},
+                "previous": {"enabled": False, "default_inbound_action": "Allow", "default_outbound_action": "Allow"},
+                "returncode": 0,
+            }
+        ),
+    )
     assert rc == 0
     assert len(store.load_runs()) == 1
 
@@ -413,7 +415,6 @@ def test_toml_multiline_merge_file_size_cap_and_tui_helpers(tmp_path: Path) -> N
     big_file = tmp_path / "big.json"
     big_file.write_bytes(b"{" + b" " * (MAX_FILE_SNAPSHOT_BYTES + 10) + b"}")
     tweak_stub = get_tweak("dev.terminal_settings_defaults")
-    from dataclasses import replace as _dc_replace
 
     tweak_stub = _dc_replace(
         tweak_stub, file_specs=(FileSpec(path_template=str(big_file), file_format="json", desired_keys={"a": 1}),)

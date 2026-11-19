@@ -12,38 +12,38 @@ TRIVY_VERSION ?= 0.76.2
 venv: .venv
 
 lint: .venv
-	.venv/bin/ruff check .
-	.venv/bin/ruff format --check .
+	uv run ruff check .
+	uv run ruff format --check .
 
 format: .venv
-	.venv/bin/ruff format .
+	uv run ruff format .
 
 test: .venv
-	.venv/bin/mypy src
-	.venv/bin/pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
-	.venv/bin/python3 src/generate_badge.py
+	uv run mypy src
+	uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
+	uv run python bin/generate_badge.py
 
 test-windows: ## Run safe real-Windows integration tests locally (or in local Windows Docker container)
-	WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py -v
+	WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 uv run pytest tests/test_windows_integration.py -v
 
 test-windows-docker: ## Build and run Dockerfile.windows in local Windows-container mode
 	docker build -f Dockerfile.windows -t winbearable-win-test .
 	docker run --rm winbearable-win-test
 
 docs: .venv ## Regenerate docs/tweaks-reference.md from TWEAK_CATALOG
-	.venv/bin/python3 bin/gen_docs.py
+	uv run python bin/gen_docs.py
 
 pre-commit: hooks
 	./.githooks/pre-commit
 
 run: .venv
-	.venv/bin/python3 -m winbearable $(ARGS)
+	uv run python -m winbearable $(ARGS)
 
 install:
 	uv tool install --force .
 
 version: ## Bump the version: make version BUMP=minor
-	.venv/bin/python3 bin/bump_version.py $(or $(BUMP),patch)
+	uv run python bin/bump_version.py $(or $(BUMP),patch)
 
 release-check: lint test secrets trivy ## Full pre-release quality gate
 

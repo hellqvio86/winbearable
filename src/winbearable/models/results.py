@@ -11,6 +11,7 @@ from winbearable.models.enums import (
     ObservationState,
     OperationStatus,
     RegistryValueData,
+    RegistryView,
     RiskLevel,
     TweakStatus,
     encode_registry_data,
@@ -88,6 +89,7 @@ class RegistryChangeDetail:
     target_value: RegistryValueData
     is_compliant: bool
     current_type: str | None = None
+    view: RegistryView = RegistryView.DEFAULT
 
     @property
     def full_key_path(self) -> str:
@@ -181,10 +183,11 @@ class PlannedOperation:
     reversible: bool = True
     scope: str = "machine"
     requires_elevation: bool = False
+    target_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize planned operation to a JSON-compatible dictionary."""
-        return {
+        d: dict[str, Any] = {
             "operation_type": self.operation_type,
             "target": self.target,
             "action": self.action,
@@ -194,6 +197,9 @@ class PlannedOperation:
             "scope": self.scope,
             "requires_elevation": self.requires_elevation,
         }
+        if self.target_id:
+            d["target_id"] = self.target_id
+        return d
 
 
 @dataclass(frozen=True)
