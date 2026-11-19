@@ -87,6 +87,14 @@ def merge_ini_preserving_comments(
     case_insensitive: bool = True,
 ) -> str:
     """Merge desired INI sections/keys into existing_text while preserving comments and custom keys."""
+    for sec, kv_map in desired_sections.items():
+        if any(ch in sec for ch in ("\r", "\n", "\x00", "]")):
+            raise ValueError(f"Invalid characters in INI section name: {sec!r}")
+        for k, v in kv_map.items():
+            if any(ch in k for ch in ("\r", "\n", "\x00", "=")):
+                raise ValueError(f"Invalid characters in INI key: {k!r}")
+            if any(ch in v for ch in ("\r", "\n", "\x00")):
+                raise ValueError(f"Invalid characters in INI value for {k!r}")
 
     def _norm(name: str) -> str:
         return name.lower() if case_insensitive else name
@@ -140,15 +148,15 @@ def merge_ini_preserving_comments(
 
     flush_remaining_keys_for_section(current_section_key)
 
-    for sec_key, (orig_sec, kv_map) in remaining_sections.items():
-        if not kv_map:
+    for sec_key, (orig_sec, sec_kv_map) in remaining_sections.items():
+        if not sec_kv_map:
             continue
         if output_lines and output_lines[-1].strip() != "":
             output_lines.append("")
         output_lines.append(f"[{orig_sec}]")
-        for _, (orig_k, val) in kv_map.items():
+        for _, (orig_k, val) in sec_kv_map.items():
             output_lines.append(f"{orig_k}={val}")
-        consumed_by_section[sec_key].update(kv_map.keys())
+        consumed_by_section[sec_key].update(sec_kv_map.keys())
 
     return "\n".join(output_lines).rstrip("\n") + "\n"
 
@@ -241,7 +249,10 @@ def build_wslconfig_sections(
     if spec.kernel_command_line is not None:
         wsl2_sec["kernelCommandLine"] = _sanitize_ini_value(spec.kernel_command_line, "kernel_command_line")
     if spec.default_vhd_size is not None:
-        wsl2_sec["defaultVhdSize"] = _sanitize_ini_value(spec.default_vhd_size, "default_vhd_size")
+        vhd_val = _sanitize_ini_value(spec.default_vhd_size.strip(), "default_vhd_size")
+        if not re.fullmatch(r"\d+(?:[KMGTP]?B)?", vhd_val, re.IGNORECASE):
+            raise WslOperationError(f"Invalid default_vhd_size {spec.default_vhd_size!r}.")
+        wsl2_sec["defaultVhdSize"] = vhd_val
 
     experimental_sec: dict[str, str] = {
         "autoMemoryReclaim": "gradual",
@@ -293,7 +304,10 @@ def build_distro_wsl_conf_sections(spec: WslConfigSpec) -> dict[str, dict[str, s
             "options": '"metadata,umask=22,fmask=11"',
         }
         if spec.automount_root is not None:
-            automount_sec["root"] = _sanitize_ini_value(spec.automount_root, "automount_root")
+            root_val = _sanitize_ini_value(spec.automount_root.strip(), "automount_root")
+            if not re.fullmatch(r"/[A-Za-z0-9._/-]*", root_val) or "#" in root_val or ";" in root_val:
+                raise WslOperationError(f"Invalid automount_root {spec.automount_root!r}.")
+            automount_sec["root"] = root_val
         if spec.cross_distro is not None:
             automount_sec["crossDistro"] = str(spec.cross_distro).lower()
         sections = {
@@ -306,13 +320,17 @@ def build_distro_wsl_conf_sections(spec: WslConfigSpec) -> dict[str, dict[str, s
         }
 
     if spec.default_user is not None:
-        if spec.default_user.strip().lower() == "root":
-            raise WslOperationError("Refusing to set /etc/wsl.conf [user] default=root.")
-        sections["user"] = {"default": _sanitize_ini_value(spec.default_user.strip(), "default_user")}
+        user_val = _sanitize_ini_value(spec.default_user.strip(), "default_user")
+        if user_val.lower() == "root" or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}\$?", user_val):
+            raise WslOperationError(f"Invalid or forbidden /etc/wsl.conf [user] default={spec.default_user!r}.")
+        sections["user"] = {"default": user_val}
 
     net_sec: dict[str, str] = {}
     if spec.hostname is not None:
-        net_sec["hostname"] = _sanitize_ini_value(spec.hostname, "hostname")
+        host_val = _sanitize_ini_value(spec.hostname.strip(), "hostname")
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", host_val):
+            raise WslOperationError(f"Invalid WSL hostname {spec.hostname!r}.")
+        net_sec["hostname"] = host_val
     if spec.generate_hosts is not None:
         net_sec["generateHosts"] = str(spec.generate_hosts).lower()
     if spec.generate_resolv_conf is not None:

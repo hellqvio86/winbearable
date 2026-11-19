@@ -417,6 +417,12 @@ def test_native_system_extended_command_wrappers(tmp_path: Path, monkeypatch: py
             return type(
                 "R", (), {"returncode": 0, "stdout": "Case sensitive attribute on directory is enabled.", "stderr": ""}
             )()
+        if "whoami" in joined:
+            return type("R", (), {"returncode": 0, "stdout": '"HOST\\\\user","S-1-5-21-100-1001"\n', "stderr": ""})()
+        if "icacls" in joined and "/save" in joined:
+            save_path = Path(args[args.index("/save") + 1])
+            save_path.write_text("file\nD:PAI(A;;FA;;;S-1-5-21-100-1001)\n", encoding="utf-16le")
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         if "icacls" in joined and "/grant:r" not in joined:
             return type(
                 "R",
@@ -455,7 +461,8 @@ def test_native_system_extended_command_wrappers(tmp_path: Path, monkeypatch: py
             assert sys_b.set_git_global_config("core.eol", "lf") is True
             assert sys_b.set_git_global_config("core.eol", None) is True
 
-        assert sys_b.is_ssh_acl_restricted(str(ssh_dir)) is True
+        with patch.object(sys_b, "_get_current_user_sid", return_value="S-1-5-21-100-1001"):
+            assert sys_b.is_ssh_acl_restricted(str(ssh_dir)) is True
         assert sys_b.restrict_acl_to_current_user(str(ssh_dir)) is True
 
 

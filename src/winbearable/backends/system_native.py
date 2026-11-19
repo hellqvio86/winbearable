@@ -27,18 +27,21 @@ from ..models import EnvironmentInfo, OperationOutcome, OperationStatus, Registr
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS, ONEDRIVE_SETUP_CANDIDATES
 from .posture import collect_posture_observations, safe_get_reg
 from .registry import RegistryBackend, find_wsl_reg_exe, is_wsl2
+from .system_native_apps import NativeAppMixin
 from .system_native_cmd import (
     classify_cmd_failure,
     communicate_bounded_with_truncation,
     decode_cmd_bytes,
     is_process_running_win32,
-    is_user_writable_binary,
     resolve_code_cmd,
     resolve_git_exe,
     resolve_winget_exe,
     sys32_exe,
     terminate_process_tree,
     truncate_text,
+)
+from .system_native_cmd import (
+    get_total_memory_bytes as _get_total_memory_bytes_impl,
 )
 from .system_native_cmd import (
     run_tool as _run_tool_outcome,
@@ -73,11 +76,12 @@ from .system_native_sec import (
 from .system_native_sec import (
     restore_auditpol as _sec_restore_auditpol,
 )
-from .system_protocol import GIB_BYTES, CommandResult, read_service_start_state
+from .system_protocol import CommandResult, read_service_start_state
 from .win32_ctypes import get_win32_dll
+from .win32_fs import is_reparse_or_symlink
 
 
-class NativeSystemBackend:
+class NativeSystemBackend(NativeAppMixin):
     """Native Windows/WSL system backend using ctypes, winreg, and direct Win32 executables."""
 
     is_simulated: bool = False
@@ -395,7 +399,7 @@ class NativeSystemBackend:
 
     def is_scheduled_task_enabled(self, task_path: str) -> bool | None:
         if self._platform != "win32":
-            return False
+            return None
         res = self._run_native_cmd([self._sys32_exe("schtasks.exe"), "/Query", "/TN", task_path, "/XML"], timeout=30.0)
         if res.returncode != 0:
             return None
@@ -430,7 +434,7 @@ class NativeSystemBackend:
 
     def is_optional_feature_enabled(self, feature_name: str) -> bool | None:
         if self._platform != "win32":
-            return False
+            return None
         res = self._run_native_cmd(
             [self._sys32_exe("dism.exe"), "/Online", "/Get-FeatureInfo", f"/FeatureName:{feature_name}", "/English"],
             timeout=60.0,
@@ -461,7 +465,11 @@ class NativeSystemBackend:
     ) -> bool:
         if self._platform != "win32":
             return False
+        if is_reparse_or_symlink(output_path):
+            return False
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        if is_reparse_or_symlink(output_path.parent):
+            return False
         cmd = [self._sys32_exe("reg.exe"), "export", f"{hive}\\{key_path}", str(output_path), "/y"]
         if view == RegistryView.VIEW_64:
             cmd.append("/reg:64")
@@ -494,176 +502,13 @@ class NativeSystemBackend:
         force_res = self._run_native_cmd([self._sys32_exe("taskkill.exe"), "/F", "/IM", process_name], timeout=30.0)
         return force_res.returncode == 0 and not self.is_process_running(process_name)
 
-    def is_onedrive_installed(self) -> bool:
-        if self._platform != "win32":
-            return False
-        local_app = os.environ.get("LOCALAPPDATA", "")
-        prog_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        prog_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
-        binary_candidates = [
-            Path(local_app) / "Microsoft" / "OneDrive" / "OneDrive.exe" if local_app else None,
-            Path(prog_files) / "Microsoft OneDrive" / "OneDrive.exe",
-            Path(prog_x86) / "Microsoft OneDrive" / "OneDrive.exe",
-        ]
-        if any(cand is not None and cand.is_file() for cand in binary_candidates):
-            return True
-        return self.is_process_running("OneDrive.exe")
-
-    def uninstall_onedrive_client(self) -> bool:
-        if self._platform != "win32":
-            return False
-        for candidate in self._setup_candidates:
-            if Path(candidate).is_file():
-                res = self._run_native_cmd([candidate, "/uninstall"])
-                if res.returncode != 0:
-                    return False
-                return not self.is_onedrive_installed()
-        return False
-
-    def is_winget_package_installed(self, package_id: str) -> bool:
-        if self._platform != "win32":
-            return False
-        cache_key = package_id.lower()
-        if cache_key in self._winget_installed_cache:
-            return self._winget_installed_cache[cache_key]
-        res = self._run_native_cmd(
-            [
-                self._resolve_winget_exe(),
-                "list",
-                "--id",
-                package_id,
-                "--exact",
-                "--accept-source-agreements",
-            ],
-            timeout=60.0,
-        )
-        installed = res.returncode == 0 and bool(
-            re.search(rf"(?m)(?:^|\s){re.escape(package_id)}(?:\s|$)", res.stdout, re.IGNORECASE)
-        )
-        self._winget_installed_cache[cache_key] = installed
-        return installed
-
-    def install_winget_package(
-        self,
-        package_id: str,
-        scope: str = "user",
-        vscode_extensions: tuple[str, ...] = (),
-    ) -> bool:
-        if self._platform != "win32":
-            return False
-        self._winget_installed_cache.pop(package_id.lower(), None)
-        res = self._run_native_cmd(
-            [
-                self._resolve_winget_exe(),
-                "install",
-                "--id",
-                package_id,
-                "--source",
-                "winget",
-                "--exact",
-                "--scope",
-                scope,
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-            ],
-            timeout=300.0,
-        )
-        if res.returncode != 0:
-            return False
-        if not self.is_winget_package_installed(package_id):
-            return False
-        for ext in vscode_extensions:
-            if not self.install_vscode_extension(ext):
-                return False
-        self._winget_installed_cache[package_id.lower()] = True
-        return True
-
-    _is_user_writable_binary = staticmethod(is_user_writable_binary)
-
-    def _guard_elevated_code_cmd(self) -> str | None:
-        code_cmd = self._resolve_code_cmd()
-        if self._check_is_admin() and self._is_user_writable_binary(code_cmd):
-            self.last_outcome = OperationOutcome(
-                status=OperationStatus.ACCESS_DENIED,
-                message=f"Refusing to execute user-writable '{code_cmd}' while elevated.",
-                command=(code_cmd,),
-            )
-            return None
-        return code_cmd
-
-    def install_vscode_extension(self, extension_id: str) -> bool:
-        if self._platform != "win32":
-            return False
-        code_cmd = self._guard_elevated_code_cmd()
-        if code_cmd is None:
-            return False
-        ext_res = self._run_native_cmd([code_cmd, "--install-extension", extension_id, "--force"], timeout=120.0)
-        return ext_res.returncode == 0
-
-    def uninstall_winget_package(self, package_id: str) -> bool:
-        if self._platform != "win32":
-            return False
-        self._winget_installed_cache.pop(package_id.lower(), None)
-        res = self._run_native_cmd(
-            [
-                self._resolve_winget_exe(),
-                "uninstall",
-                "--id",
-                package_id,
-                "--exact",
-                "--accept-source-agreements",
-            ]
-        )
-        ok = res.returncode == 0
-        if ok:
-            self._winget_installed_cache[package_id.lower()] = False
-        return ok
-
-    def is_vscode_extension_installed(self, extension_id: str) -> bool:
-        if self._platform != "win32":
-            return False
-        res = self._run_native_cmd([self._resolve_code_cmd(), "--list-extensions"], timeout=30.0)
-        if res.returncode != 0:
-            return False
-        target = extension_id.lower()
-        return any(line.strip().lower() == target for line in res.stdout.splitlines())
-
-    def uninstall_vscode_extension(self, extension_id: str) -> bool:
-        if self._platform != "win32":
-            return False
-        code_cmd = self._guard_elevated_code_cmd()
-        if code_cmd is None:
-            return False
-        res = self._run_native_cmd([code_cmd, "--uninstall-extension", extension_id], timeout=60.0)
-        return res.returncode == 0
-
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
         long_ops = {"--install", "--export", "--import"}
         timeout = 600.0 if any(arg in long_ops for arg in args) else 60.0
         return self._run_native_cmd([self._sys32_exe("wsl.exe"), *args], input_text=input_text, timeout=timeout)
 
     def get_total_memory_bytes(self) -> int:
-        kernel32 = self._get_dll("kernel32")
-        if self._platform == "win32" and kernel32 is not None:
-            try:
-                mem_fn = kernel32.GetPhysicallyInstalledSystemMemory
-                with contextlib.suppress(AttributeError, TypeError):
-                    mem_fn.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
-                    mem_fn.restype = ctypes.c_int
-                mem_kb = ctypes.c_ulonglong(0)
-                if mem_fn(ctypes.byref(mem_kb)):
-                    return max(4 * GIB_BYTES, int(mem_kb.value) * 1024)
-            except OSError, AttributeError, TypeError, ctypes.ArgumentError:
-                pass
-        sysconf = getattr(os, "sysconf", None)
-        if callable(sysconf):
-            try:
-                page_size = sysconf("SC_PAGE_SIZE")
-                page_count = sysconf("SC_PHYS_PAGES")
-                return max(4 * GIB_BYTES, int(page_size) * int(page_count))
-            except AttributeError, ValueError, OSError:
-                pass
-        return 16 * GIB_BYTES
+        return _get_total_memory_bytes_impl(self._platform, self._get_dll("kernel32"))
 
     def _sys32_exe(self, exe_name: str) -> str:
         return sys32_exe(exe_name, self._windll_override)
@@ -727,10 +572,12 @@ class NativeSystemBackend:
         return res.returncode == 0
 
     def get_git_global_config(self, key: str) -> str | None:
-        return get_git_global_config(self._run_native_cmd, key, self._resolve_git_exe)
+        return get_git_global_config(self._run_native_cmd, key, self._resolve_git_exe, is_admin=self._check_is_admin())
 
     def set_git_global_config(self, key: str, value: str | None) -> bool:
-        return set_git_global_config(self._run_native_cmd, key, value, self._resolve_git_exe)
+        return set_git_global_config(
+            self._run_native_cmd, key, value, self._resolve_git_exe, is_admin=self._check_is_admin()
+        )
 
     def _get_current_user_sid(self) -> str | None:
         return get_current_user_sid(self._run_native_cmd, self._platform)

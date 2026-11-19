@@ -103,7 +103,7 @@ def test_invalid_operations_and_mismatched_ids_detected() -> None:
 
 
 def test_irreversible_tweak_requires_explicit_warning_text() -> None:
-    """P2-Q.2: Irreversible tweaks must carry explicit warning text in description or risk_rationale."""
+    """Irreversible tweaks must carry explicit warning text in description or risk_rationale."""
     base = TWEAK_CATALOG["onedrive.uninstall"]
     assert base.provenance is not None
     silent_irrev = replace(

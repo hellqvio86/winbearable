@@ -76,6 +76,19 @@ uv tool install git+https://github.com/hellqvio86/winbearable.git
 pipx install git+https://github.com/hellqvio86/winbearable.git
 ```
 
+### Option 5: Windows Package Manager (`winget` — Submission In Progress)
+
+A `winget-pkgs` submission for `hellqvio86.winbearable` (portable standalone `wb.exe` built from each GitHub Release) is currently in review:
+- **Tracking PR:** [microsoft/winget-pkgs#481812](https://github.com/microsoft/winget-pkgs/pull/481812)
+
+Once accepted and merged into the Windows Package Manager community repository, you will be able to install and upgrade `winbearable` without a Python runtime via:
+
+```powershell
+winget install --id hellqvio86.winbearable --exact
+```
+
+In the meantime, you can also download the standalone `winbearable-<version>-win-x64.zip` archive (with SHA-256 checksum) directly from [GitHub Releases](https://github.com/hellqvio86/winbearable/releases).
+
 ### 🔄 Updating `winbearable`
 
 ```bash

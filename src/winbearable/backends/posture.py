@@ -25,7 +25,8 @@ from .consts import (
     TCPIP_PARAMS_KEY,
 )
 from .registry_protocol import RegistryBackend
-from .system_protocol import CommandResult, sys32_exe
+from .system_native_cmd import sys32_exe
+from .system_protocol import CommandResult
 
 
 def safe_get_reg(registry: RegistryBackend, key_path: str, value_name: str) -> tuple[bool, Any]:

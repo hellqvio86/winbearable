@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
-from typing import Any
 
 from ..models import TweakDefinition, TweakProvenance
-from .categories import CATEGORY_MODULES
+from .categories import CATEGORY_MODULES, CategoryModule
 from .consts import CIS_BENCHMARK_NAME, CIS_BENCHMARK_VERSION
 from .helpers import cis_control
 from .provenance import TWEAK_PROVENANCE
@@ -16,7 +15,7 @@ from .validation import CatalogValidationError, validate_catalog
 
 
 def assemble_catalog(
-    category_modules: tuple[Any, ...],
+    category_modules: tuple[CategoryModule, ...],
     provenance_map: Mapping[str, TweakProvenance],
 ) -> Mapping[str, TweakDefinition]:
     """Assemble and exhaustively validate the tweak catalog at startup."""

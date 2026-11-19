@@ -29,7 +29,8 @@ def check_local_admins(env: EnvironmentInfo, *, windll_override: Any = None) -> 
         netapi32 = get_win32_dll("netapi32", windll_override)
         advapi32 = get_win32_dll("advapi32", windll_override)
         kernel32 = get_win32_dll("kernel32", windll_override)
-        assert netapi32 is not None and advapi32 is not None
+        if netapi32 is None or advapi32 is None:
+            raise OSError("netapi32/advapi32 unavailable")
 
         with contextlib.suppress(AttributeError, TypeError):
             advapi32.ConvertStringSidToSidW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p)]
@@ -121,7 +122,7 @@ def check_local_admins(env: EnvironmentInfo, *, windll_override: Any = None) -> 
             obs,
             "Review unexpected accounts in Administrators." if sev != "info" else None,
         )
-    except Exception as exc:
+    except (OSError, AttributeError, TypeError, ValueError, ctypes.ArgumentError) as exc:
         obs = PostureObservation(
             ObservationState.UNKNOWN,
             "win32:NetLocalGroupGetMembers",
@@ -250,7 +251,7 @@ def check_guest_account(
                     obs,
                     "Disable local Guest account." if not disabled else None,
                 )
-        except Exception as exc:
+        except (OSError, AttributeError, TypeError, ValueError, ctypes.ArgumentError) as exc:
             obs = PostureObservation(
                 ObservationState.UNKNOWN,
                 "win32:NetUserGetInfo",
@@ -372,7 +373,7 @@ def check_listening_ports(env: EnvironmentInfo, *, windll_override: Any = None) 
             reason,
         )
         return AuditFinding("chk.listening_ports", "network", "Listening TCP/UDP Ports", "info", obs)
-    except Exception as exc:
+    except (OSError, AttributeError, TypeError, ValueError, ctypes.ArgumentError) as exc:
         obs = PostureObservation(
             ObservationState.UNKNOWN,
             "win32:GetExtendedTcpTable",
@@ -457,7 +458,7 @@ def check_open_shares(env: EnvironmentInfo, *, windll_override: Any = None) -> A
             "No non-default SMB shares exposed.",
         )
         return AuditFinding("chk.open_shares", "network", "Non-Default SMB Shares", "info", obs)
-    except Exception as exc:
+    except (OSError, AttributeError, TypeError, ValueError, ctypes.ArgumentError) as exc:
         obs = PostureObservation(
             ObservationState.UNKNOWN, "win32:NetShareEnum", ObservationConfidence.NONE, str(exc), "NetShareEnum failed."
         )

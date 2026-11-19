@@ -466,10 +466,8 @@ def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profil
         load_profile(str(tmp_path / f"chain_{MAX_PROFILE_INHERITANCE_DEPTH + 1}.toml"))
 
 
-def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_path: Path) -> None:
-    """P0-WSL-EXPORT-PRUNE, P0-RECOVER-FAILED, P0-SERVICE-START-MAP, P1-CHECKPOINT, and P1-MULTI-DISTRO-WSL."""
-
-    # P0-WSL-EXPORT-PRUNE + P1-EXPORT-SIDE-CAR-PAIRING: keep_last=1 keeps new .tar + .sha256 and deletes older pairs
+def test_export_wsl_distro_prunes_old_tar_and_sha256_pairs(tmp_path: Path) -> None:
+    """keep_last=1 keeps the newly exported .tar + .sha256 pair and prunes older pairs."""
     exp_dir = tmp_path / "exports"
     exp_dir.mkdir()
     for name in ("Ubuntu-a.tar", "Ubuntu-b.tar"):
@@ -492,8 +490,11 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
     assert not (exp_dir / "Ubuntu-a.tar").exists() and not (exp_dir / "Ubuntu-a.tar.sha256").exists()
     assert not (exp_dir / "Ubuntu-b.tar").exists() and not (exp_dir / "Ubuntu-b.tar.sha256").exists()
 
-    # P0-RECOVER-FAILED: recover on FAILED skips winget uninstall unless force=True
+
+def test_recover_failed_run_skips_winget_uninstall_without_force(tmp_path: Path) -> None:
+    """recover_incomplete_runs on a FAILED run skips winget uninstall unless force=True."""
     reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
     store_fail = StateStore(tmp_path / "state_fail.json")
     store_fail.append_run(
         RunRecord(
@@ -510,7 +511,11 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
         rec_no_force = recover_incomplete_runs(store_fail, reg, sysb, dry_run=False, allow_simulated=True, force=False)
     assert len(rec_no_force) == 1 and rec_no_force[0].state == TransactionState.ROLLED_BACK
 
-    # P1-CHECKPOINT-DOCS: APPLYING + registry_snapshots + empty completed_operations -> recover restores values
+
+def test_recover_applying_run_with_empty_checkpoints_restores_snapshots(tmp_path: Path) -> None:
+    """APPLYING run with registry_snapshots and empty completed_operations restores values on recover."""
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
     reg.set_value(HIVE_HKCU, r"Software\WinbearableTest", "Flag", 9, REG_DWORD)
     store_apply = StateStore(tmp_path / "state_applying.json")
     store_apply.append_run(
@@ -537,7 +542,9 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
     recover_incomplete_runs(store_apply, reg, sysb, dry_run=False, allow_simulated=True)
     assert reg.get_value(HIVE_HKCU, r"Software\WinbearableTest", "Flag") == (1, REG_DWORD)
 
-    # P0-SERVICE-START-MAP: types 0..4 map accurately; unknown fails closed; registry error reverts sc.exe
+
+def test_service_start_type_mapping_and_registry_failure_rollback() -> None:
+    """Service start types 0..4 map accurately; unknown fails closed; registry error reverts sc.exe."""
     svc_reg = InMemoryRegistryBackend(
         initial_values={(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\TestSvc", "Start"): (2, REG_DWORD)}
     )
@@ -560,7 +567,10 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
             assert native_win.set_service_start_type(svc_reg, "TestSvc", 3) is False
         assert "start=disabled" in recorded_modes[-1]
 
-    # P1-MULTI-DISTRO-WSL: failure on distro 2 restores distro 1 /etc/wsl.conf
+
+def test_multi_distro_wsl_failure_compensates_earlier_distro(tmp_path: Path) -> None:
+    """Failure on distro 2 restores distro 1 /etc/wsl.conf."""
+    reg = InMemoryRegistryBackend()
     distro_confs = {"Ubuntu": "[boot]\nsystemd=false\n", "Debian": "[boot]\nsystemd=false\n"}
     wsl_sys = InMemorySystemBackend(
         is_windows=True, is_admin=True, windows_build=26300, wsl_distros=("Ubuntu", "Debian")
@@ -602,11 +612,9 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
     assert distro_confs["Ubuntu"] == "[boot]\nsystemd=false\n"
 
 
-def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(tmp_path: Path) -> None:
-    """Verify idempotent recovery, rollback ordering, UAC writer resilience, UTF-16 -d decoding, and pruning."""
-
-    # N-01: partial rollback + recover reports only the single external conflict, not already-restored items
-    store = StateStore(tmp_path / "state_n01.json")
+def test_partial_rollback_and_idempotent_recover_conflict_reporting(tmp_path: Path) -> None:
+    """Partial rollback and recover report only the single external conflict and block new rollback."""
+    store = StateStore(tmp_path / "state_partial.json")
     reg = InMemoryRegistryBackend()
     sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
     env = sysb.detect_environment(reg)
@@ -617,7 +625,6 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
     with pytest.raises(RuntimeError, match="restore_conflict"):
         rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
 
-    # N-02: rollback_runs refuses while FAILED run exists, and refuses --to targeting non-committed run
     with pytest.raises(IncompleteJournalError, match="wb recover"):
         rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
 
@@ -625,9 +632,13 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
     errors = rec[0].error or ""
     assert errors.count("restore_conflict") == 1
 
-    # N-03: explicit wslconfig_path + PermissionError compensates and leaves no APPLYING run
+
+def test_wsl_permission_error_compensates_without_leaving_applying_run(tmp_path: Path) -> None:
+    """Explicit wslconfig_path + PermissionError compensates and leaves no APPLYING run."""
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    env = sysb.detect_environment(InMemoryRegistryBackend())
     wsl_ro = tmp_path / "ro.wslconfig"
-    store_n03 = StateStore(tmp_path / "state_n03.json")
+    store_ro = StateStore(tmp_path / "state_ro.json")
 
     def _ro_applier(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("read-only")
@@ -638,15 +649,17 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
             env,
             InMemoryRegistryBackend(),
             sysb,
-            store_n03,
+            store_ro,
             dry_run=False,
             wslconfig_path=wsl_ro,
             allow_simulated=True,
             wsl_applier=_ro_applier,
         )
-    assert store_n03.get_incomplete_runs() == []
+    assert store_ro.get_incomplete_runs() == []
 
-    # N-06: UAC output writer failure does not clobber CLI return code
+
+def test_uac_output_writer_failure_preserves_cli_exit_code(tmp_path: Path) -> None:
+    """UAC output writer failure does not clobber CLI return code."""
     uac_dir = tmp_path / "wb-uac-xyz"
     uac_dir.mkdir()
     pre_out = uac_dir / "uac-output.txt"
@@ -659,8 +672,9 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
     )
     assert rc == 0
 
-    # N-08: elevated user-writable code.cmd skips extension install cleanly without rolling back
 
+def test_elevated_user_writable_code_cmd_skips_extension_without_rollback(tmp_path: Path) -> None:
+    """Elevated user-writable code.cmd skips extension install cleanly without rolling back."""
     ext_sys = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
     ext_sys.installed_winget_packages.add("Microsoft.VisualStudioCode")
 
@@ -676,13 +690,16 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
             ext_sys.detect_environment(InMemoryRegistryBackend()),
             InMemoryRegistryBackend(),
             ext_sys,
-            StateStore(tmp_path / "state_n08.json"),
+            StateStore(tmp_path / "state_vscode.json"),
             dry_run=False,
             allow_simulated=True,
         )
     assert ext_summary.failed_ids == ()
 
-    # N-10: _decode_cmd_bytes decodes UTF-16LE wsl.exe even with -d, and localized error classifies as 'error'
+
+def test_utf16le_wsl_decoding_registry_type_error_and_backup_dir_pruning(tmp_path: Path) -> None:
+    """UTF-16LE wsl -d decoding, unsupported registry tuple type error, and user backup dir preservation."""
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
     err_u16 = "Det går inte att hitta distributionen.\r\n".encode("utf-16-le")
     assert "distributionen" in NativeSystemBackend._decode_cmd_bytes(err_u16, ["wsl.exe", "-d", "Missing"])
     with patch.object(
@@ -693,7 +710,6 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
         probe = probe_distro_wsl_conf("Missing", sysb)
     assert probe.status == "error"
 
-    # N-11: _encode_registry_data rejects unsupported tuple type
     bad_snap = RegistryValueSnapshot(
         hive=HIVE_HKCU,
         key_path=r"Software\Test",
@@ -706,12 +722,11 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
     with pytest.raises(TypeError, match="Unsupported registry value type"):
         bad_snap.to_dict()
 
-    # N-12: _prune_old_backups_unlocked preserves non-run-id user directories under backups/
-    store_n12 = StateStore(tmp_path / "state_n12.json")
+    store_prune = StateStore(tmp_path / "state_prune.json")
     user_folder = tmp_path / "backups" / "my-custom-notes"
     user_folder.mkdir(parents=True)
     stale_run_dir = tmp_path / "backups" / "20260101-000000-deadbeef"
     stale_run_dir.mkdir(parents=True)
-    store_n12.save_runs([])
+    store_prune.save_runs([])
     assert user_folder.is_dir()
     assert not stale_run_dir.exists()

@@ -19,6 +19,7 @@ from ..models import (
     PlannedOperation,
     TweakDefinition,
     UnsupportedTargetError,
+    WinbearableError,
 )
 from ..packages import TRUSTED_WINGET_BY_ID
 from .base import OperationApplyContext, now_iso, raise_system_error
@@ -31,6 +32,7 @@ from .mergers import (
     restore_file_snapshot,
     snapshot_file_spec,
 )
+from .path_policy import validate_file_spec_path
 
 
 class WingetOperationAdapter:
@@ -57,7 +59,7 @@ class WingetOperationAdapter:
                         action="uninstall",
                         before_state="installed" if installed else "uninstalled",
                         after_state="uninstalled",
-                        reversible=not tweak.irreversible,
+                        reversible=False,
                         scope=winget_spec.scope,
                         requires_elevation=(winget_spec.scope == "machine"),
                         target_id=wid,
@@ -161,6 +163,22 @@ class WingetOperationAdapter:
                     entries.append(entry)
                     if ctx.journal_cb:
                         ctx.journal_cb(entry)
+                else:
+                    entry = OperationJournalEntry(
+                        target_id=wid,
+                        operation_type=self.kind,
+                        tweak_id=tweak.tweak_id,
+                        action="uninstall",
+                        outcome="skipped",
+                        pre_fingerprint="uninstalled",
+                        post_fingerprint="uninstalled",
+                        started_at=started,
+                        ended_at=now_iso(),
+                        verification_status="verified",
+                    )
+                    entries.append(entry)
+                    if ctx.journal_cb:
+                        ctx.journal_cb(entry)
                 continue
 
             if winget_spec.package_id not in TRUSTED_WINGET_BY_ID:
@@ -216,7 +234,7 @@ class WingetOperationAdapter:
                 eid = vscode_ext_id(ext)
                 if not system.is_vscode_extension_installed(ext):
                     if not system.install_vscode_extension(ext):
-                        last_out = getattr(system, "last_outcome", None)
+                        last_out = system.last_outcome
                         if (
                             last_out is not None
                             and last_out.status == OperationStatus.ACCESS_DENIED
@@ -450,8 +468,8 @@ class FileConfigOperationAdapter:
             if attempted_targets is not None and file_id(snap.path) not in attempted_targets:
                 continue
             try:
+                cur_path = validate_file_spec_path(snap.path)
                 if not force and snap.post_sha256 is not None:
-                    cur_path = Path(snap.path)
                     cur_sha = hashlib.sha256(cur_path.read_bytes()).hexdigest() if cur_path.is_file() else None
                     matches_pre = (cur_sha == snap.sha256) if snap.existed else (not cur_path.is_file())
                     if matches_pre and cur_sha != snap.post_sha256:
@@ -460,7 +478,7 @@ class FileConfigOperationAdapter:
                         errors.append(f"restore_conflict file {snap.path}")
                         continue
                 restore_file_snapshot(snap)
-            except Exception as exc:
+            except (OSError, ValueError, WinbearableError) as exc:
                 errors.append(f"file {snap.path}: {exc}")
         return errors
 
@@ -520,10 +538,10 @@ class HypervFirewallOperationAdapter:
                 continue
             if not force and snap.post_enabled is not None:
                 live = get_wsl_hyperv_firewall_setting()
-                if live is not None and live.get("returncode") == 0:
+                if live is not None and live.get("returncode", 0) == 0:
                     cur_en = live.get("enabled")
-                    cur_in = live.get("default_inbound")
-                    cur_out = live.get("default_outbound")
+                    cur_in = live.get("default_inbound_action", live.get("default_inbound"))
+                    cur_out = live.get("default_outbound_action", live.get("default_outbound"))
                     matches_pre = (
                         cur_en == snap.previous_enabled
                         and cur_in == snap.previous_inbound

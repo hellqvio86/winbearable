@@ -268,7 +268,9 @@ def apply_wsl_linux_baseline(
                             "git",
                             "config",
                             "--system",
+                            "--fixed-value",
                             "--unset",
+                            "--",
                             "credential.helper",
                             helper,
                         ]

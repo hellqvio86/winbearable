@@ -54,39 +54,42 @@ def _forbidden_system_roots() -> tuple[Path, ...]:
             candidates.append(raw)
     out: list[Path] = []
     for c in candidates:
-        norm = c.replace("\\", "/") if os.name != "nt" else c
-        out.append(Path(norm).resolve())
+        if os.name != "nt" and _WIN_DRIVE_RE.match(c):
+            continue
+        out.append(Path(c).resolve())
     return tuple(dict.fromkeys(out))
 
 
 def _check_reparse_ancestors(target: Path) -> None:
-    if is_reparse_or_symlink(target):
-        raise PermissionDeniedError(
-            f"Refusing symlink or reparse-point target path: {target}",
-            context={"path": str(target)},
-        )
-    for parent in target.parents:
-        if parent.exists() and is_reparse_or_symlink(parent):
+    abs_target = Path(os.path.abspath(target))
+    for candidate in (target, abs_target):
+        if is_reparse_or_symlink(candidate):
             raise PermissionDeniedError(
-                f"Refusing path with symlink/reparse-point ancestor ({parent}): {target}",
-                context={"path": str(target), "ancestor": str(parent)},
+                f"Refusing symlink or reparse-point target path: {candidate}",
+                context={"path": str(candidate)},
             )
+        for parent in candidate.parents:
+            if is_reparse_or_symlink(parent):
+                raise PermissionDeniedError(
+                    f"Refusing path with symlink/reparse-point ancestor ({parent}): {candidate}",
+                    context={"path": str(candidate), "ancestor": str(parent)},
+                )
 
 
 def validate_file_spec_path(path_template: str, *, allow_system_paths: bool = False) -> Path:
     """Expand and enforce allowlist path policy for FileSpec targets."""
     target = _expand_raw_template(path_template)
     resolved = target.resolve()
+    if resolved == Path(resolved.anchor):
+        raise PermissionDeniedError(
+            f"Refusing FileSpec targeting filesystem root: {resolved}",
+            context={"path": str(resolved)},
+        )
     if not allow_system_paths:
         if os.name != "nt" and _WIN_DRIVE_RE.match(str(target)):
             raise PermissionDeniedError(
                 f"Refusing Windows drive path outside user-profile allowlist: {target}",
                 context={"path": str(target)},
-            )
-        if resolved == Path(resolved.anchor):
-            raise PermissionDeniedError(
-                f"Refusing FileSpec targeting filesystem root: {resolved}",
-                context={"path": str(resolved)},
             )
         for sys_root in _forbidden_system_roots():
             if resolved == sys_root or resolved.is_relative_to(sys_root):
@@ -95,7 +98,7 @@ def validate_file_spec_path(path_template: str, *, allow_system_paths: bool = Fa
                     context={"path": str(resolved)},
                 )
         allowed = _allowed_user_roots()
-        if not any(resolved == root or resolved.is_relative_to(root) for root in allowed):
+        if not any(resolved != root and resolved.is_relative_to(root) for root in allowed):
             raise PermissionDeniedError(
                 f"Refusing FileSpec path outside user-profile allowlist: {resolved}",
                 context={"path": str(resolved)},
@@ -105,7 +108,7 @@ def validate_file_spec_path(path_template: str, *, allow_system_paths: bool = Fa
 
 
 def validate_icacls_user_only_path(path_str: str) -> Path:
-    """Expand and enforce user-profile containment + reparse checks for IcaclsUserOnlySpec targets."""
+    """Expand and enforce user-profile containment + reparse checks for user-scoped directory/ACL targets."""
     target = _expand_raw_template(path_str)
     if os.name != "nt" and _WIN_DRIVE_RE.match(str(target)):
         raise PermissionDeniedError(
@@ -113,14 +116,25 @@ def validate_icacls_user_only_path(path_str: str) -> Path:
             context={"path": str(target)},
         )
     resolved = target.resolve()
+    if resolved == Path(resolved.anchor):
+        raise PermissionDeniedError(
+            f"Refusing path targeting filesystem root: {resolved}",
+            context={"path": str(resolved)},
+        )
+    for sys_root in _forbidden_system_roots():
+        if resolved == sys_root or resolved.is_relative_to(sys_root):
+            raise PermissionDeniedError(
+                f"Refusing path under system directory ({sys_root}): {resolved}",
+                context={"path": str(resolved)},
+            )
     _check_reparse_ancestors(target)
     home_roots = [Path.home().resolve(), Path(tempfile.gettempdir()).resolve()]
     up = os.environ.get("USERPROFILE", "").strip()
     if up:
         home_roots.append(Path(up.replace("\\", "/") if os.name != "nt" else up).resolve())
-    if not any(resolved == r or resolved.is_relative_to(r) for r in home_roots):
+    if not any(resolved != r and resolved.is_relative_to(r) for r in home_roots):
         raise PermissionDeniedError(
-            f"Refusing IcaclsUserOnlySpec path outside user profile: {resolved}",
+            f"Refusing path outside user profile: {resolved}",
             context={"path": str(resolved)},
         )
     return resolved

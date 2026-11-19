@@ -86,7 +86,7 @@ def test_wsl_misc_and_engine_guard_branches(tmp_path: Path) -> None:
             allow_simulated=True,
         )
 
-    # Engine: Tamper Protection blocks TWK-H tweaks during apply
+    # Engine: Tamper Protection blocks Defender tweaks during apply
     reg.set_value(HIVE_HKLM, r"SOFTWARE\Microsoft\Windows Defender\Features", "TamperProtection", 5, REG_DWORD)
     prof_tp = ProfileSpec(name="tp", description="tp", tweaks={"hardening.defender_asr_audit": True})
     summary_tp = apply_profile(
@@ -256,11 +256,10 @@ def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest
                 CommandResult((), 1, "", ""),
                 CommandResult((), 0, "", ""),
                 CommandResult((), 0, "", ""),
-                CommandResult((), 1, "", ""),  # whoami.exe fallback in is_ssh_acl_restricted
-                CommandResult((), 0, "C:\\dir DESKTOP\\testuser:(OI)(CI)(F)\nSuccessfully processed 1 files\n", ""),
-                CommandResult((), 1, "", ""),  # whoami.exe fallback in restrict_acl_to_current_user
-                CommandResult((), 0, "", ""),  # icacls /reset
-                CommandResult((), 0, "", ""),  # icacls /inheritance:r
+                CommandResult((), 0, '"HOST\\user","S-1-5-21-100-1001"\n', ""),
+                CommandResult((), 0, "", ""),  # icacls /save (non-SDDL fallback fails -> False below if empty)
+                CommandResult((), 0, '"HOST\\user","S-1-5-21-100-1001"\n', ""),
+                CommandResult((), 0, "", ""),  # icacls /inheritance:r /grant:r
             ],
         ),
     ):
@@ -288,8 +287,7 @@ def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest
 
         ssh_dir = tmp_path / "ssh"
         ssh_dir.mkdir()
-        assert sys_win.is_ssh_acl_restricted(str(ssh_dir)) is True
-        monkeypatch.setenv("USERNAME", "alice")
+        assert sys_win.is_ssh_acl_restricted(str(ssh_dir)) is False
         assert sys_win.restrict_acl_to_current_user(str(ssh_dir)) is True
 
     assert sys_win.is_hibernate_enabled(reg) is None

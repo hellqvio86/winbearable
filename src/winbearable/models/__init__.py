@@ -39,6 +39,7 @@ from winbearable.models.results import (
     RegistryChangeDetail,
     TweakCheckResult,
 )
+from winbearable.models.run_record import RunRecord
 from winbearable.models.snapshots import (
     AuditpolSnapshot,
     FileSnapshot,
@@ -52,7 +53,6 @@ from winbearable.models.snapshots import (
     PowercfgSnapshot,
     RegistryKeySnapshot,
     RegistryValueSnapshot,
-    RunRecord,
     ScheduledTaskSnapshot,
     ServiceSnapshot,
     WevtutilSnapshot,

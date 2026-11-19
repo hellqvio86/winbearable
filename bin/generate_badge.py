@@ -4,17 +4,8 @@ import subprocess
 import sys
 
 
-def main() -> None:
-    subprocess.run([sys.executable, "-m", "coverage", "json"], check=True)
-
-    with open("coverage.json", encoding="utf-8") as fdesc:
-        data = json.load(fdesc)
-
-    percent = round(data["totals"]["percent_covered"])
-
-    if os.path.exists("coverage.json"):
-        os.remove("coverage.json")
-
+def render_badge_svg(percent: int) -> str:
+    """Render a coverage SVG badge string for the given integer percentage."""
     if percent >= 95:
         color = "#4c1"
     elif percent >= 90:
@@ -26,7 +17,7 @@ def main() -> None:
     else:
         color = "#e05d44"
 
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="90" height="20">
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="90" height="20">
   <linearGradient id="b" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>
@@ -47,10 +38,24 @@ def main() -> None:
   </g>
 </svg>"""
 
+
+def main() -> None:
+    subprocess.run([sys.executable, "-m", "coverage", "json"], check=True)
+
+    with open("coverage.json", encoding="utf-8") as fdesc:
+        data = json.load(fdesc)
+
+    percent = round(data["totals"]["percent_covered"])
+
+    if os.path.exists("coverage.json"):
+        os.remove("coverage.json")
+
+    svg = render_badge_svg(percent)
+
     with open("coverage.svg", "w", encoding="utf-8") as fdesc:
         fdesc.write(svg)
 
-    print(f"Generated coverage.svg with {percent}% ({color})")
+    print(f"Generated coverage.svg with {percent}%")
 
 
 if __name__ == "__main__":

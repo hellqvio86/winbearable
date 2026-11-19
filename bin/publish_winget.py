@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from build_winget import INSTALLER_MANIFEST, update_installer_manifest_sha256
+
 from winbearable.const import __version__
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,6 +43,11 @@ def main() -> int:
     tag = f"v{__version__}"
     zip_path = ROOT / "dist" / f"winbearable-{__version__}-win-x64.zip"
     sha_path = ROOT / "dist" / f"{zip_path.name}.sha256"
+    sha_hex = sha_path.read_text(encoding="utf-8").split()[0].strip().upper()
+    update_installer_manifest_sha256(sha_hex, INSTALLER_MANIFEST)
+    if "PENDING_RELEASE_BUILD_SHA256" in INSTALLER_MANIFEST.read_text(encoding="utf-8"):
+        print(f"Error: {INSTALLER_MANIFEST} still contains placeholder SHA-256.", file=sys.stderr)
+        return 1
 
     upload_res = subprocess.run(
         ["gh", "release", "upload", tag, str(zip_path), str(sha_path), "--clobber"],
