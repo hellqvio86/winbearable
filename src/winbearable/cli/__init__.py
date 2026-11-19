@@ -1,6 +1,7 @@
 """Command-line interface for winbearable (`wb` and `winbearable`)."""
 
 from winbearable.cli.handlers import _relay_elevated_uac, main, run_cli
+from winbearable.cli.handlers_tools import CliDeps
 from winbearable.cli.parser import absolutize_elevated_argv as _absolutize_elevated_argv
 from winbearable.cli.parser import build_parser
 from winbearable.cli.render import (
@@ -28,6 +29,7 @@ from winbearable.uac import run_elevated_wb
 from winbearable.wsl import audit_wsl
 
 __all__ = [
+    "CliDeps",
     "StateStore",
     "_JSON_SCHEMAS",
     "_absolutize_elevated_argv",

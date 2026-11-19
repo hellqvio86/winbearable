@@ -1,6 +1,7 @@
-"""Tests for ENG-01..11, MGD-01..03, WSL-01..07, QA-01, QA-04, and TWK-A..J."""
+"""Tests for invariant..11, invariant..03, invariant..07, invariant, invariant, and TWK-A..J."""
 
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any
@@ -10,25 +11,30 @@ import pytest
 
 from winbearable.audit import build_doctor_blockers, run_security_audit
 from winbearable.backends.registry import InMemoryRegistryBackend
-from winbearable.backends.system import InMemorySystemBackend, NativeSystemBackend
+from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend, _observe_defender
 from winbearable.const import (
     DEFENDER_FEATURES_KEY,
+    DEFENDER_KEY,
     HIVE_HKLM,
     REG_DWORD,
     REG_SZ,
 )
 from winbearable.engine import apply_profile, recover_incomplete_runs, rollback_runs
 from winbearable.models import (
+    ObservationState,
     ProfileSpec,
+    RunRecord,
+    TransactionState,
     TweakProvenance,
     WslConfigSpec,
 )
 from winbearable.packages import PACKAGE_CATALOG
 from winbearable.profiles import ProfileValidationError, load_profile
-from winbearable.state import StateStore
+from winbearable.state import DEFAULT_MAX_BACKUP_DIRS, DEFAULT_MAX_RUN_HISTORY, StateStore
 from winbearable.tweaks import TWEAK_CATALOG
 from winbearable.wsl import (
     WslOperationError,
+    _audit_credential_hygiene,
     build_distro_wsl_conf_sections,
     build_wslconfig_sections,
     deep_audit_wsl_distro,
@@ -36,6 +42,8 @@ from winbearable.wsl import (
     detect_wsl_policies,
     export_wsl_distro,
     is_wsl_version_outdated,
+    plan_or_apply_wsl,
+    probe_distro_wsl_conf,
     set_wsl_distro_sparse,
     update_wsl,
 )
@@ -54,7 +62,7 @@ def _dummy_prov() -> TweakProvenance:
 
 
 def test_cli_selection_introspection_and_audit(cli_runner: Any) -> None:
-    """ENG-05, ENG-06, ENG-11, MGD-01: --only/--skip/--category, list/show/schema, audit, and doctor blockers."""
+    """only/--skip/--category, list/show/schema, audit, and doctor blockers."""
     rc, out, _ = cli_runner(["plan", "--profile", "user-only", "--only", "explorer.show_file_extensions", "--json"])
     assert rc == 0
     plan_data = json.loads(out)
@@ -93,7 +101,7 @@ def test_cli_selection_introspection_and_audit(cli_runner: Any) -> None:
 
 
 def test_profile_schema_v2_and_unknown_key_line_number(tmp_path: Path) -> None:
-    """ENG-10: Profile v2 supports [packages], [params], include, and reports unknown keys with line numbers."""
+    """Profile v2 supports [packages], [params], include, and reports unknown keys with line numbers."""
     good_toml = tmp_path / "v2.toml"
     good_toml.write_text(
         'name = "v2-test"\n'
@@ -119,7 +127,7 @@ def test_profile_schema_v2_and_unknown_key_line_number(tmp_path: Path) -> None:
 
 
 def test_audit_autologon_redacted_and_blockers(registry: InMemoryRegistryBackend) -> None:
-    """Section G & MGD-01: Autologon secret is never leaked; blockers report TAMPER_PROTECTION & WSL_POLICY_BLOCKED."""
+    """Autologon secret is never leaked; blockers report TAMPER_PROTECTION and WSL_POLICY_BLOCKED."""
     reg = InMemoryRegistryBackend(
         initial_values={
             (HIVE_HKLM, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", "DefaultPassword"): (
@@ -142,7 +150,7 @@ def test_audit_autologon_redacted_and_blockers(registry: InMemoryRegistryBackend
 
 
 def test_wsl_extended_features_and_version_gating(tmp_path: Path) -> None:
-    """WSL-01..07: Extended .wslconfig, /etc/wsl.conf root refusal, policy detection, deep audit, export sha256."""
+    """invariant..07: Extended .wslconfig, /etc/wsl.conf root refusal, policy detection, deep audit, export sha256."""
     spec = WslConfigSpec(
         mode="strict",
         vm_idle_timeout=60000,
@@ -183,7 +191,7 @@ def test_wsl_extended_features_and_version_gating(tmp_path: Path) -> None:
 
 
 def test_locale_independent_parsers_swedish_and_german(registry: InMemoryRegistryBackend) -> None:
-    """QA-01: Non-English Swedish/German command outputs parse identically via exit codes, XML, /English, /r."""
+    """Non-English Swedish/German command outputs parse identically via exit codes, XML, /English, /r."""
     sys_b = NativeSystemBackend(platform_override="win32")
 
     # Swedish / German HRESULTs & exit codes
@@ -248,9 +256,6 @@ def test_locale_independent_parsers_swedish_and_german(registry: InMemoryRegistr
         assert detect_default_wsl_distro(mem_sys, mem_sys.detect_environment(registry)) == "Ubuntu"
 
     # Swedish sc.exe query WinDefend ("TILLSTÅND : 4  KÖRS") -> numeric state 4 recognized without English words
-    from winbearable.backends.system import _observe_defender
-    from winbearable.const import DEFENDER_KEY, HIVE_HKLM, REG_DWORD
-    from winbearable.models import ObservationState
 
     reg_def = InMemoryRegistryBackend(initial_values={(HIVE_HKLM, DEFENDER_KEY, "DisableAntiSpyware"): (1, REG_DWORD)})
     obs_sv, _ = _observe_defender(
@@ -289,7 +294,7 @@ def test_locale_independent_parsers_swedish_and_german(registry: InMemoryRegistr
 
 
 def test_randomized_apply_rollback_and_recover_property(tmp_path: Path) -> None:
-    """QA-04: Random subsets: plan never mutates, apply+rollback restores state, recover cleans up."""
+    """Random subsets: plan never mutates, apply+rollback restores state, recover cleans up."""
     rng = random.Random(26300)
     reversible_ids = [
         tid for tid, t in TWEAK_CATALOG.items() if not t.irreversible and not t.file_specs and not t.icacls_specs
@@ -336,9 +341,7 @@ def test_multidistro_wsl_failure_compensates_first_distro_and_wslconfig(
     state_store: StateStore,
     tmp_path: Path,
 ) -> None:
-    """P0.2: Failure on second WSL distro restores .wslconfig and first distro's /etc/wsl.conf."""
-    from winbearable.backends.system import CommandResult
-    from winbearable.models import TransactionState, WslConfigSpec
+    """Failure on second WSL distro restores .wslconfig and first distro's /etc/wsl.conf."""
 
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_admin=True, wsl_installed=True, wsl_distros=("Ubuntu", "Debian"))
@@ -380,10 +383,7 @@ def test_multidistro_wsl_failure_compensates_first_distro_and_wslconfig(
 
 
 def test_state_store_pruning_preserves_incomplete_and_credential_hygiene(tmp_path: Path) -> None:
-    """Cover StateStore rotation bounds (P1.6) and _audit_credential_hygiene happy/error paths (P1-L.3)."""
-    from winbearable.models import RunRecord, TransactionState
-    from winbearable.state import DEFAULT_MAX_BACKUP_DIRS, DEFAULT_MAX_RUN_HISTORY
-    from winbearable.wsl import _audit_credential_hygiene
+    """Cover StateStore rotation bounds and _audit_credential_hygiene happy/error paths (P1-L.3)."""
 
     store = StateStore(tmp_path / "state.json")
     backups_root = tmp_path / "backups"
@@ -424,7 +424,6 @@ def test_state_store_pruning_preserves_incomplete_and_credential_hygiene(tmp_pat
     clean_key = clean_ssh / "id_ed25519"
     clean_key.write_text("PRIVATE", encoding="utf-8")
     clean_key.chmod(0o600)
-    import os
 
     clean_res = _audit_credential_hygiene(["store"], ssh_dir=clean_ssh, env_vars={})
     if os.name == "posix":
@@ -451,10 +450,6 @@ def test_wsl_write_ahead_journal_before_mutation_and_probe_error_refusal(
     tmp_path: Path,
 ) -> None:
     """Cover write-ahead WSL snapshot persistence before mutation and probe error refusal."""
-    from winbearable.backends.system import CommandResult
-    from winbearable.engine import recover_incomplete_runs
-    from winbearable.models import TransactionState, WslConfigSpec
-    from winbearable.wsl import WslOperationError, plan_or_apply_wsl, probe_distro_wsl_conf
 
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_admin=True, wsl_installed=True, wsl_distros=("Ubuntu", "Debian"))
@@ -513,7 +508,7 @@ def test_wsl_write_ahead_journal_before_mutation_and_probe_error_refusal(
     assert wslconfig.read_text(encoding="utf-8") == "[wsl2]\nmemory=4GB\n"
     assert distro_confs["Ubuntu"] == "[user]\ndefault=alice\n"
 
-    # P0.3: Distinguish confirmed missing vs permission denied / distro error
+    # Distinguish confirmed missing vs permission denied / distro error
     def _probe_errors(args: list[str], input_text: str | None = None) -> CommandResult:
         distro = args[1] if len(args) > 1 and args[0] == "-d" else ""
         cmd = args[5] if len(args) > 5 else ""
@@ -545,8 +540,7 @@ def test_wsl_permission_error_with_zero_drifted_tweaks_does_not_strand_applying(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R-06: PermissionError in WSL step with zero drifted tweaks transitions to ROLLED_BACK, not stranded APPLYING."""
-    from winbearable.models import TransactionState, WslConfigSpec
+    """PermissionError in WSL step with zero drifted tweaks transitions to ROLLED_BACK, not stranded APPLYING."""
 
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     reg = InMemoryRegistryBackend()
@@ -557,7 +551,7 @@ def test_wsl_permission_error_with_zero_drifted_tweaks_does_not_strand_applying(
     def _ro_applier(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("read-only .wslconfig")
 
-    with patch("winbearable.wsl.get_default_wslconfig_path", return_value=tmp_path / ".wslconfig"):
+    with patch("winbearable.wsl.config.get_default_wslconfig_path", return_value=tmp_path / ".wslconfig"):
         summary = apply_profile(
             prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True, wsl_applier=_ro_applier
         )
@@ -569,7 +563,7 @@ def test_wsl_permission_error_with_zero_drifted_tweaks_does_not_strand_applying(
     assert runs and runs[-1].state == TransactionState.ROLLED_BACK
 
     # Subsequent apply succeeds without IncompleteJournalError
-    with patch("winbearable.wsl.get_default_wslconfig_path", return_value=tmp_path / ".wslconfig"):
+    with patch("winbearable.wsl.config.get_default_wslconfig_path", return_value=tmp_path / ".wslconfig"):
         summary2 = apply_profile(
             prof, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True, wsl_applier=lambda *_a, **_kw: None
         )

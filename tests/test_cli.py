@@ -10,7 +10,15 @@ from unittest.mock import patch
 import pytest
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
-from winbearable.cli import main, run_cli
+from winbearable.cli import CliDeps, _escape_md_cell, main, run_cli
+from winbearable.const import (
+    EXIT_BLOCKED,
+    EXIT_PENDING_CHANGES,
+    EXIT_SUCCESS,
+    HIVE_HKLM,
+    JSON_SCHEMA_VERSION,
+    REG_DWORD,
+)
 from winbearable.state import StateStore
 
 
@@ -262,27 +270,25 @@ def test_non_windows_host_refuses_mutations(
         assert "non-Windows host" in err_buf.getvalue()
         assert state_store.load_runs() == []
 
-    with patch("winbearable.cli.audit_wsl", return_value={"wsl_installed": False}):
-        out_buf = io.StringIO()
-        err_buf = io.StringIO()
-        with redirect_stdout(out_buf), redirect_stderr(err_buf):
-            code = run_cli(
-                argv=["doctor", "--json"],
-                registry=onedrive_registry,
-                system=non_win_sys,
-                state_store=state_store,
-            )
-        assert code == 0
-        payload = json.loads(out_buf.getvalue())
-        assert not (payload["audit"]["applicable"])
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    with redirect_stdout(out_buf), redirect_stderr(err_buf):
+        code = run_cli(
+            argv=["doctor", "--json"],
+            registry=onedrive_registry,
+            system=non_win_sys,
+            state_store=state_store,
+            deps=CliDeps(audit_wsl_fn=lambda *_a, **_kw: {"wsl_installed": False}),
+        )
+    assert code == 0
+    payload = json.loads(out_buf.getvalue())
+    assert not (payload["audit"]["applicable"])
 
 
 def test_cli_error_boundary_json_schema_and_dry_run_plan(
     onedrive_registry: InMemoryRegistryBackend, system: InMemorySystemBackend, state_store: StateStore
 ) -> None:
     """CLI catches backend errors cleanly with JSON envelopes and renders full dry-run operations."""
-    from winbearable.cli import _escape_md_cell
-    from winbearable.const import JSON_SCHEMA_VERSION
 
     # 1. Error boundary catches PermissionError during detect_environment and emits JSON envelope
     err_out = io.StringIO()
@@ -361,7 +367,6 @@ def test_cli_detailed_exit_codes(
     system: InMemorySystemBackend,
 ) -> None:
     """P2-Q.1: --detailed-exitcode returns 2 on pending, 3 on blocked, and 0 on converged."""
-    from winbearable.const import EXIT_BLOCKED, EXIT_PENDING_CHANGES, EXIT_SUCCESS, HIVE_HKLM, REG_DWORD
 
     code_pending, _, _ = cli_runner(["plan", "--profile", "user-only", "--detailed-exitcode"])
     assert code_pending == EXIT_PENDING_CHANGES
@@ -395,7 +400,7 @@ def test_wsl_set_default_cli_defaults_to_ubuntu(
     cli_runner: Callable[[list[str]], tuple[int, str, str]],
     system: InMemorySystemBackend,
 ) -> None:
-    """P1.3: `wb wsl set-default` defaults to Ubuntu and honors dry-run vs --apply."""
+    """`wb wsl set-default` defaults to Ubuntu and honors dry-run vs --apply."""
     code_dry, out_dry, _ = cli_runner(["wsl", "set-default"])
     assert code_dry == 0
     assert "[DRY-RUN] wsl.exe --set-default Ubuntu" in out_dry

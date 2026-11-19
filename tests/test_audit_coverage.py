@@ -12,8 +12,20 @@ import pytest
 from winbearable import audit
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import InMemorySystemBackend
-from winbearable.const import HIVE_HKLM, REG_DWORD, REG_MULTI_SZ, REG_SZ, WDAC_POLICIES_KEY
-from winbearable.engine import calculate_hardening_score
+from winbearable.cli import CliDeps, run_cli
+from winbearable.const import (
+    EXIT_BLOCKED,
+    EXIT_UNSUPPORTED_PLATFORM,
+    HIVE_HKLM,
+    REG_DWORD,
+    REG_MULTI_SZ,
+    REG_SZ,
+    WDAC_POLICIES_KEY,
+)
+from winbearable.engine import HighRiskConfirmationError, calculate_hardening_score
+from winbearable.models import UnsupportedPlatformError
+from winbearable.profiles import ProfileValidationError, load_profile
+from winbearable.state import StateStore
 
 
 def test_audit_registry_and_environment_checks_happy_and_error_paths(
@@ -123,12 +135,12 @@ def test_audit_win32_netapi_checks_with_mocked_windll(monkeypatch: pytest.Monkey
     sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
     win_env = sys_b.detect_environment(reg)
 
-    # 1. windll is None error branches
-    monkeypatch.setattr(ctypes, "windll", None, raising=False)
-    assert audit._check_local_admins(win_env).observation.state.value == "unknown"
-    assert audit._check_guest_account(win_env, reg).observation.state.value == "unknown"
-    assert audit._check_listening_ports(win_env).observation.state.value == "unknown"
-    assert audit._check_open_shares(win_env).observation.state.value == "unknown"
+    # 1. Missing Win32 DLL / windll_override error branches
+    missing_dll = object()
+    assert audit._check_local_admins(win_env, windll_override=missing_dll).observation.state.value == "unknown"
+    assert audit._check_guest_account(win_env, reg, windll_override=missing_dll).observation.state.value == "unknown"
+    assert audit._check_listening_ports(win_env, windll_override=missing_dll).observation.state.value == "unknown"
+    assert audit._check_open_shares(win_env, windll_override=missing_dll).observation.state.value == "unknown"
 
     # 2. Mocked windll structures for NetLocalGroupGetMembers, NetUserGetInfo, NetShareEnum
     class _Member(ctypes.Structure):
@@ -225,34 +237,31 @@ def test_audit_win32_netapi_checks_with_mocked_windll(monkeypatch: pytest.Monkey
         (),
         {"advapi32": _FakeAdvapi32(), "kernel32": _FakeKernel32(), "netapi32": _FakeNetapi32()},
     )()
-    monkeypatch.setattr(ctypes, "windll", fake_windll, raising=False)
-
-    admins_finding = audit._check_local_admins(win_env)
+    admins_finding = audit._check_local_admins(win_env, windll_override=fake_windll)
     assert admins_finding.severity == "medium"
     assert "ExtraAdmin" in admins_finding.observation.evidence
 
-    guest_finding = audit._check_guest_account(win_env, reg)
+    guest_finding = audit._check_guest_account(win_env, reg, windll_override=fake_windll)
     assert guest_finding.severity == "high"
 
-    shares_finding = audit._check_open_shares(win_env)
+    shares_finding = audit._check_open_shares(win_env, windll_override=fake_windll)
     assert shares_finding.severity == "medium"
     assert "PublicShare" in shares_finding.observation.evidence
 
     # Error branches
     fake_windll.netapi32 = _FakeNetapi32(rc=5)
-    assert audit._check_local_admins(win_env).observation.state.value == "unknown"
-    assert audit._check_open_shares(win_env).observation.state.value == "unknown"
+    assert audit._check_local_admins(win_env, windll_override=fake_windll).observation.state.value == "unknown"
+    assert audit._check_open_shares(win_env, windll_override=fake_windll).observation.state.value == "unknown"
 
     fake_windll.netapi32 = _FakeNetapi32(rc=0)
     fake_windll.advapi32 = _FakeAdvapi32(sid_ok=False)
-    assert audit._check_local_admins(win_env).observation.state.value == "unknown"
+    assert audit._check_local_admins(win_env, windll_override=fake_windll).observation.state.value == "unknown"
     fake_windll.advapi32 = _FakeAdvapi32(lookup_ok=False)
-    assert audit._check_local_admins(win_env).observation.state.value == "unknown"
+    assert audit._check_local_admins(win_env, windll_override=fake_windll).observation.state.value == "unknown"
 
 
 def test_profiles_validation_error_paths(tmp_path: Path) -> None:
     """Exercise ProfileValidationError branches across wsl, packages, and params sections."""
-    from winbearable.profiles import ProfileValidationError, load_profile
 
     invalid_tomls = [
         ('name = "bad"\n[wsl]\ndefault_user = "root"\n', "default_user"),
@@ -278,55 +287,61 @@ def test_profiles_validation_error_paths(tmp_path: Path) -> None:
 
 def test_cli_wsl_subcommands_and_error_json_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise CLI wsl firewall/update/sparse text output and exception-to-JSON error handlers."""
-    from winbearable.cli import run_cli
-    from winbearable.const import EXIT_BLOCKED, EXIT_UNSUPPORTED_PLATFORM
-    from winbearable.engine import HighRiskConfirmationError
-    from winbearable.models import UnsupportedPlatformError
-    from winbearable.state import StateStore
 
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
     store = StateStore(tmp_path / "state.json")
 
-    monkeypatch.setattr("winbearable.cli.StateStore", lambda: store)
-    with patch(
-        "winbearable.cli.set_wsl_hyperv_firewall_setting",
-        return_value={
+    fw_deps = CliDeps(
+        set_hyperv_fn=lambda **_kw: {
             "dry_run": False,
             "returncode": 0,
             "vm_creator_id": "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}",
             "previous": {"vm_creator_id": "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}", "enabled": True},
             "desired": {"enabled": True, "default_inbound_action": "Block", "default_outbound_action": "Allow"},
             "error": "",
+        }
+    )
+    assert (
+        run_cli(
+            ["wsl", "firewall", "--apply"], registry=reg, system=sys_b, deps=fw_deps, state_store_factory=lambda: store
+        )
+        == 0
+    )
+    assert any(r.profile_name == "wsl-firewall" for r in store.load_runs())
+
+    upd_deps = CliDeps(
+        update_wsl_fn=lambda **_kw: {"dry_run": True, "returncode": 0, "commands": [["wsl.exe", "--update"]]},
+        set_wsl_sparse_fn=lambda **_kw: {
+            "dry_run": True,
+            "returncode": 0,
+            "command": ["wsl.exe", "--manage", "Ubuntu", "--set-sparse"],
         },
-    ):
-        assert run_cli(["wsl", "firewall", "--apply"], registry=reg, system=sys_b, state_store=store) == 0
-        assert any(r.profile_name == "wsl-firewall" for r in store.load_runs())
+    )
+    assert run_cli(["wsl", "update"], registry=reg, system=sys_b, state_store=store, deps=upd_deps) == 0
+    assert run_cli(["wsl", "sparse", "Ubuntu"], registry=reg, system=sys_b, state_store=store, deps=upd_deps) == 0
 
-    with patch(
-        "winbearable.wsl.update_wsl",
-        return_value={"dry_run": True, "returncode": 0, "commands": [["wsl.exe", "--update"]]},
-    ):
-        assert run_cli(["wsl", "update"], registry=reg, system=sys_b, state_store=store) == 0
+    def _raise_exc(exc: BaseException) -> Any:
+        def _fn(*_a: object, **_kw: object) -> dict[str, Any]:
+            raise exc
 
-    with patch(
-        "winbearable.wsl.set_wsl_distro_sparse",
-        return_value={"dry_run": True, "returncode": 0, "command": ["wsl.exe", "--manage", "Ubuntu", "--set-sparse"]},
-    ):
-        assert run_cli(["wsl", "sparse", "Ubuntu"], registry=reg, system=sys_b, state_store=store) == 0
+        return _fn
 
     # Exception handlers inside _run_cli_body with --json and --debug
-    with patch("winbearable.cli.calculate_hardening_score", side_effect=UnsupportedPlatformError("old build")):
-        assert run_cli(["doctor", "--json"], registry=reg, system=sys_b, state_store=store) == EXIT_UNSUPPORTED_PLATFORM
-        with pytest.raises(UnsupportedPlatformError):
-            run_cli(["--debug", "doctor"], registry=reg, system=sys_b, state_store=store)
+    deps_unsup = CliDeps(calc_score_fn=_raise_exc(UnsupportedPlatformError("old build")))
+    assert (
+        run_cli(["doctor", "--json"], registry=reg, system=sys_b, state_store=store, deps=deps_unsup)
+        == EXIT_UNSUPPORTED_PLATFORM
+    )
+    with pytest.raises(UnsupportedPlatformError):
+        run_cli(["--debug", "doctor"], registry=reg, system=sys_b, state_store=store, deps=deps_unsup)
 
-    with patch("winbearable.cli.calculate_hardening_score", side_effect=HighRiskConfirmationError("need flag")):
-        assert run_cli(["doctor", "--json"], registry=reg, system=sys_b, state_store=store) == EXIT_BLOCKED
-        with pytest.raises(HighRiskConfirmationError):
-            run_cli(["--debug", "doctor"], registry=reg, system=sys_b, state_store=store)
+    deps_high = CliDeps(calc_score_fn=_raise_exc(HighRiskConfirmationError("need flag")))
+    assert run_cli(["doctor", "--json"], registry=reg, system=sys_b, state_store=store, deps=deps_high) == EXIT_BLOCKED
+    with pytest.raises(HighRiskConfirmationError):
+        run_cli(["--debug", "doctor"], registry=reg, system=sys_b, state_store=store, deps=deps_high)
 
-    with patch("winbearable.cli.calculate_hardening_score", side_effect=ZeroDivisionError("boom")):
-        assert run_cli(["doctor", "--json"], registry=reg, system=sys_b, state_store=store) == 1
-        with pytest.raises(ZeroDivisionError):
-            run_cli(["--debug", "doctor"], registry=reg, system=sys_b, state_store=store)
+    deps_zero = CliDeps(calc_score_fn=_raise_exc(ZeroDivisionError("boom")))
+    assert run_cli(["doctor", "--json"], registry=reg, system=sys_b, state_store=store, deps=deps_zero) == 1
+    with pytest.raises(ZeroDivisionError):
+        run_cli(["--debug", "doctor"], registry=reg, system=sys_b, state_store=store, deps=deps_zero)

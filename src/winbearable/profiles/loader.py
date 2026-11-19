@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import warnings
 from pathlib import Path
 from typing import Any
@@ -27,15 +26,13 @@ from .schema_migration import (
 )
 
 
-def get_builtin_profiles_dir() -> Path:
+def get_builtin_profiles_dir(repo_profiles_dir: Path = REPO_PROFILES_DIR) -> Path:
     """Resolve the directory containing built-in TOML profiles."""
     override = os.environ.get(ENV_PROFILE_DIR)
     if override:
         return Path(override)
-    pkg_mod = sys.modules.get("winbearable.profiles")
-    repo_dir = getattr(pkg_mod, "REPO_PROFILES_DIR", REPO_PROFILES_DIR) if pkg_mod is not None else REPO_PROFILES_DIR
-    if repo_dir.is_dir():
-        return repo_dir
+    if repo_profiles_dir.is_dir():
+        return repo_profiles_dir
     return BUNDLED_PROFILES_DIR
 
 

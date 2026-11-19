@@ -1,21 +1,66 @@
-"""Targeted pure-pytest coverage tests for validation and UAC edge cases (QA-05)."""
+"""Targeted pure-pytest coverage tests for validation and UAC edge cases."""
 
 from __future__ import annotations
 
 import ctypes
+import importlib.util
+import ntpath
+import os
+import re
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from winbearable.const import DEFAULT_TESTED_BUILDS, MIN_SUPPORTED_BUILD
+from winbearable.audit import _check_listening_ports, _check_unquoted_service_paths
+from winbearable.backends.registry import InMemoryRegistryBackend
+from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+from winbearable.const import (
+    DEFAULT_TESTED_BUILDS,
+    HIVE_HKLM,
+    MIN_SUPPORTED_BUILD,
+    REG_SZ,
+    WAIT_FAILED,
+    WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
+)
+from winbearable.hyperv_firewall import _parse_ps_setting_json, _powershell_exe
 from winbearable.models import (
+    FileSpec,
+    HypervFirewallSnapshot,
+    IcaclsSnapshot,
+    OperationStatus,
     RiskLevel,
+    RunRecord,
     ServiceSpec,
     TweakDefinition,
     TweakProvenance,
+    WslConfigSpec,
 )
-from winbearable.uac import UacElevationError, _get_win32_dlls, build_elevated_cmdline_args, run_elevated_wb
+from winbearable.operations import (
+    FileConfigOperationAdapter,
+    IcaclsOperationAdapter,
+    expand_file_spec_path,
+    merge_file_content,
+)
+from winbearable.profiles import load_profile
+from winbearable.tweaks import get_tweak
+from winbearable.uac import (
+    UacElevationError,
+    UacTimeoutError,
+    _configure_win32_signatures,
+    _get_win32_dlls,
+    _read_bounded_uac_output,
+    build_elevated_cmdline_args,
+    resolve_elevation_target,
+    run_elevated_wb,
+    set_console_title,
+    write_uac_output_safe,
+)
+from winbearable.wsl import prepare_wsl_plan
 
 
 def _sample_prov(**overrides: object) -> TweakProvenance:
@@ -64,7 +109,7 @@ def test_uac_error_paths_and_cmdline_stripping(tmp_path: Path, monkeypatch: pyte
     fake_windll.shell32.ShellExecuteExW.return_value = 0
     fake_windll.kernel32.GetLastError.return_value = 5
     with (
-        patch("winbearable.uac.ctypes.get_last_error", return_value=0, create=True),
+        patch.object(ctypes, "get_last_error", return_value=0, create=True),
         pytest.raises(UacElevationError, match="Win32 error 5"),
     ):
         run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll)
@@ -80,19 +125,18 @@ def test_uac_error_paths_and_cmdline_stripping(tmp_path: Path, monkeypatch: pyte
     fake_windll2.kernel32.WaitForSingleObject.return_value = 0
     fake_windll2.kernel32.GetExitCodeProcess.return_value = 0
     with (
-        patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
+        patch("winbearable.uac.elevation.ShellExecuteInfoW") as mock_sei_cls,
         pytest.raises(UacElevationError, match="Failed to read exit code"),
     ):
         inst = MagicMock()
         inst.hProcess = 123
         mock_sei_cls.return_value = inst
-        with patch("winbearable.uac.ctypes.sizeof", return_value=64), patch("winbearable.uac.ctypes.byref"):
+        with patch.object(ctypes, "sizeof", return_value=64), patch.object(ctypes, "byref"):
             run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll2)
 
 
 def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Cover UAC executable resolution (frozen, uv wb.exe, fallback python) and SetConsoleTitleW."""
-    from winbearable.uac import resolve_elevation_target, set_console_title
 
     elevated_args = ["apply", "--uac-output", "out.txt"]
 
@@ -108,13 +152,13 @@ def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: py
     )
 
     # Frozen PyInstaller binary uses sys.executable directly without '-m winbearable'
-    monkeypatch.setattr("winbearable.uac.sys.frozen", True, raising=False)
-    monkeypatch.setattr("winbearable.uac.sys.executable", str(wb_exe))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(wb_exe))
     assert resolve_elevation_target(elevated_args) == (str(wb_exe.resolve()), elevated_args)
 
     # Non-frozen uv/pip wb.exe via argv0 or sibling wb.exe
-    monkeypatch.delattr("winbearable.uac.sys.frozen", raising=False)
-    monkeypatch.setattr("winbearable.uac.sys.executable", str(py_exe))
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "executable", str(py_exe))
     assert resolve_elevation_target(elevated_args, argv0=str(wb_exe)) == (str(wb_exe.resolve()), elevated_args)
 
     # Sibling wb.exe next to sys.executable is preferred even when argv0 is missing
@@ -136,22 +180,12 @@ def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: py
     fake_windll.kernel32.SetConsoleTitleW.side_effect = OSError("no console")
     assert set_console_title("winbearable", windll_override=fake_windll) is False
 
-    monkeypatch.setattr("winbearable.uac.sys.platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     assert set_console_title("winbearable") is False
 
 
 def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
     """Cover Win32 ctypes signature contracts, null handle, wait outcomes, timeout termination, and bounded output."""
-    import ctypes
-
-    from winbearable.const import WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT
-    from winbearable.uac import (
-        UacElevationError,
-        UacTimeoutError,
-        _configure_win32_signatures,
-        _read_bounded_uac_output,
-        run_elevated_wb,
-    )
 
     # 1. Signature configuration sets argtypes and restype for all Win32 UAC APIs
     stub_shell32 = MagicMock()
@@ -174,9 +208,9 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
     null_handle_dll = MagicMock()
     null_handle_dll.shell32.ShellExecuteExW.return_value = 1
     with (
-        patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
-        patch("winbearable.uac.ctypes.sizeof", return_value=64),
-        patch("winbearable.uac.ctypes.byref"),
+        patch("winbearable.uac.elevation.ShellExecuteInfoW") as mock_sei_cls,
+        patch.object(ctypes, "sizeof", return_value=64),
+        patch.object(ctypes, "byref"),
         pytest.raises(UacElevationError, match="without returning a process handle"),
     ):
         inst = MagicMock()
@@ -189,9 +223,9 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
     timeout_dll.shell32.ShellExecuteExW.return_value = 1
     timeout_dll.kernel32.WaitForSingleObject.side_effect = [WAIT_TIMEOUT, WAIT_OBJECT_0]
     with (
-        patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
-        patch("winbearable.uac.ctypes.sizeof", return_value=64),
-        patch("winbearable.uac.ctypes.byref"),
+        patch("winbearable.uac.elevation.ShellExecuteInfoW") as mock_sei_cls,
+        patch.object(ctypes, "sizeof", return_value=64),
+        patch.object(ctypes, "byref"),
         pytest.raises(UacTimeoutError, match=r"partially modified.*wb doctor.*wb recover"),
     ):
         inst = MagicMock()
@@ -207,10 +241,10 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
     failed_dll.kernel32.WaitForSingleObject.return_value = WAIT_FAILED
     failed_dll.kernel32.GetLastError.return_value = 6
     with (
-        patch("winbearable.uac.ctypes.get_last_error", return_value=0, create=True),
-        patch("winbearable.uac._ShellExecuteInfoW") as mock_sei_cls,
-        patch("winbearable.uac.ctypes.sizeof", return_value=64),
-        patch("winbearable.uac.ctypes.byref"),
+        patch.object(ctypes, "get_last_error", return_value=0, create=True),
+        patch("winbearable.uac.elevation.ShellExecuteInfoW") as mock_sei_cls,
+        patch.object(ctypes, "sizeof", return_value=64),
+        patch.object(ctypes, "byref"),
         pytest.raises(UacElevationError, match="Win32 error 6"),
     ):
         inst = MagicMock()
@@ -232,19 +266,9 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """S-01 & S-05: Native binaries resolve to absolute paths and tokens stay out of argv."""
-    import ntpath
-    import os
-    import re
-    import subprocess
-    from unittest.mock import patch
-
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import NativeSystemBackend
-    from winbearable.hyperv_firewall import _powershell_exe
-    from winbearable.uac import run_elevated_wb
 
     # 1. Source-level lint: no bare ".exe" / ".cmd" literals in _run_native_cmd([ or hyperv_firewall
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     sys_src = (repo_root / "src" / "winbearable" / "backends" / "system.py").read_text(encoding="utf-8")
     assert not re.findall(r'_run_native_cmd\(\s*\[\s*"[^"]*\.(?:exe|cmd)"', sys_src)
     fw_src = (repo_root / "src" / "winbearable" / "hyperv_firewall.py").read_text(encoding="utf-8")
@@ -257,9 +281,6 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
         def communicate(self, input: object = None, timeout: float | None = None) -> tuple[bytes, bytes]:
             return (b"", b"")
 
-    native = NativeSystemBackend(platform_override="win32")
-    reg = InMemoryRegistryBackend()
-    reg.set_value("HKLM", r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, "REG_DWORD")
     seen_calls: list[tuple[list[str], dict[str, str]]] = []
 
     def _capture_popen(args: list[str], **kwargs: object) -> _FakeProc:
@@ -268,13 +289,16 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
         seen_calls.append((list(args), env))
         return _FakeProc()
 
-    with patch("winbearable.backends.system.subprocess.Popen", side_effect=_capture_popen):
-        native.set_service_start_type(reg, "DiagTrack", 4)
-        native.is_scheduled_task_enabled(r"\Microsoft\Windows\Test")
-        native.is_optional_feature_enabled("SMB1Protocol")
-        native.is_winget_package_installed("Microsoft.VisualStudioCode")
-        native.install_vscode_extension("ms-vscode-remote.remote-wsl")
-        native.run_wsl_command(["--status"])
+    native = NativeSystemBackend(platform_override="win32", popen_factory=_capture_popen)
+    reg = InMemoryRegistryBackend()
+    reg.set_value("HKLM", r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, "REG_DWORD")
+
+    native.set_service_start_type(reg, "DiagTrack", 4)
+    native.is_scheduled_task_enabled(r"\Microsoft\Windows\Test")
+    native.is_optional_feature_enabled("SMB1Protocol")
+    native.is_winget_package_installed("Microsoft.VisualStudioCode")
+    native.install_vscode_extension("ms-vscode-remote.remote-wsl")
+    native.run_wsl_command(["--status"])
 
     assert seen_calls
     for argv, env in seen_calls:
@@ -308,7 +332,6 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
     assert captured_dirs and captured_dirs[0].lower().endswith("\\system32")
 
     # 4. S-05: bin/publish_winget.py passes token in WINGET_CREATE_GITHUB_TOKEN env var, not argv
-    import importlib.util
 
     pub_spec = importlib.util.spec_from_file_location("publish_winget", repo_root / "bin" / "publish_winget.py")
     assert pub_spec is not None and pub_spec.loader is not None
@@ -337,20 +360,16 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
 
 
 def test_locale_decoding_task_xml_and_icacls_sddl(tmp_path: Path) -> None:
-    """B-01..B-03: UTF-16LE/OEM command decoding, Task/Settings/Enabled XML parsing, and locale-safe ICACLS."""
-    from unittest.mock import patch
+    """UTF-16LE/OEM command decoding, Task/Settings/Enabled XML parsing, and locale-safe ICACLS."""
 
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
-
-    # B-01: _decode_cmd_bytes handles UTF-16LE wsl.exe --list and cp850 OEM Swedish text
+    # _decode_cmd_bytes handles UTF-16LE wsl.exe --list and cp850 OEM Swedish text
     utf16_bytes = "\ufeffUbuntu-ÅÄÖ\r\n".encode("utf-16-le")
     assert NativeSystemBackend._decode_cmd_bytes(utf16_bytes, ["wsl.exe", "--list", "--quiet"]) == "Ubuntu-ÅÄÖ\r\n"
 
     swedish_cp850 = "Bearbetade 1 filer; Åtgärd slutförd".encode("cp850")
     assert "Åtgärd" in NativeSystemBackend._decode_cmd_bytes(swedish_cp850, ["icacls.exe"], oem_encoding="cp850")
 
-    # B-02: is_scheduled_task_enabled reads Task/Settings/Enabled, ignoring Trigger/Enabled
+    # is_scheduled_task_enabled reads Task/Settings/Enabled, ignoring Trigger/Enabled
     native = NativeSystemBackend(platform_override="win32")
     xml_trigger_true_settings_false = (
         '<?xml version="1.0" encoding="UTF-16"?>'
@@ -379,7 +398,7 @@ def test_locale_decoding_task_xml_and_icacls_sddl(tmp_path: Path) -> None:
     ):
         assert native.is_scheduled_task_enabled(r"\Microsoft\Windows\Test") is True
 
-    # B-03: Swedish icacls output with non-English summary line + SID-based restrict_acl_to_current_user
+    # Swedish icacls output with non-English summary line + SID-based restrict_acl_to_current_user
     ssh_dir = tmp_path / ".ssh"
     ssh_dir.mkdir()
     swedish_icacls = (
@@ -412,10 +431,6 @@ def test_locale_decoding_task_xml_and_icacls_sddl(tmp_path: Path) -> None:
     assert NativeSystemBackend._is_sddl_restricted_to_sid("D:AI(A;;FA;;;S-1-5-21-1000)", "S-1-5-21-1000") is False
     assert native.restore_acl(str(ssh_dir), tmp_path / "missing.acl") is False
 
-    from winbearable.models import IcaclsSnapshot
-    from winbearable.operations import IcaclsOperationAdapter
-    from winbearable.tweaks.catalog import get_tweak
-
     snap = IcaclsSnapshot.from_dict(IcaclsSnapshot(path_template=str(ssh_dir), backup_acl_path="bak.acl").to_dict())
     assert snap.backup_acl_path == "bak.acl"
     fake_sys = InMemorySystemBackend()
@@ -436,16 +451,9 @@ def test_locale_decoding_task_xml_and_icacls_sddl(tmp_path: Path) -> None:
 def test_file_config_robustness_hyperv_not_configured_and_service_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """B-04..B-06: file-config BOM/order/env/UTF-8 safety, Hyper-V NotConfigured + journal, and ImagePath tokenizer."""
-    from winbearable.audit import _check_unquoted_service_paths
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import InMemorySystemBackend
-    from winbearable.const import HIVE_HKLM, REG_SZ
-    from winbearable.hyperv_firewall import _parse_ps_setting_json
-    from winbearable.models import FileSpec, HypervFirewallSnapshot, RiskLevel, RunRecord, TweakDefinition
-    from winbearable.operations import FileConfigOperationAdapter, expand_file_spec_path, merge_file_content
+    """file-config BOM/order/env/UTF-8 safety, Hyper-V NotConfigured + journal, and ImagePath tokenizer."""
 
-    # B-04: non-UTF-8 file in FileConfigOperationAdapter.inspect -> unverified, not traceback
+    # non-UTF-8 file in FileConfigOperationAdapter.inspect -> unverified, not traceback
     bad_file = tmp_path / "bad.json"
     bad_file.write_bytes(b"\xff\xfe\x00\x80")
     tweak = TweakDefinition(
@@ -466,24 +474,24 @@ def test_file_config_robustness_hyperv_not_configured_and_service_paths(
     )
     assert ops == [] and drifted == [] and len(unverified) == 1
 
-    # B-04: unresolved %VAR% raises ValueError instead of creating literal %UNSET_VAR% dir
+    # unresolved %VAR% raises ValueError instead of creating literal %UNSET_VAR% dir
     monkeypatch.delenv("WB_UNSET_TEST_VAR", raising=False)
     with pytest.raises(ValueError, match="Unresolved"):
         expand_file_spec_path(r"%WB_UNSET_TEST_VAR%\settings.json")
 
-    # B-04: JSON preserves key order, non-ASCII characters, and UTF-8 BOM
+    # JSON preserves key order, non-ASCII characters, and UTF-8 BOM
     bom_json = '\ufeff{"zebra": "ÅÄÖ", "alpha": 1}\n'
     merged_json = merge_file_content(bom_json, "json", {"beta": "ö"})
     assert merged_json.startswith("\ufeff")
     assert "ÅÄÖ" in merged_json and '"ö"' in merged_json
     assert merged_json.index('"zebra"') < merged_json.index('"alpha"') < merged_json.index('"beta"')
 
-    # B-04: TOML ignores [bracket] inside multi-line string before first real [table]
+    # TOML ignores [bracket] inside multi-line string before first real [table]
     toml_in = 'desc = """\n[not_a_table]\n"""\n[real_table]\nx = 1\n'
     merged_toml = merge_file_content(toml_in, "toml", {"top_key": "ok"})
     assert merged_toml.index('top_key = "ok"') < merged_toml.index("[real_table]")
 
-    # B-05: Hyper-V NotConfigured (0 for action, 2 for Enabled) + HypervFirewallSnapshot round-trip
+    # Hyper-V NotConfigured (0 for action, 2 for Enabled) + HypervFirewallSnapshot round-trip
     parsed_nc = _parse_ps_setting_json(
         '{"Name": "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}", "Enabled": 2, '
         '"DefaultInboundAction": 0, "DefaultOutboundAction": 0, "LoopbackEnabled": 2}'
@@ -512,7 +520,7 @@ def test_file_config_robustness_hyperv_not_configured_and_service_paths(
     )
     assert rec.hyperv_firewall_snapshots == (hv_snap,)
 
-    # B-06: unquoted service path tokenizer ignores positional args after .exe, catches spaces before .exe
+    # unquoted service path tokenizer ignores positional args after .exe, catches spaces before .exe
     reg = InMemoryRegistryBackend(
         initial_values={
             (HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\CleanArgs", "ImagePath"): (
@@ -533,14 +541,6 @@ def test_file_config_robustness_hyperv_not_configured_and_service_paths(
 
 def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path) -> None:
     """S-02, S-03, C-02, C-07: UAC O_EXCL/reparse guard, TerminateProcess failure message, alias, 26H2 fixture."""
-    import ctypes
-    from unittest.mock import patch
-
-    from winbearable.backends.system import InMemorySystemBackend
-    from winbearable.const import WAIT_TIMEOUT
-    from winbearable.profiles import load_profile
-    from winbearable.tweaks import get_tweak
-    from winbearable.uac import UacElevationError, UacTimeoutError, run_elevated_wb, write_uac_output_safe
 
     # S-02: write_uac_output_safe creates new wb-uac-*/uac-output.txt and rejects existing/untrusted/symlink targets
     uac_dir = tmp_path / "wb-uac-123"
@@ -615,16 +615,6 @@ def test_uac_isolated_python_elevated_code_guard_wsl_backup_dir_and_network_audi
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """UAC -I flag, user-writable code.cmd refusal when elevated, per-run WSL backup dir, and TCP/UDP audit."""
-    import ctypes
-    from typing import Any
-    from unittest.mock import patch
-
-    from winbearable.audit import _check_listening_ports
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import InMemorySystemBackend, NativeSystemBackend
-    from winbearable.models import OperationStatus, WslConfigSpec
-    from winbearable.uac import resolve_elevation_target
-    from winbearable.wsl import prepare_wsl_plan
 
     # 1. UAC python.exe launch uses -I (isolated mode)
     exe, args = resolve_elevation_target(["apply"], executable=r"C:\Python314\python.exe")
@@ -677,7 +667,7 @@ def test_uac_isolated_python_elevated_code_guard_wsl_backup_dir_and_network_audi
         iphlpapi = _FakeIphlpapi()
 
     env = InMemorySystemBackend(is_windows=True, windows_build=26300).detect_environment(InMemoryRegistryBackend())
-    with patch("winbearable.audit.sys.platform", "win32"), patch.object(ctypes, "windll", _FakeWindll(), create=True):
-        finding = _check_listening_ports(env)
+    with patch("winbearable.audit.sys.platform", "win32"):
+        finding = _check_listening_ports(env, windll_override=_FakeWindll())
     assert "TCP4=1, TCP6=1, UDP4=1, UDP6=1" in finding.observation.evidence
     assert "445" in finding.observation.evidence and "5353" in finding.observation.evidence

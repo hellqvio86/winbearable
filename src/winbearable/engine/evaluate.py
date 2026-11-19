@@ -14,7 +14,7 @@ from ..models import (
     TweakDefinition,
     TweakStatus,
 )
-from ..operations import format_registry_op, inspect_non_registry_operations
+from ..operations import format_registry_op, identity, inspect_non_registry_operations
 from ..tweaks import get_tweak
 from .params import (
     is_edition_supported,
@@ -55,6 +55,7 @@ def _inspect_registry_specs(
                     target_value=None,
                     is_compliant=is_compliant,
                     current_type="KEY" if key_exists else None,
+                    view=reg_spec.view,
                 )
                 reg_details.append(change_detail)
                 if not is_compliant:
@@ -84,6 +85,7 @@ def _inspect_registry_specs(
                 target_value=reg_spec.value_data,
                 is_compliant=is_compliant,
                 current_type=current_type,
+                view=reg_spec.view,
             )
             reg_details.append(change_detail)
 
@@ -177,6 +179,11 @@ def detect_tweak(
             item.current_value,
             item.target_value,
             tweak.irreversible,
+            target_id=(
+                identity.registry_key_id(item.hive, item.key_path, item.view)
+                if item.action == ACTION_DELETE_KEY
+                else identity.registry_value_id(item.hive, item.key_path, item.value_name, item.view)
+            ),
         )
         for item in reg_details
     ]

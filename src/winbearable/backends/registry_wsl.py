@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -101,8 +102,6 @@ class WslInteropRegistryBackend:
         return sorted(subkeys)
 
     def _parse_reg_query_line(self, raw_line: str) -> tuple[str, RegistryValueData, str] | None:
-        import re
-
         match = re.match(r"^\s*(.+?)\s{4}(REG_[A-Z0-9_]+)\s*(.*)$", raw_line)
         if not match:
             return None

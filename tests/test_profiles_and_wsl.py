@@ -1,13 +1,29 @@
 """Unit tests for TOML profile inheritance, validation, and WSL2 config merging."""
 
+import hashlib
+import time
 from pathlib import Path
 
 import pytest
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
+from winbearable.backends.system import CommandResult, NativeSystemBackend
 from winbearable.models import WslConfigSpec
 from winbearable.profiles import ProfileValidationError, generate_init_profile_toml, load_profile
-from winbearable.wsl import audit_wsl, merge_ini_preserving_comments, plan_or_apply_wsl
+from winbearable.wsl import (
+    PreparedWslDistroPlan,
+    WslDistroConfProbe,
+    WslOperationError,
+    apply_distro_wsl_conf,
+    apply_wsl_linux_baseline,
+    audit_wsl,
+    install_wsl_distro,
+    lint_wsl_conf_lf,
+    merge_ini_preserving_comments,
+    plan_or_apply_wsl,
+    set_default_wsl_distro,
+)
+from winbearable.wsl.ini import KEY_VALUE_RE
 
 
 def test_builtin_profile_inheritance_chain() -> None:
@@ -131,7 +147,6 @@ def test_wsl_default_distro_is_ubuntu_and_warns_on_fedora_only(
     registry: InMemoryRegistryBackend,
 ) -> None:
     """Default WSL distro is Ubuntu; install sets it as default and audit warns if only Fedora is present."""
-    from winbearable.wsl import apply_wsl_linux_baseline, install_wsl_distro
 
     fedora_sys = InMemorySystemBackend(wsl_distros=("FedoraLinux-42",))
     fedora_env = fedora_sys.detect_environment(registry)
@@ -156,8 +171,6 @@ def test_detect_default_wsl_distro_flags_fedora_default(
     registry: InMemoryRegistryBackend,
 ) -> None:
     """detect_default_wsl_distro parses `wsl.exe --list --verbose` and flags Fedora default."""
-    from winbearable.backends.system import CommandResult
-    from winbearable.wsl import set_default_wsl_distro
 
     sys_b = InMemorySystemBackend(wsl_distros=("Ubuntu", "FedoraLinux-42"))
 
@@ -188,9 +201,7 @@ def test_detect_default_wsl_distro_flags_fedora_default(
 
 
 def test_wsl_baseline_distro_aware_package_manager() -> None:
-    """P2.1: apply_wsl_linux_baseline detects package manager and handles unsupported distros cleanly."""
-    from winbearable.backends.system import CommandResult
-    from winbearable.wsl import WslOperationError, apply_wsl_linux_baseline
+    """apply_wsl_linux_baseline detects package manager and handles unsupported distros cleanly."""
 
     sys_b = InMemorySystemBackend(wsl_distros=("CustomLinux",))
 
@@ -210,18 +221,7 @@ def test_wsl_baseline_distro_aware_package_manager() -> None:
 
 
 def test_wsl_conf_lf_bytes_sha256_verify_and_crlf_lint() -> None:
-    """R-07: NativeSystemBackend writes raw LF bytes (no CRLF) and lint_wsl_conf_lf flags \\r\\n."""
-    import hashlib
-    from unittest.mock import patch
-
-    from winbearable.backends.system import CommandResult, NativeSystemBackend
-    from winbearable.wsl import (
-        PreparedWslDistroPlan,
-        WslDistroConfProbe,
-        WslOperationError,
-        apply_distro_wsl_conf,
-        lint_wsl_conf_lf,
-    )
+    """NativeSystemBackend writes raw LF bytes (no CRLF) and lint_wsl_conf_lf flags \\r\\n."""
 
     # 1. CRLF lint check
     assert lint_wsl_conf_lf("[boot]\nsystemd=true\n") == {"clean": True, "has_crlf": False, "crlf_lines": []}
@@ -238,12 +238,17 @@ def test_wsl_conf_lf_bytes_sha256_verify_and_crlf_lint() -> None:
             recorded_inputs.append(input)
             return (b"", b"")
 
-    native_sys = NativeSystemBackend(platform_override="win32")
-    with patch("winbearable.backends.system.subprocess.Popen", return_value=_FakeProc()) as mock_popen:
-        native_sys._run_native_cmd(
-            ["wsl.exe", "-d", "Ubuntu", "--", "tee", "/etc/wsl.conf"], input_text="[boot]\nsystemd=true\n"
-        )
-    assert mock_popen.call_args.kwargs.get("text") is False
+    seen_popen_kwargs: list[dict[str, object]] = []
+
+    def _fake_popen(*_args: object, **kwargs: object) -> _FakeProc:
+        seen_popen_kwargs.append(kwargs)
+        return _FakeProc()
+
+    native_sys = NativeSystemBackend(platform_override="win32", popen_factory=_fake_popen)
+    native_sys._run_native_cmd(
+        ["wsl.exe", "-d", "Ubuntu", "--", "tee", "/etc/wsl.conf"], input_text="[boot]\nsystemd=true\n"
+    )
+    assert seen_popen_kwargs and seen_popen_kwargs[0].get("text") is False
     assert recorded_inputs == [b"[boot]\nsystemd=true\n"]
 
     # 3. apply_distro_wsl_conf verifies sha256sum and rejects mismatched hash (e.g. CRLF on disk)
@@ -285,9 +290,6 @@ def test_wsl_conf_lf_bytes_sha256_verify_and_crlf_lint() -> None:
 
 def test_ini_key_value_regex_avoids_backtracking() -> None:
     """KEY_VALUE_RE parses escaped quoted values and rejects pathological backslash strings in linear time."""
-    import time
-
-    from winbearable.wsl.ini import KEY_VALUE_RE
 
     m_double = KEY_VALUE_RE.match(r'key = "a\"b\\c" # tail')
     assert m_double is not None and m_double.group("val") == r'"a\"b\\c"'

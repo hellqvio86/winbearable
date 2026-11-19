@@ -8,13 +8,15 @@ import sys
 from typing import Any
 
 from ..backends.registry import RegistryBackend
+from ..backends.win32_ctypes import get_win32_dll
 from ..const import HIVE_HKLM
+from ..hyperv_firewall import get_wsl_hyperv_firewall_setting
 from ..models import EnvironmentInfo, ObservationConfidence, ObservationState, PostureObservation
 from .models import AuditFinding, safe_val
 
 
-def check_local_admins(env: EnvironmentInfo) -> AuditFinding:
-    if not env.is_windows or sys.platform != "win32":
+def check_local_admins(env: EnvironmentInfo, *, windll_override: Any = None) -> AuditFinding:
+    if windll_override is None and (not env.is_windows or sys.platform != "win32"):
         obs = PostureObservation(
             ObservationState.UNKNOWN,
             "win32:NetLocalGroupGetMembers",
@@ -24,12 +26,9 @@ def check_local_admins(env: EnvironmentInfo) -> AuditFinding:
         )
         return AuditFinding("chk.local_admins", "accounts", "Local Administrators Group", "info", obs)
     try:
-        windll: Any = getattr(ctypes, "windll", None)
-        if windll is None:
-            raise OSError("windll unavailable")
-        netapi32 = windll.netapi32
-        advapi32 = windll.advapi32
-        kernel32 = windll.kernel32
+        netapi32 = get_win32_dll("netapi32", windll_override)
+        advapi32 = get_win32_dll("advapi32", windll_override)
+        kernel32 = get_win32_dll("kernel32", windll_override)
         assert netapi32 is not None and advapi32 is not None
 
         with contextlib.suppress(AttributeError, TypeError):
@@ -133,15 +132,21 @@ def check_local_admins(env: EnvironmentInfo) -> AuditFinding:
         return AuditFinding("chk.local_admins", "accounts", "Local Administrators Group", "info", obs)
 
 
-def check_guest_account(env: EnvironmentInfo, registry: RegistryBackend) -> AuditFinding:
+def check_guest_account(
+    env: EnvironmentInfo,
+    registry: RegistryBackend,
+    *,
+    windll_override: Any = None,
+) -> AuditFinding:
     ok, val = safe_val(registry, HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Lsa", "LimitBlankPasswordUse")
-    if env.is_windows and sys.platform == "win32":
+    if windll_override is not None or (env.is_windows and sys.platform == "win32"):
         try:
-            windll: Any = getattr(ctypes, "windll", None)
-            if windll is None:
-                raise OSError("windll unavailable")
-            netapi32 = windll.netapi32
-            advapi32 = getattr(windll, "advapi32", None)
+            netapi32 = get_win32_dll("netapi32", windll_override)
+            advapi32 = (
+                get_win32_dll("advapi32", windll_override)
+                if windll_override is None
+                else getattr(windll_override, "advapi32", None)
+            )
 
             class _USER_INFO_1(ctypes.Structure):
                 _fields_ = [
@@ -245,8 +250,22 @@ def check_guest_account(env: EnvironmentInfo, registry: RegistryBackend) -> Audi
                     obs,
                     "Disable local Guest account." if not disabled else None,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            obs = PostureObservation(
+                ObservationState.UNKNOWN,
+                "win32:NetUserGetInfo",
+                ObservationConfidence.NONE,
+                f"Win32 Guest account query failed: {exc}",
+                "NetUserGetInfo raised an unexpected error; refusing to assume Guest is disabled.",
+            )
+            return AuditFinding(
+                "chk.guest_account",
+                "accounts",
+                "Guest Account State",
+                "info",
+                obs,
+                "hardening.restrict_blank_passwords",
+            )
     if ok and val is not None and val[0] == 1:
         obs = PostureObservation(
             ObservationState.DISABLED,
@@ -273,8 +292,8 @@ def check_guest_account(env: EnvironmentInfo, registry: RegistryBackend) -> Audi
     )
 
 
-def check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
-    if not env.is_windows or sys.platform != "win32":
+def check_listening_ports(env: EnvironmentInfo, *, windll_override: Any = None) -> AuditFinding:
+    if windll_override is None and (not env.is_windows or sys.platform != "win32"):
         obs = PostureObservation(
             ObservationState.UNKNOWN,
             "win32:GetExtendedTcpTable",
@@ -284,10 +303,7 @@ def check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
         )
         return AuditFinding("chk.listening_ports", "network", "Listening TCP/UDP Ports", "info", obs)
     try:
-        windll: Any = getattr(ctypes, "windll", None)
-        if windll is None:
-            raise OSError("windll unavailable")
-        iphlpapi = windll.iphlpapi
+        iphlpapi = get_win32_dll("iphlpapi", windll_override)
         with contextlib.suppress(AttributeError, TypeError):
             for tbl_fn in (iphlpapi.GetExtendedTcpTable, iphlpapi.GetExtendedUdpTable):
                 tbl_fn.argtypes = [
@@ -367,8 +383,8 @@ def check_listening_ports(env: EnvironmentInfo) -> AuditFinding:
         return AuditFinding("chk.listening_ports", "network", "Listening TCP/UDP Ports", "info", obs)
 
 
-def check_open_shares(env: EnvironmentInfo) -> AuditFinding:
-    if not env.is_windows or sys.platform != "win32":
+def check_open_shares(env: EnvironmentInfo, *, windll_override: Any = None) -> AuditFinding:
+    if windll_override is None and (not env.is_windows or sys.platform != "win32"):
         obs = PostureObservation(
             ObservationState.UNKNOWN,
             "win32:NetShareEnum",
@@ -378,10 +394,7 @@ def check_open_shares(env: EnvironmentInfo) -> AuditFinding:
         )
         return AuditFinding("chk.open_shares", "network", "Non-Default SMB Shares", "info", obs)
     try:
-        windll: Any = getattr(ctypes, "windll", None)
-        if windll is None:
-            raise OSError("windll unavailable")
-        netapi32 = windll.netapi32
+        netapi32 = get_win32_dll("netapi32", windll_override)
         with contextlib.suppress(AttributeError, TypeError):
             netapi32.NetShareEnum.argtypes = [
                 ctypes.c_wchar_p,
@@ -452,9 +465,6 @@ def check_open_shares(env: EnvironmentInfo) -> AuditFinding:
 
 
 def check_hyperv_firewall(*, powershell_clm_active: bool = False) -> AuditFinding:
-    # Hyper-V firewall uses the narrowly scoped hyperv_firewall module.
-    from ..hyperv_firewall import get_wsl_hyperv_firewall_setting
-
     if powershell_clm_active:
         obs = PostureObservation(
             ObservationState.UNKNOWN,

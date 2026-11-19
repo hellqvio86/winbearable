@@ -17,7 +17,7 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
    This hook runs:
    - `ruff check .` and `ruff format --check .`
    - `mypy src` (strict mode)
-   - `pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=80`
+   - `pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89`
    - `trufflehog` verified secret scan
    - `trivy fs --severity HIGH,CRITICAL` vulnerability scan
 3. **Never pass `--no-verify` to `git commit`.**
@@ -25,7 +25,7 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
    - Never add `windows-latest` runners for PR/push CI or test jobs (CI tests run exclusively on free `ubuntu-latest`). The sole permitted `windows-latest` job is `publish-winget-asset` in `.github/workflows/ci.yml`, which runs **only** on `release: published` to build and attach the PyInstaller Winget zip.
    - Run as much as possible **locally**:
      - Unit tests & Linux dev flow: inside the Linux **Dev Container** (`.devcontainer/devcontainer.json`, using free open-source `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`) or WSL2.
-     - Real Windows integration tests (`src/tests/test_windows_integration.py`): run locally on Windows (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py`) or in a local Windows Docker container (`Dockerfile.windows` when Docker Desktop is in Windows-container mode).
+     - Real Windows integration tests (`tests/test_windows_integration.py`): run locally on Windows (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py`) or in a local Windows Docker container (`Dockerfile.windows` when Docker Desktop is in Windows-container mode).
 
 ---
 
@@ -106,12 +106,12 @@ make release-check # lint + test + TruffleHog + Trivy
 
 - **Imports at the top of the file:** Always place all `import` / `from ... import ...` statements at the top of the module (after the module docstring and `from __future__ import annotations`). Never add inline/local imports inside functions or methods unless strictly required for an optional dependency or to break an unavoidable circular import.
 - **Idiomatic, readable, "pretty" Python:** Prefer clean dataclasses, comprehensions, context managers, `pathlib.Path`, early returns, shallow nesting, and small single-purpose helpers over verbose boilerplate or deep `if/else` chains.
-- **Reuse fixtures & helpers:** Whenever setup or cleanup repeats (in tests or production code), extract shared helpers or `pytest` fixtures in `src/tests/conftest.py` instead of duplicating setup inline.
+- **Reuse fixtures & helpers:** Whenever setup or cleanup repeats (in tests or production code), extract shared helpers or `pytest` fixtures in `tests/conftest.py` instead of duplicating setup inline.
 
 ## Testing Standards (Pythonic Pytest)
 
 - **Pure `pytest` only:** Write top-level `def test_*` functions (no `unittest.TestCase` classes, no `setUp`/`tearDown`, no `self.assert*`, no `unittest.main()`).
-- **Use fixtures idiomatically:** Share common setup (`state_store`, `registry`, `onedrive_registry`, `system`, `cli_runner`) in `src/tests/conftest.py` and use pytest's built-in `tmp_path`, `monkeypatch`, `pytest.raises`, and `@pytest.mark.*`.
+- **Use fixtures idiomatically:** Share common setup (`state_store`, `registry`, `onedrive_registry`, `system`, `cli_runner`) in `tests/conftest.py` and use pytest's built-in `tmp_path`, `monkeypatch`, `pytest.raises`, and `@pytest.mark.*`.
 - **Descriptive test names:** Name tests for the behavior under test (`test_<subject>_<behavior_or_outcome>`). Never prefix test names with ticket, phase, or version IDs (no `test_p0_*`, `test_p2_1_*`, `test_v070_*`).
 - **Happy path + error path coverage (mandatory):** Every new feature, tweak, or helper must have tests covering **both** the happy path (e.g., `detect -> apply -> detect -> rollback -> detect` with valid inputs) and realistic error/failure paths (e.g., invalid/missing `[params]`, policy conflicts, unsupported builds, malformed files, I/O or subprocess failures, permission denied). Coverage percentage is only a floor—meaningful behavioral assertions on both success and failure cases are required.
 

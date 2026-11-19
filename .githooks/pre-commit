@@ -14,12 +14,20 @@ TRIVY_VERSION="0.76.2"
 if [[ -d "${HOME}/.local/bin" && ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
     export PATH="${HOME}/.local/bin:${PATH}"
 fi
-if [[ -d "${REPO_ROOT}/.venv/bin" ]]; then
-    export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
-fi
-if [[ -d "${REPO_ROOT}/.venv/Scripts" ]]; then
-    export PATH="${REPO_ROOT}/.venv/Scripts:${PATH}"
-fi
+case "$(uname -s 2>/dev/null || echo "")" in
+    MINGW*|MSYS*|CYGWIN*)
+        if [[ -d "${REPO_ROOT}/.venv/Scripts" ]]; then
+            export PATH="${REPO_ROOT}/.venv/Scripts:${PATH}"
+        elif [[ -n "${TEMP:-}" && -d "${TEMP}/wb-venv-win/Scripts" ]]; then
+            export PATH="$(cygpath -u "${TEMP}")/wb-venv-win/Scripts:${PATH}"
+        fi
+        ;;
+    *)
+        if [[ -d "${REPO_ROOT}/.venv/bin" ]]; then
+            export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
+        fi
+        ;;
+esac
 
 # Enable real Windows integration tests automatically when pre-commit runs on Windows
 case "$(uname -s 2>/dev/null || echo "")" in
@@ -73,17 +81,30 @@ to_wsl_path() {
     local p="$1"
     if [[ "$p" =~ ^/([a-zA-Z])/(.*)$ ]]; then
         echo "/mnt/${BASH_REMATCH[1],,}/${BASH_REMATCH[2]}"
+    elif [[ -n "${WINBEARABLE_WSL_DISTRO:-}" ]]; then
+        wsl.exe -d "${WINBEARABLE_WSL_DISTRO}" -- wslpath -a "$p" | tr -d '\r'
     else
-        wsl.exe -d Ubuntu-24.04 -- wslpath -a "$p" | tr -d '\r'
+        wsl.exe -- wslpath -a "$p" | tr -d '\r'
+    fi
+}
+
+run_wsl_docker() {
+    if [[ -n "${WINBEARABLE_WSL_DISTRO:-}" ]]; then
+        wsl.exe -d "${WINBEARABLE_WSL_DISTRO}" -- docker "$@"
+    else
+        wsl.exe -- docker "$@"
     fi
 }
 
 echo "--> [3/4] Running TruffleHog secret scan (container)..."
 if command -v docker >/dev/null 2>&1; then
     run_docker run --rm -v "$REPO_ROOT":/src -w /src "trufflesecurity/trufflehog:${TRUFFLEHOG_VERSION}" git file:///src --only-verified --fail
+elif command -v docker.exe >/dev/null 2>&1; then
+    WIN_REPO="$(cygpath -w "$REPO_ROOT" 2>/dev/null || wslpath -w "$REPO_ROOT")"
+    docker.exe run --rm -v "${WIN_REPO}:/src" -w /src "trufflesecurity/trufflehog:${TRUFFLEHOG_VERSION}" git file:///src --only-verified --fail
 elif command -v wsl.exe >/dev/null 2>&1; then
     WSL_REPO="$(to_wsl_path "$REPO_ROOT")"
-    wsl.exe -d Ubuntu-24.04 -- docker run --rm -v "${WSL_REPO}:/src" -w /src "trufflesecurity/trufflehog:${TRUFFLEHOG_VERSION}" git file:///src --only-verified --fail
+    run_wsl_docker run --rm -v "${WSL_REPO}:/src" -w /src "trufflesecurity/trufflehog:${TRUFFLEHOG_VERSION}" git file:///src --only-verified --fail
 else
     echo "ERROR: docker is required to run TruffleHog container!" >&2
     exit 1
@@ -91,10 +112,13 @@ fi
 
 echo "--> [4/4] Running Trivy vulnerability scan (container)..."
 if command -v docker >/dev/null 2>&1; then
-    run_docker run --rm -v "$REPO_ROOT":/src -v trivy-cache:/root/.cache -w /src "aquasec/trivy:${TRIVY_VERSION}" fs --scanners vuln --skip-dirs .venv,.mypy_cache,.ruff_cache,.pytest_cache --severity HIGH,CRITICAL --exit-code 1 .
+    run_docker run --rm -v "$REPO_ROOT":/src -v trivy-cache:/root/.cache -w /src "aquasec/trivy:${TRIVY_VERSION}" fs --scanners vuln --skip-dirs .venv,.venv-win,.mypy_cache,.ruff_cache,.pytest_cache --severity HIGH,CRITICAL --exit-code 1 .
+elif command -v docker.exe >/dev/null 2>&1; then
+    WIN_REPO="$(cygpath -w "$REPO_ROOT" 2>/dev/null || wslpath -w "$REPO_ROOT")"
+    docker.exe run --rm -v "${WIN_REPO}:/src" -v trivy-cache:/root/.cache -w /src "aquasec/trivy:${TRIVY_VERSION}" fs --scanners vuln --skip-dirs .venv,.venv-win,.mypy_cache,.ruff_cache,.pytest_cache --severity HIGH,CRITICAL --exit-code 1 .
 elif command -v wsl.exe >/dev/null 2>&1; then
     WSL_REPO="$(to_wsl_path "$REPO_ROOT")"
-    wsl.exe -d Ubuntu-24.04 -- docker run --rm -v "${WSL_REPO}:/src" -v trivy-cache:/root/.cache -w /src "aquasec/trivy:${TRIVY_VERSION}" fs --scanners vuln --skip-dirs .venv,.mypy_cache,.ruff_cache,.pytest_cache --severity HIGH,CRITICAL --exit-code 1 .
+    run_wsl_docker run --rm -v "${WSL_REPO}:/src" -v trivy-cache:/root/.cache -w /src "aquasec/trivy:${TRIVY_VERSION}" fs --scanners vuln --skip-dirs .venv,.venv-win,.mypy_cache,.ruff_cache,.pytest_cache --severity HIGH,CRITICAL --exit-code 1 .
 else
     echo "ERROR: docker is required to run Trivy container!" >&2
     exit 1

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..backends.registry import RegistryBackend
@@ -21,6 +21,7 @@ from ..models import (
     TweakCheckResult,
     TweakDefinition,
     TweakStatus,
+    UnsupportedPlatformError,
 )
 from ..state import StateStoreError
 
@@ -239,6 +240,7 @@ class ApplySummary:
     rolled_back_ids: tuple[str, ...] = ()
     wsl_result: dict[str, Any] | None = None
     plan_digest: str = ""
+    precondition_fingerprints: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize summary to a JSON-compatible dictionary."""
@@ -247,6 +249,7 @@ class ApplySummary:
             "dry_run": self.dry_run,
             "run_id": self.run_id,
             "plan_digest": self.plan_digest,
+            "precondition_fingerprints": dict(self.precondition_fingerprints),
             "applied_ids": list(self.applied_ids),
             "rolled_back_ids": list(self.rolled_back_ids),
             "already_applied_ids": list(self.already_applied_ids),
@@ -352,3 +355,18 @@ def summarize_elevation_requirements(evaluations: list[TweakCheckResult]) -> dic
         "user_scope_operations": user_scope_ops,
         "mixed_privilege": mixed_privilege,
     }
+
+
+def require_native_backends(
+    registry: RegistryBackend,
+    system: SystemBackend,
+    allow_simulated: bool,
+) -> None:
+    """Refuse mutating operations against simulated backends unless allow_simulated is set."""
+    if allow_simulated:
+        return
+    if getattr(registry, "is_simulated", False) or getattr(system, "is_simulated", False):
+        raise UnsupportedPlatformError(
+            "Refusing mutating operation against simulated/in-memory backend. "
+            "Use native Windows backends for real changes."
+        )

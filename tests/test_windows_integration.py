@@ -1,21 +1,35 @@
 """Safe local Windows integration tests (disposable HKCU keys + read-only native checks)."""
 
+import hashlib
 import importlib
 import io
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import uuid
 from contextlib import redirect_stdout, suppress
 from pathlib import Path
 from typing import Any
+
+if sys.platform == "win32":
+    import winreg as winreg_mod
+else:
+    winreg_mod = None  # type: ignore[assignment]
 
 import pytest
 
 from winbearable.backends.registry import WinregBackend
 from winbearable.backends.system import NativeSystemBackend
 from winbearable.cli import run_cli
-from winbearable.const import HIVE_HKCU, REG_BINARY, REG_DWORD, REG_MULTI_SZ, REG_QWORD, REG_SZ
+from winbearable.const import HIVE_HKCU, REG_BINARY, REG_DWORD, REG_MULTI_SZ, REG_QWORD, REG_SZ, WSL_VM_CREATOR_ID
+from winbearable.engine import recover_incomplete_runs
+from winbearable.hyperv_firewall import get_wsl_hyperv_firewall_setting
+from winbearable.models import FileSpec, RegistryValueSnapshot, RunRecord, TransactionState
+from winbearable.operations import apply_file_spec, restore_file_snapshot, snapshot_file_spec
+from winbearable.state import StateStore
+from winbearable.uac import _get_win32_dlls, set_console_title
 
 _RUN_WIN_INTEGRATION = sys.platform == "win32" and os.environ.get("WINBEARABLE_RUN_WINDOWS_INTEGRATION") == "1"
 
@@ -84,13 +98,6 @@ def test_readonly_native_system_and_doctor_contract() -> None:
 
 def test_disposable_hkcu_apply_crash_and_recover() -> None:
     """Simulate an interrupted HKCU mutation in real StateStore and recover cleanly."""
-    import tempfile
-    import winreg as winreg_mod
-    from pathlib import Path
-
-    from winbearable.engine import recover_incomplete_runs
-    from winbearable.models import RegistryValueSnapshot, RunRecord, TransactionState
-    from winbearable.state import StateStore
 
     reg = WinregBackend()
     sys_b = NativeSystemBackend()
@@ -133,7 +140,7 @@ def test_disposable_hkcu_apply_crash_and_recover() -> None:
 
 
 def test_readonly_plan_all_profiles_and_audit() -> None:
-    """QA-02: Run read-only `wb plan --json` for every built-in profile and `wb audit --json` on real Windows."""
+    """Run read-only `wb plan --json` for every built-in profile and `wb audit --json` on real Windows."""
     reg = WinregBackend()
     sys_b = NativeSystemBackend()
     for profile in ("user-only", "corp-safe", "dev-comfort", "privacy", "owner", "paranoid", "hardened-baseline"):
@@ -155,8 +162,7 @@ def test_readonly_plan_all_profiles_and_audit() -> None:
 
 
 def test_readonly_identifier_snapshot_capture() -> None:
-    """P0.4: Capture read-only sc/schtasks/auditpol snapshots on real Windows for offline verification."""
-    import subprocess
+    """Capture read-only sc/schtasks/auditpol snapshots on real Windows for offline verification."""
 
     sc_res = subprocess.run(["sc.exe", "query", "type=", "service", "state=", "all"], capture_output=True, text=True)
     assert sc_res.returncode == 0
@@ -169,12 +175,6 @@ def test_readonly_identifier_snapshot_capture() -> None:
 
 def test_windows_state_restore_and_byte_exact_file_snapshot(tmp_path: Path) -> None:
     """Verify StateStore backup preservation, byte-exact FileSnapshot, and Win32 UAC ctypes contracts on Windows."""
-    import hashlib
-
-    from winbearable.models import FileSpec, RunRecord, TransactionState
-    from winbearable.operations import apply_file_spec, restore_file_snapshot, snapshot_file_spec
-    from winbearable.state import StateStore
-    from winbearable.uac import _get_win32_dlls, set_console_title
 
     store = StateStore(tmp_path / "state.json")
     rec = RunRecord(
@@ -208,8 +208,6 @@ def test_windows_state_restore_and_byte_exact_file_snapshot(tmp_path: Path) -> N
 
 def test_windows_hyperv_firewall_readonly_query() -> None:
     """Verify read-only Hyper-V firewall query returns structured dict or None cleanly on Windows."""
-    from winbearable.const import WSL_VM_CREATOR_ID
-    from winbearable.hyperv_firewall import get_wsl_hyperv_firewall_setting
 
     res = get_wsl_hyperv_firewall_setting()
     if res is not None:

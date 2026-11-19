@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -141,8 +142,6 @@ def migrate_profile_file(
     needs_write = was_migrated or format_changed
 
     if not dry_run and needs_write:
-        import tempfile
-
         target_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_str = tempfile.mkstemp(prefix=f"{target_path.name}.", dir=str(target_path.parent))
         try:

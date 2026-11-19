@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
-from ..models import RunRecord, TransactionState
+from ..models import RollbackConflictError, RollbackFailureError, RunRecord, TransactionState
 from ..state import StateStore
-from .apply import compensate_run_record, require_native_backends
-from .params import IncompleteJournalError
+from .apply import compensate_run_record
+from .params import IncompleteJournalError, require_native_backends
 
 
 def rollback_runs(
@@ -23,8 +24,6 @@ def rollback_runs(
     force: bool = False,
 ) -> list[RunRecord]:
     """Revert the latest run (or all runs back to to_run_id inclusive)."""
-    from contextlib import nullcontext
-
     if not dry_run:
         require_native_backends(registry, system, allow_simulated)
 
@@ -50,15 +49,7 @@ def recover_incomplete_runs(
     force: bool = False,
     keep_conflicts: bool = False,
 ) -> list[RunRecord]:
-    """Idempotently inspect and recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) runs.
-
-    Recovery is snapshot-based (per-tweak journal flush). For ``FAILED`` runs where compensation
-    was already attempted, package/extension uninstalls are skipped unless ``force=True``.
-    When ``keep_conflicts=True`` and all remaining errors are ``restore_conflict``, transitions
-    the run to ``PARTIALLY_ROLLED_BACK`` so user edits are preserved and future applies are unblocked.
-    """
-    from contextlib import nullcontext
-
+    """Idempotently inspect and recover incomplete (PLANNED/APPLYING/ROLLING_BACK/FAILED) runs."""
     if not dry_run:
         require_native_backends(registry, system, allow_simulated)
 
@@ -94,7 +85,20 @@ def recover_incomplete_runs(
             else:
                 final_state = TransactionState.FAILED
             final_error = "; ".join(comp_errors) if comp_errors else rec.error
-            final_rec = replace(rec, state=final_state, error=final_error)
+            updated_journal = tuple(
+                replace(
+                    entry,
+                    rollback_outcome=(
+                        "conflict"
+                        if any(entry.target_id in err or entry.tweak_id in err for err in comp_errors)
+                        else (
+                            "rolled_back" if entry.outcome == "applied" and not comp_errors else entry.rollback_outcome
+                        )
+                    ),
+                )
+                for entry in rec.operation_journal
+            )
+            final_rec = replace(rec, state=final_state, error=final_error, operation_journal=updated_journal)
             state_store.upsert_run(final_rec)
             recovered.append(final_rec)
         return recovered
@@ -155,8 +159,14 @@ def _rollback_runs_impl(
                         error=err_msg,
                     )
                 )
-                raise RuntimeError(err_msg)
-            done = replace(run_record, state=TransactionState.ROLLED_BACK)
+                if all(err.startswith("restore_conflict ") for err in comp_errors):
+                    raise RollbackConflictError(err_msg, context={"run_id": run_record.run_id, "errors": comp_errors})
+                raise RollbackFailureError(err_msg, context={"run_id": run_record.run_id, "errors": comp_errors})
+            updated_journal = tuple(
+                replace(entry, rollback_outcome="rolled_back") if entry.outcome == "applied" else entry
+                for entry in run_record.operation_journal
+            )
+            done = replace(run_record, state=TransactionState.ROLLED_BACK, operation_journal=updated_journal)
             state_store.upsert_run(done)
             reverted_records.append(done)
         return reverted_records

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import shutil
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -139,13 +138,7 @@ def prepare_wsl_plan(
     installed_wsl_version: str | None = None,
 ) -> PreparedWslPlan:
     """Read host .wslconfig and probe all target distros before any WSL mutation occurs."""
-    pkg_mod = sys.modules.get("winbearable.wsl")
-    default_path_fn = (
-        getattr(pkg_mod, "get_default_wslconfig_path", get_default_wslconfig_path)
-        if pkg_mod is not None
-        else get_default_wslconfig_path
-    )
-    target_wslconfig = wslconfig_path or default_path_fn()
+    target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     baseline_existed = target_wslconfig.is_file()
     baseline_bytes = target_wslconfig.read_bytes() if baseline_existed else b""
     baseline_sha256 = hashlib.sha256(baseline_bytes).hexdigest() if baseline_existed else None
@@ -295,13 +288,7 @@ def plan_or_apply_wsl(
     installed_wsl_version: str | None = None,
 ) -> dict[str, Any]:
     """Plan or apply .wslconfig (sizing memory to 75% of host RAM) and per-distro /etc/wsl.conf."""
-    pkg_mod = sys.modules.get("winbearable.wsl")
-    default_path_fn = (
-        getattr(pkg_mod, "get_default_wslconfig_path", get_default_wslconfig_path)
-        if pkg_mod is not None
-        else get_default_wslconfig_path
-    )
-    target_wslconfig = wslconfig_path or default_path_fn()
+    target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     had_wslconfig = target_wslconfig.is_file()
     existing_wslconfig = target_wslconfig.read_text(encoding="utf-8").lstrip("\ufeff") if had_wslconfig else ""
 

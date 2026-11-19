@@ -1,18 +1,79 @@
-"""Targeted pure-pytest coverage tests for validation and UAC edge cases (QA-05)."""
+"""Targeted pure-pytest coverage tests for validation and UAC edge cases."""
 
 from __future__ import annotations
 
+import hashlib
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from winbearable.const import DEFAULT_TESTED_BUILDS, HIVE_HKCU, MIN_SUPPORTED_BUILD
+from winbearable.backends.registry import InMemoryRegistryBackend
+from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+from winbearable.cli import run_cli
+from winbearable.const import (
+    DEFAULT_TESTED_BUILDS,
+    HIVE_HKCU,
+    HIVE_HKLM,
+    MAX_CMD_OUTPUT_CHARS,
+    MIN_SUPPORTED_BUILD,
+    REG_DWORD,
+    REG_SZ,
+    WSL_VM_CREATOR_ID,
+)
+from winbearable.engine import (
+    IncompleteJournalError,
+    _compensate_run_record,
+    _execute_tweak_mutations,
+    _TweakMutationError,
+    apply_profile,
+    inspect_defender_smartscreen_posture,
+    inspect_vbs_credential_guard_posture,
+    recover_incomplete_runs,
+    rollback_runs,
+)
+from winbearable.hyperv_firewall import _default_ps_runner
 from winbearable.models import (
+    AuditpolSnapshot,
+    FileSnapshot,
+    FileSpec,
+    FirewallGroupSnapshot,
+    FsutilCaseSensitiveSpec,
+    FsutilSnapshot,
+    GitConfigSnapshot,
+    GitConfigSpec,
+    OperationStatus,
+    OptionalFeatureSnapshot,
+    PowercfgHibernateSpec,
+    PowercfgSnapshot,
+    ProfileSpec,
+    RegistryKeySnapshot,
+    RegistryValueSnapshot,
     RiskLevel,
+    RunRecord,
+    ScheduledTaskSnapshot,
+    ServiceSnapshot,
     ServiceSpec,
+    TransactionState,
     TweakDefinition,
     TweakProvenance,
+    WevtutilSnapshot,
+    WslConfigSpec,
+    WslDistroSnapshot,
+)
+from winbearable.operations import apply_file_spec, merge_file_content, restore_file_snapshot, snapshot_file_spec
+from winbearable.profiles import MAX_PROFILE_INHERITANCE_DEPTH, ProfileValidationError, load_profile
+from winbearable.state import StateStore
+from winbearable.wsl import (
+    WslOperationError,
+    apply_wslconfig_target,
+    export_wsl_distro,
+    get_wsl_distro_guid,
+    merge_ini_preserving_comments,
+    prepare_wsl_plan,
+    probe_distro_wsl_conf,
 )
 
 
@@ -51,24 +112,6 @@ def _sample_tweak(tweak_id: str = "test.one", **overrides: object) -> TweakDefin
 
 def test_engine_compensate_run_record_all_snapshot_types_and_errors(tmp_path: Path) -> None:
     """Cover _compensate_run_record across all snapshot types including error paths."""
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import InMemorySystemBackend
-    from winbearable.engine import _compensate_run_record
-    from winbearable.models import (
-        AuditpolSnapshot,
-        FileSnapshot,
-        FirewallGroupSnapshot,
-        FsutilSnapshot,
-        GitConfigSnapshot,
-        OptionalFeatureSnapshot,
-        PowercfgSnapshot,
-        RegistryKeySnapshot,
-        RegistryValueSnapshot,
-        RunRecord,
-        ScheduledTaskSnapshot,
-        ServiceSnapshot,
-        WevtutilSnapshot,
-    )
 
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(is_admin=True)
@@ -126,16 +169,6 @@ def test_engine_compensate_run_record_all_snapshot_types_and_errors(tmp_path: Pa
 
 def test_engine_posture_inspection_variants_and_apply_failures(tmp_path: Path) -> None:
     """Cover defender/smartscreen/vbs posture variants and engine apply failure branches."""
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import InMemorySystemBackend
-    from winbearable.const import HIVE_HKLM
-    from winbearable.engine import (
-        _execute_tweak_mutations,
-        _TweakMutationError,
-        inspect_defender_smartscreen_posture,
-        inspect_vbs_credential_guard_posture,
-    )
-    from winbearable.models import FsutilCaseSensitiveSpec, GitConfigSpec, PowercfgHibernateSpec
 
     reg = InMemoryRegistryBackend()
     assert inspect_defender_smartscreen_posture(reg)["smartscreen"]["state"] == "unset"
@@ -191,19 +224,8 @@ def test_engine_posture_inspection_variants_and_apply_failures(tmp_path: Path) -
 
 def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Cover backup preservation, symlink-safe pruning, INI case matching, TOML scope, and byte-exact FileSnapshot."""
-    import hashlib
-    import subprocess
-    from unittest.mock import patch
 
-    from winbearable.backends.system import NativeSystemBackend
-    from winbearable.const import MAX_CMD_OUTPUT_CHARS, WSL_VM_CREATOR_ID
-    from winbearable.hyperv_firewall import _default_ps_runner
-    from winbearable.models import FileSpec, RunRecord, TransactionState
-    from winbearable.operations import apply_file_spec, merge_file_content, restore_file_snapshot, snapshot_file_spec
-    from winbearable.state import StateStore
-    from winbearable.wsl import merge_ini_preserving_comments
-
-    # P1.3 + P1.8: restore_from_backup preserves valid state.json.bak; pruning skips symlinks & warns
+    # restore_from_backup preserves valid state.json.bak; pruning skips symlinks & warns
     store = StateStore(tmp_path / "state.json")
     good_run = RunRecord(
         run_id="run-good",
@@ -236,7 +258,7 @@ def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytes
     assert any("symlink" in w.lower() for w in warnings)
     assert outside.is_dir()
 
-    # P1.1: Case-insensitive INI merge avoids duplicate sections/keys and is idempotent
+    # Case-insensitive INI merge avoids duplicate sections/keys and is idempotent
     ini_in = "\ufeff# header\n[WSL2]\nMemory=4GB ; keep\nmemory=2GB\n"
     merged_once = merge_ini_preserving_comments(ini_in, {"wsl2": {"memory": "8GB", "dnsTunneling": "true"}})
     assert merged_once.lower().count("[wsl2]") == 1
@@ -246,7 +268,7 @@ def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytes
         merge_ini_preserving_comments(merged_once, {"wsl2": {"memory": "8GB", "dnsTunneling": "true"}}) == merged_once
     )
 
-    # P1.2: Hyper-V timeout cleanup bounds taskkill.exe and post-kill communicate
+    # Hyper-V timeout cleanup bounds taskkill.exe and post-kill communicate
     fake_proc = MagicMock()
     fake_proc.pid = 999
     fake_proc.communicate.side_effect = [
@@ -265,16 +287,15 @@ def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytes
     fake_proc.stdout.close.assert_called_once()
     fake_proc.stderr.close.assert_called_once()
 
-    # P1.4: _run_native_cmd bounds oversized output
-    win_sys = NativeSystemBackend()
+    # _run_native_cmd bounds oversized output
     big_proc = MagicMock()
     big_proc.returncode = 0
     big_proc.communicate.return_value = ("X" * (MAX_CMD_OUTPUT_CHARS + 50), "")
-    with patch("winbearable.backends.system.subprocess.Popen", return_value=big_proc):
-        cmd_res = win_sys._run_native_cmd(["cmd.exe", "/c", "echo"])
+    win_sys = NativeSystemBackend(popen_factory=lambda *a, **kw: big_proc)
+    cmd_res = win_sys._run_native_cmd(["cmd.exe", "/c", "echo"])
     assert "truncated at" in cmd_res.stdout
 
-    # P1.5 + P1.6: Byte-preserving FileSnapshot (BOM + CRLF) and absent-file race refusal
+    # Byte-preserving FileSnapshot (BOM + CRLF) and absent-file race refusal
     bom_crlf_file = tmp_path / "cfg.json"
     orig_bytes = b'\xef\xbb\xbf{\r\n  "keep": 1\r\n}\r\n'
     bom_crlf_file.write_bytes(orig_bytes)
@@ -298,33 +319,20 @@ def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(ValueError, match="Unsupported non-UTF-8"):
         snapshot_file_spec(FileSpec(path_template=str(bad_utf8), file_format="json", desired_keys={"a": 1}))
 
-    # P1.7: TOML merge updates top-level without touching same-named key inside [table]
+    # TOML merge updates top-level without touching same-named key inside [table]
     toml_src = '[other]\nmode = "keep"\n'
     merged_toml = merge_file_content(toml_src, "toml", {"mode": "strict"})
     assert merged_toml.startswith('mode = "strict"\n[other]\nmode = "keep"')
 
 
 def test_per_item_policy_rollback_wslconfig_absent_and_journal_hygiene(tmp_path: Path) -> None:
-    """R-04, R-09, R-10: per-item firewall/auditpol rollback, absent .wslconfig deletion, and journal hygiene."""
-    from unittest.mock import patch
+    """per-item firewall/auditpol rollback, absent .wslconfig deletion, and journal hygiene."""
 
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import InMemorySystemBackend
-    from winbearable.engine import rollback_runs
-    from winbearable.models import (
-        AuditpolSnapshot,
-        FirewallGroupSnapshot,
-        RunRecord,
-        TransactionState,
-        WslDistroSnapshot,
-    )
-    from winbearable.state import StateStore
-
-    # R-10: WslDistroSnapshot.from_dict handles JSON null previous_content without turning it into "None"
+    # WslDistroSnapshot.from_dict handles JSON null previous_content without turning it into "None"
     d_snap = WslDistroSnapshot.from_dict({"distro": "Ubuntu", "existed": False, "previous_content": None})
     assert d_snap.previous_content == ""
 
-    # R-04 + R-09: per-item rollback does not call import_firewall_policy / restore_auditpol by default,
+    # per-item rollback does not call import_firewall_policy / restore_auditpol by default,
     # and deletes .wslconfig when wslconfig_existed=False
     wfw = tmp_path / "fw.wfw"
     wfw.write_text("full-export", encoding="utf-8")
@@ -374,18 +382,8 @@ def test_per_item_policy_rollback_wslconfig_absent_and_journal_hygiene(tmp_path:
 
 def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profile_depth(tmp_path: Path) -> None:
     """Post-apply drift conflict, .wslconfig concurrency, bounded stdout, distro GUID, and profile depth."""
-    import sys
 
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import InMemorySystemBackend, NativeSystemBackend
-    from winbearable.const import REG_DWORD, REG_SZ
-    from winbearable.engine import apply_profile, rollback_runs
-    from winbearable.models import ProfileSpec, RunRecord, TransactionState, WslConfigSpec, WslDistroSnapshot
-    from winbearable.profiles import MAX_PROFILE_INHERITANCE_DEPTH, ProfileValidationError, load_profile
-    from winbearable.state import StateStore
-    from winbearable.wsl import WslOperationError, apply_wslconfig_target, get_wsl_distro_guid, prepare_wsl_plan
-
-    # P0.4: post-apply external registry edit triggers restore_conflict and preserves external value
+    # post-apply external registry edit triggers restore_conflict and preserves external value
     reg = InMemoryRegistryBackend(
         initial_values={
             (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt"): (1, REG_DWORD)
@@ -411,7 +409,7 @@ def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profil
         REG_DWORD,
     )
 
-    # P1.1: .wslconfig modified between prepare_wsl_plan and apply_wslconfig_target raises WslOperationError
+    # .wslconfig modified between prepare_wsl_plan and apply_wslconfig_target raises WslOperationError
     wsl_cfg = tmp_path / ".wslconfig"
     wsl_cfg.write_text("[wsl2]\nmemory=2GB\n", encoding="utf-8")
     plan = prepare_wsl_plan(
@@ -424,8 +422,7 @@ def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profil
     with pytest.raises(WslOperationError, match="Concurrent modification"):
         apply_wslconfig_target(plan)
 
-    # P1.5: _run_native_cmd bounds large stdout/stderr during streaming capture
-    from winbearable.const import MAX_CMD_OUTPUT_CHARS
+    # _run_native_cmd bounds large stdout/stderr during streaming capture
 
     native_lin = NativeSystemBackend(platform_override="linux")
     big_res = native_lin._run_native_cmd(
@@ -434,7 +431,7 @@ def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profil
     assert big_res.returncode == 0
     assert "truncated" in big_res.stdout
 
-    # P1.7: Lxss distro_guid mismatch aborts distro rollback
+    # Lxss distro_guid mismatch aborts distro rollback
     lxss_reg = InMemoryRegistryBackend(
         initial_values={
             (HIVE_HKCU, r"Software\Microsoft\Windows\CurrentVersion\Lxss\{NEW-GUID}", "DistributionName"): (
@@ -460,7 +457,7 @@ def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profil
     with pytest.raises(RuntimeError, match="identity mismatch"):
         rollback_runs(store_guid, lxss_reg, sysb, dry_run=False, allow_simulated=True)
 
-    # P2.1: load_profile bounds inheritance depth with ProfileValidationError
+    # load_profile bounds inheritance depth with ProfileValidationError
     for idx in range(MAX_PROFILE_INHERITANCE_DEPTH + 2):
         p_file = tmp_path / f"chain_{idx}.toml"
         ext_line = f'extends = "chain_{idx - 1}"\n' if idx > 0 else ""
@@ -471,22 +468,6 @@ def test_post_apply_drift_wsl_concurrency_bounded_capture_distro_guid_and_profil
 
 def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_path: Path) -> None:
     """P0-WSL-EXPORT-PRUNE, P0-RECOVER-FAILED, P0-SERVICE-START-MAP, P1-CHECKPOINT, and P1-MULTI-DISTRO-WSL."""
-    from unittest.mock import patch
-
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
-    from winbearable.const import HIVE_HKLM, REG_DWORD
-    from winbearable.engine import apply_profile, recover_incomplete_runs
-    from winbearable.models import (
-        OperationStatus,
-        ProfileSpec,
-        RegistryValueSnapshot,
-        RunRecord,
-        TransactionState,
-        WslConfigSpec,
-    )
-    from winbearable.state import StateStore
-    from winbearable.wsl import export_wsl_distro
 
     # P0-WSL-EXPORT-PRUNE + P1-EXPORT-SIDE-CAR-PAIRING: keep_last=1 keeps new .tar + .sha256 and deletes older pairs
     exp_dir = tmp_path / "exports"
@@ -595,8 +576,6 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
             distro_confs[distro] = input_text
             return CommandResult(tuple(args), 0, "", "")
         if "sha256sum" in args:
-            import hashlib
-
             digest = hashlib.sha256(distro_confs[distro].encode("utf-8")).hexdigest()
             return CommandResult(tuple(args), 0, f"{digest}  /etc/wsl.conf\n", "")
         return CommandResult(tuple(args), 0, "", "")
@@ -625,17 +604,6 @@ def test_wsl_export_prune_recover_failed_service_start_map_and_multi_distro(tmp_
 
 def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(tmp_path: Path) -> None:
     """Verify idempotent recovery, rollback ordering, UAC writer resilience, UTF-16 -d decoding, and pruning."""
-    from unittest.mock import patch
-
-    from winbearable.backends.registry import InMemoryRegistryBackend
-    from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
-    from winbearable.cli import run_cli
-    from winbearable.const import REG_DWORD, REG_SZ
-    from winbearable.engine import IncompleteJournalError, apply_profile, recover_incomplete_runs, rollback_runs
-    from winbearable.models import OperationStatus, RegistryValueSnapshot
-    from winbearable.profiles import load_profile
-    from winbearable.state import StateStore
-    from winbearable.wsl import probe_distro_wsl_conf
 
     # N-01: partial rollback + recover reports only the single external conflict, not already-restored items
     store = StateStore(tmp_path / "state_n01.json")
@@ -692,7 +660,6 @@ def test_idempotent_recovery_rollback_ordering_wsl_perm_uac_writer_and_pruning(t
     assert rc == 0
 
     # N-08: elevated user-writable code.cmd skips extension install cleanly without rolling back
-    from winbearable.models import ProfileSpec
 
     ext_sys = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
     ext_sys.installed_winget_packages.add("Microsoft.VisualStudioCode")
