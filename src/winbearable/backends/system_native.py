@@ -103,6 +103,7 @@ class NativeSystemBackend(NativeAppMixin):
         self._windll_override = windll_override
         self._setup_candidates = setup_candidates
         self._popen_factory: Callable[..., Any] = popen_factory or subprocess.Popen
+        self._has_custom_popen: bool = popen_factory is not None
         self._wsl2_fn: Callable[[], bool] = wsl2_fn or is_wsl2
         self._find_reg_fn: Callable[[], str | None] = find_reg_fn or find_wsl_reg_exe
         self._winget_installed_cache: dict[str, bool] = {}
