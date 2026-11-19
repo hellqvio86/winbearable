@@ -175,7 +175,7 @@ class StateStore:
 
     def __init__(self, state_path: Path | None = None) -> None:
         self.state_path = state_path or resolve_state_path()
-        self._tx_rlock = threading.RLock()
+        self._tx_lock = threading.Lock()
         self.last_cleanup_warnings: list[str] = []
 
     @staticmethod
@@ -241,7 +241,7 @@ class StateStore:
     @contextmanager
     def transaction_lock(self) -> Iterator[None]:
         """Serialize mutating apply/rollback transactions across threads and processes."""
-        with self._tx_rlock, self._file_lock(".tx.lock"):
+        with self._tx_lock, self._file_lock(".tx.lock"):
             yield
 
     def _load_runs_unlocked(self) -> list[RunRecord]:
@@ -426,13 +426,14 @@ class StateStore:
         if update_backup:
             self._write_backup_atomic_unlocked()
         self._write_runs_atomic_unlocked(runs)
-        self.last_cleanup_warnings = self._prune_old_backups_unlocked(
-            runs,
-            prune_unreferenced=True,
-            known_ids=all_known_ids,
-        )
-        for warning in self.last_cleanup_warnings:
-            _logger.warning(warning, extra={"event": "state.backup_cleanup_warning"})
+        if update_backup:
+            self.last_cleanup_warnings = self._prune_old_backups_unlocked(
+                runs,
+                prune_unreferenced=True,
+                known_ids=all_known_ids,
+            )
+            for warning in self.last_cleanup_warnings:
+                _logger.warning(warning, extra={"event": "state.backup_cleanup_warning"})
 
     def restore_from_backup(self) -> bool:
         """Validate and restore state.json from state.json.bak without overwriting the backup."""
@@ -584,17 +585,11 @@ class StateStore:
         }
         health["incomplete_run_ids"] = [r.run_id for r in runs if r.state in incomplete_states]
         referenced_ids = {r.run_id for r in runs}
-        missing_files: list[str] = []
-        for run in runs:
-            for bfile in _iter_run_backup_paths(run):
-                if not bfile.is_file():
-                    missing_files.append(str(bfile))
-        health["missing_backup_files"] = sorted(set(missing_files))
-
-        orphans: list[str] = []
+        health["missing_backup_files"] = sorted(
+            {str(bf) for run in runs for bf in _iter_run_backup_paths(run) if not bf.is_file()}
+        )
         if backups_root.is_dir() and not is_reparse_or_symlink(backups_root):
-            for entry in sorted(backups_root.iterdir()):
-                if entry.is_dir() and entry.name not in referenced_ids:
-                    orphans.append(entry.name)
-        health["orphaned_backup_dirs"] = orphans
+            health["orphaned_backup_dirs"] = [
+                e.name for e in sorted(backups_root.iterdir()) if e.is_dir() and e.name not in referenced_ids
+            ]
         return health

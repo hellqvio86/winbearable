@@ -1,0 +1,261 @@
+"""Regression tests for thread-local outcomes, query caches, ACL/column security, and port boundaries."""
+
+from __future__ import annotations
+
+import ctypes
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend, NativeSystemBackend
+from winbearable.backends.system_protocol import CommandResult
+from winbearable.backends.win32_acl import (
+    apply_windows_private_acl,
+    find_permissive_sddl_trustees,
+    verify_windows_private_acl,
+)
+from winbearable.engine import evaluate_profile
+from winbearable.models import (
+    OperationOutcome,
+    OperationStatus,
+    PermissionDeniedError,
+    ProfileSpec,
+    RunRecord,
+    TransactionState,
+)
+from winbearable.profiles import ProfileValidationError
+from winbearable.state import StateStore
+from winbearable.wsl.config import probe_distro_wsl_conf
+
+
+def test_thread_local_last_outcome_isolation_across_threads() -> None:
+    """Concurrent threads setting last_outcome on a shared backend never overwrite each other."""
+    mem = InMemorySystemBackend()
+    nat = NativeSystemBackend(platform_override="win32")
+    barrier = threading.Barrier(8)
+
+    def _worker(idx: int) -> tuple[str | None, str | None]:
+        barrier.wait()
+        mem.last_outcome = OperationOutcome(status=OperationStatus.OK, message=f"mem-{idx}")
+        nat.last_outcome = OperationOutcome(status=OperationStatus.OK, message=f"nat-{idx}")
+        return (
+            mem.last_outcome.message if mem.last_outcome else None,
+            nat.last_outcome.message if nat.last_outcome else None,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_worker, range(8)))
+
+    assert results == [(f"mem-{i}", f"nat-{i}") for i in range(8)]
+
+
+def test_single_roundtrip_wsl_conf_probe_and_env_cache_invalidation() -> None:
+    """probe_distro_wsl_conf reads /etc/wsl.conf in one call, and detect_environment caches WSL host probes."""
+    sysb = InMemorySystemBackend()
+    calls: list[list[str]] = []
+
+    def _single_probe(args: list[str], input_text: str | None = None) -> CommandResult:
+        calls.append(args)
+        return CommandResult(tuple(args), 0, "WB_RC=0\n[boot]\nsystemd=true\n", "")
+
+    with patch.object(sysb, "run_wsl_command", side_effect=_single_probe):
+        probe = probe_distro_wsl_conf("Ubuntu", sysb)
+
+    assert probe.status == "exists"
+    assert "[boot]\nsystemd=true" in probe.content
+    assert len(calls) == 1
+
+    # NativeSystemBackend caches wsl --version / --list and invalidates on mutating run_wsl_command
+    nat = NativeSystemBackend(platform_override="win32")
+    reg = InMemoryRegistryBackend()
+    nat_calls: list[list[str]] = []
+
+    def _fake_nat(args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
+        nat_calls.append(args)
+        exe = args[0].lower()
+        if exe.endswith("wsl.exe") and "--version" in args:
+            return CommandResult(tuple(args), 0, "WSL version: 2.3.26.0\n", "")
+        if exe.endswith("wsl.exe") and "--list" in args:
+            return CommandResult(tuple(args), 0, "Ubuntu\n", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    with patch.object(nat, "_run_native_cmd", side_effect=_fake_nat):
+        nat.detect_environment(reg)
+        nat.detect_environment(reg)
+        wsl_probes_before = [c for c in nat_calls if c[0].lower().endswith("wsl.exe")]
+        assert len(wsl_probes_before) == 2
+
+        nat.run_wsl_command(["--set-default", "Ubuntu"])
+        nat.detect_environment(reg)
+        wsl_probes_after = [c for c in nat_calls if c[0].lower().endswith("wsl.exe")]
+        assert len(wsl_probes_after) == 5  # 2 initial + 1 --set-default + 2 re-probes
+
+
+def test_vscode_extension_and_git_config_caches_invalidate_on_write() -> None:
+    """VS Code extension list and git global config cache read-only results until a write invalidates them."""
+    nat = NativeSystemBackend(platform_override="win32")
+    calls: list[list[str]] = []
+
+    def _fake_cmd(args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
+        calls.append(args)
+        if "--list-extensions" in args:
+            return CommandResult(tuple(args), 0, "ms-vscode-remote.remote-wsl\n", "")
+        if "config" in args and "--get" in args:
+            return CommandResult(tuple(args), 0, "manager\n", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    with (
+        patch.object(nat, "_run_native_cmd", side_effect=_fake_cmd),
+        patch.object(nat, "_resolve_code_cmd", return_value=r"C:\Program Files\VSCode\bin\code.cmd"),
+        patch.object(nat, "_resolve_git_exe", return_value=r"C:\Program Files\Git\cmd\git.exe"),
+    ):
+        assert nat.is_vscode_extension_installed("ms-vscode-remote.remote-wsl") is True
+        assert nat.is_vscode_extension_installed("other.ext") is False
+        assert sum(1 for c in calls if "--list-extensions" in c) == 1
+
+        nat.uninstall_vscode_extension("ms-vscode-remote.remote-wsl")
+        assert nat.is_vscode_extension_installed("ms-vscode-remote.remote-wsl") is True
+        assert sum(1 for c in calls if "--list-extensions" in c) == 2
+
+        assert nat.get_git_global_config("credential.helper") == "manager"
+        assert nat.get_git_global_config("credential.helper") == "manager"
+        assert sum(1 for c in calls if "--get" in c) == 1
+
+        nat.set_git_global_config("credential.helper", None)
+        assert nat.get_git_global_config("credential.helper") == "manager"
+        assert sum(1 for c in calls if "--get" in c) == 2
+
+
+def test_transient_state_checkpoints_skip_backup_pruning(tmp_path: Path) -> None:
+    """Transient PLANNED/APPLYING checkpoints skip backup directory scanning; terminal COMMITTED runs prune."""
+    store = StateStore(state_path=tmp_path / "state.json")
+    rec_applying = RunRecord(
+        run_id="r-fast",
+        timestamp="2026-11-19T00:00:00Z",
+        profile_name="p",
+        applied_tweaks=(),
+        state=TransactionState.APPLYING,
+    )
+    rec_done = RunRecord(
+        run_id="r-fast",
+        timestamp="2026-11-19T00:00:00Z",
+        profile_name="p",
+        applied_tweaks=(),
+        state=TransactionState.COMMITTED,
+    )
+
+    with patch.object(store, "_prune_old_backups_unlocked", return_value=[]) as prune_mock:
+        store.upsert_run(rec_applying)
+        assert prune_mock.call_count == 0
+        store.upsert_run(rec_done)
+        assert prune_mock.call_count == 1
+
+
+def test_bulk_winget_table_rejects_display_name_column_spoofing() -> None:
+    """Display-name tokens before the column gap cannot spoof an installed package ID."""
+    table = (
+        "Name                          Id                       Version   Source\n"
+        "-----------------------------------------------------------------------\n"
+        "Helper XP9CXNGPPJ97XX Tool    SomeOther.Package        1.0       winget\n"
+    )
+    assert NativeSystemBackend._match_winget_id_in_bulk_table(table, "XP9CXNGPPJ97XX") is False
+    assert NativeSystemBackend._match_winget_id_in_bulk_table(table, "SomeOther.Package") is True
+
+
+def test_win32_acl_null_dacl_foreign_sid_and_mocked_win32_paths(tmp_path: Path) -> None:
+    """SDDL checker rejects NULL/empty DACLs and foreign user SIDs; mocked Win32 ACL helpers enforce fail-closed."""
+    assert find_permissive_sddl_trustees("D:") == ["NULL_OR_EMPTY_DACL"]
+    assert find_permissive_sddl_trustees("D:NO_ACCESS_CONTROL") == ["NULL_OR_EMPTY_DACL"]
+    assert find_permissive_sddl_trustees(
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-9999)",
+        allowed_user_sid="S-1-5-21-1-2-1001",
+    ) == ["S-1-5-21-1-2-9999"]
+    assert (
+        find_permissive_sddl_trustees(
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-21-1-2-1001)",
+            allowed_user_sid="S-1-5-21-1-2-1001",
+        )
+        == []
+    )
+
+    state_dir = tmp_path / "acl_dir"
+    state_dir.mkdir()
+
+    class _K32:
+        @staticmethod
+        def LocalFree(*_a: object) -> int:
+            return 0
+
+    class _Adv32:
+        def __init__(self) -> None:
+            self.sddl_out = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-21-1-2-1001)"
+            self.set_rc = 0
+            self.get_rc = 0
+            self._keep: list[object] = []
+
+            def _cstr_sd(_sddl: object, _rev: object, sd_ptr: object, _sz: object) -> int:
+                ctypes.cast(sd_ptr, ctypes.POINTER(ctypes.c_void_p))[0] = 0x1000  # type: ignore[index]
+                return 1
+
+            def _get_dacl(_sd: object, pres: object, dacl_ptr: object, _def: object) -> int:
+                ctypes.cast(pres, ctypes.POINTER(ctypes.c_int))[0] = 1  # type: ignore[index]
+                ctypes.cast(dacl_ptr, ctypes.POINTER(ctypes.c_void_p))[0] = 0x2000  # type: ignore[index]
+                return 1
+
+            def _set_nsi(*_a: object) -> int:
+                return self.set_rc
+
+            def _get_nsi(
+                _p: object, _t: object, _si: object, owner: object, _g: object, dacl: object, _sa: object, sd: object
+            ) -> int:
+                if self.get_rc == 0:
+                    ctypes.cast(owner, ctypes.POINTER(ctypes.c_void_p))[0] = 0x3000  # type: ignore[index]
+                    ctypes.cast(dacl, ctypes.POINTER(ctypes.c_void_p))[0] = 0x2000  # type: ignore[index]
+                    ctypes.cast(sd, ctypes.POINTER(ctypes.c_void_p))[0] = 0x4000  # type: ignore[index]
+                return self.get_rc
+
+            def _sid_str(_sid: object, ptr: object) -> int:
+                buf = ctypes.create_unicode_buffer("S-1-5-21-1-2-1001")
+                self._keep.append(buf)
+                ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.addressof(buf)  # type: ignore[index]
+                return 1
+
+            def _sd_str(_sd: object, _rev: object, _si: object, ptr: object, _sz: object) -> int:
+                buf = ctypes.create_unicode_buffer(self.sddl_out)
+                self._keep.append(buf)
+                ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.addressof(buf)  # type: ignore[index]
+                return 1
+
+            self.ConvertStringSecurityDescriptorToSecurityDescriptorW = _cstr_sd
+            self.GetSecurityDescriptorDacl = _get_dacl
+            self.SetNamedSecurityInfoW = _set_nsi
+            self.GetNamedSecurityInfoW = _get_nsi
+            self.ConvertSidToStringSidW = _sid_str
+            self.ConvertSecurityDescriptorToStringSecurityDescriptorW = _sd_str
+
+    adv_inst = _Adv32()
+    fake_dll = type("D", (), {"kernel32": _K32(), "advapi32": adv_inst})()
+    with patch("winbearable.backends.win32_acl.get_current_process_user_sid", return_value="S-1-5-21-1-2-1001"):
+        assert apply_windows_private_acl(state_dir, windll_override=fake_dll) is True
+        verify_windows_private_acl(state_dir, windll_override=fake_dll)
+
+        adv_inst.sddl_out = "D:"
+        with pytest.raises(PermissionDeniedError, match="NULL_OR_EMPTY_DACL"):
+            verify_windows_private_acl(state_dir, windll_override=fake_dll)
+
+        adv_inst.set_rc = 5
+        with pytest.raises(PermissionDeniedError, match="Win32 error 5"):
+            apply_windows_private_acl(state_dir, windll_override=fake_dll)
+
+
+def test_evaluate_profile_validates_unknown_tweak_ids_directly() -> None:
+    """Direct evaluate_profile callers cannot bypass unknown-tweak validation."""
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    env = sysb.detect_environment(reg)
+    bad = ProfileSpec(name="direct", description="bad direct spec", tweaks={"nonexistent.tweak": True})
+    with pytest.raises(ProfileValidationError, match="unknown tweak ID"):
+        evaluate_profile(bad, env, reg, sysb)

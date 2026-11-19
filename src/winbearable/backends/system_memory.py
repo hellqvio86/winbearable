@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import platform
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +70,7 @@ class InMemorySystemBackend:
         self.onedrive_uninstalled = False
         self.wsl_commands_executed: list[tuple[list[str], str | None]] = []
         self.wsl_etc_conf: dict[str, str] = {}
-        self.last_outcome: OperationOutcome | None = None
+        self._outcome_local = threading.local()
         self.command_history: list[dict[str, Any]] = []
         self.auditpol_subcategories: dict[str, str] = {}
         self.auditpol_backups: dict[str, dict[str, str]] = {}
@@ -88,6 +89,14 @@ class InMemorySystemBackend:
         self.git_global_config: dict[str, str] = {}
         self.git_installed: bool = True
         self.restricted_acls: set[str] = set()
+
+    @property
+    def last_outcome(self) -> OperationOutcome | None:
+        return getattr(self._outcome_local, "value", None)
+
+    @last_outcome.setter
+    def last_outcome(self, value: OperationOutcome | None) -> None:
+        self._outcome_local.value = value
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         ok_b, build_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")

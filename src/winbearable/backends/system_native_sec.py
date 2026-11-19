@@ -387,3 +387,73 @@ def restrict_acl_to_current_user(
         ]
     )
     return res.returncode == 0
+
+
+class NativeSecMixin:
+    """Mixin delegating auditpol, wevtutil, firewall, fsutil, and ACL operations for NativeSystemBackend."""
+
+    _platform: str
+
+    def _run_native_cmd(self, args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
+        raise NotImplementedError
+
+    def _get_dll(self, name: str) -> Any | None:
+        raise NotImplementedError
+
+    def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
+        return get_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid)
+
+    def set_auditpol_subcategory(self, subcategory_guid: str, success: bool, failure: bool) -> bool:
+        return set_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid, success, failure)
+
+    def backup_auditpol(self, output_csv: Path) -> bool:
+        return backup_auditpol(self._run_native_cmd, self._platform, output_csv)
+
+    def restore_auditpol(self, input_csv: Path) -> bool:
+        return restore_auditpol(self._run_native_cmd, self._platform, input_csv)
+
+    def get_event_log_config(self, channel: str) -> tuple[bool | None, int | None]:
+        return get_event_log_config(self._run_native_cmd, self._platform, channel)
+
+    def set_event_log_config(
+        self,
+        channel: str,
+        enabled: bool | None = None,
+        max_size_bytes: int | None = None,
+    ) -> bool:
+        return set_event_log_config(self._run_native_cmd, self._platform, channel, enabled, max_size_bytes)
+
+    def is_firewall_group_enabled(self, registry: Any, group_resource_id: str) -> bool | None:
+        return is_firewall_group_enabled(registry, group_resource_id)
+
+    def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
+        return set_firewall_group_enabled(self._run_native_cmd, self._platform, group_resource_id, enabled)
+
+    def export_firewall_policy(self, output_wfw: Path) -> bool:
+        return export_firewall_policy(self._run_native_cmd, self._platform, output_wfw)
+
+    def import_firewall_policy(self, input_wfw: Path) -> bool:
+        return import_firewall_policy(self._run_native_cmd, self._platform, input_wfw)
+
+    def is_dir_case_sensitive(self, directory: str) -> bool | None:
+        return is_dir_case_sensitive(self._run_native_cmd, self._platform, directory, self._get_dll("kernel32"))
+
+    def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
+        return set_dir_case_sensitive(self._run_native_cmd, self._platform, directory, enabled)
+
+    def _get_current_user_sid(self) -> str | None:
+        return get_current_user_sid(self._run_native_cmd, self._platform)
+
+    _is_sddl_restricted_to_sid = staticmethod(is_sddl_restricted_to_sid)
+
+    def is_ssh_acl_restricted(self, path_str: str) -> bool:
+        return is_ssh_acl_restricted(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)
+
+    def backup_acl(self, path_str: str, backup_file: Path) -> bool:
+        return backup_acl(self._run_native_cmd, self._platform, path_str, backup_file)
+
+    def restore_acl(self, path_str: str, backup_file: Path) -> bool:
+        return restore_acl(self._run_native_cmd, self._platform, path_str, backup_file)
+
+    def restrict_acl_to_current_user(self, path_str: str) -> bool:
+        return restrict_acl_to_current_user(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)

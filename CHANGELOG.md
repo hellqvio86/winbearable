@@ -2,6 +2,18 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.25.0] - 2026-11-19
+
+### Performance & Python 3.15
+
+- **Python `>=3.15` Only & Free-Threaded (`3.15t`) Readiness:** Raised minimum Python version to `>=3.15` across `pyproject.toml` (`requires-python`, `mypy`, `ruff`) and `.github/workflows/ci.yml` (`["3.15", "3.15t"]` test matrix).
+- **Thread-Safe `last_outcome` & Reduced Subprocess/Checkpoint Overhead:** Isolated `last_outcome` in `threading.local()` and protected `command_history` with a lock on `NativeSystemBackend` / `InMemorySystemBackend`; combined `probe_distro_wsl_conf()` into a single `wsl.exe` roundtrip, cached `detect_environment()` WSL probes (`wsl --version`, `wsl --list --quiet`), cached `is_vscode_extension_installed()` and `get_git_global_config()` with write invalidation, skipped backup-directory scans on transient `PLANNED`/`APPLYING` checkpoints, and replaced `StateStore._tx_rlock` with `threading.Lock()`.
+
+### Security & Architecture
+
+- **Bulk Winget Column Spoofing & Windows ACL Hardening:** Restricted bulk `winget.exe list` parsing in `backends/system_native_apps.py` to identifier columns after `---` + `\s{2,}`; updated `find_permissive_sddl_trustees()` and `verify_windows_private_acl()` in `backends/win32_acl.py` to reject NULL/empty DACLs and foreign unprivileged user SIDs; added `validate_profile_spec()` at `evaluate_profile()` / `PlanPhase` entry points.
+- **Complete Capability Port Migration & Single Adapter Ordering:** Migrated all remaining concrete non-registry operation adapters (`service_task_feature_adapters.py`, `security_policy_adapters.py`, `env_adapters.py`, `package_and_file_adapters.py`) from `SystemBackend` to narrow capability ports in `backends/ports.py`, derived `OPERATION_ADAPTERS` order from `APPLY_KIND_ORDER`, and enforced the boundary in `tests/test_catalog_lint.py`.
+
 ## [0.24.0] - 2026-11-19
 
 ### Performance

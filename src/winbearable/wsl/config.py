@@ -99,7 +99,16 @@ def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfPr
     validate_wsl_distro_name(distro)
     try:
         test_res = system.run_wsl_command(
-            ["-d", distro, "-u", "root", "--", "sh", "-c", "test -e /etc/wsl.conf; echo WB_RC=$?"]
+            [
+                "-d",
+                distro,
+                "-u",
+                "root",
+                "--",
+                "sh",
+                "-c",
+                "if [ -e /etc/wsl.conf ]; then echo WB_RC=0; cat /etc/wsl.conf; else echo WB_RC=1; fi",
+            ]
         )
     except (WslOperationError, OSError, TimeoutError) as exc:
         return WslDistroConfProbe(status="error", content="", evidence=str(exc))
@@ -113,6 +122,12 @@ def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfPr
         if test_res.returncode != 0 or test_stderr:
             evidence = test_stderr or f"probe /etc/wsl.conf exited with code {test_res.returncode}"
             return WslDistroConfProbe(status="error", content="", evidence=evidence)
+
+    marker = "WB_RC=0\n"
+    if marker in test_res.stdout:
+        inline_content = test_res.stdout.split(marker, 1)[1]
+        if inline_content:
+            return WslDistroConfProbe(status="exists", content=inline_content, evidence="read_ok")
 
     try:
         cat_res = system.run_wsl_command(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])

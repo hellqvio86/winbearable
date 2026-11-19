@@ -7,8 +7,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import EnvironmentPort, PackagePort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..hyperv_firewall import get_wsl_hyperv_firewall_setting, set_wsl_hyperv_firewall_setting
 from ..models import (
     EnvironmentInfo,
@@ -44,7 +44,7 @@ class WingetOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: PackagePort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -124,7 +124,7 @@ class WingetOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: PackagePort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[Any]:
@@ -135,7 +135,7 @@ class WingetOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: PackagePort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -299,7 +299,7 @@ class WingetOperationAdapter:
                         ctx.journal_cb(already_ext)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: PackagePort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -307,7 +307,7 @@ class WingetOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: PackagePort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -348,7 +348,7 @@ class FileConfigOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -390,7 +390,7 @@ class FileConfigOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[FileSnapshot]:
@@ -409,7 +409,7 @@ class FileConfigOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -446,7 +446,7 @@ class FileConfigOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: EnvironmentPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -454,7 +454,7 @@ class FileConfigOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -492,7 +492,7 @@ class HypervFirewallOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         return [], [], []
 
@@ -500,7 +500,7 @@ class HypervFirewallOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[HypervFirewallSnapshot]:
@@ -511,19 +511,19 @@ class HypervFirewallOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         return []
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: EnvironmentPort) -> bool:
         return True
 
     def compensate(
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: EnvironmentPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,

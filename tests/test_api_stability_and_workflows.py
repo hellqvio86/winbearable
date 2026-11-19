@@ -249,7 +249,14 @@ def test_bulk_winget_list_cache_and_write_invalidation() -> None:
     def _fake_cmd(args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
         calls.append(args)
         if args[1:3] == ["list", "--disable-interactivity"]:
-            return CommandResult(tuple(args), 0, "Name Id Version\nVSCode Microsoft.VisualStudioCode 1.0 winget\n", "")
+            return CommandResult(
+                tuple(args),
+                0,
+                "Name    Id                          Version  Source\n"
+                "---------------------------------------------------\n"
+                "VSCode  Microsoft.VisualStudioCode  1.0      winget\n",
+                "",
+            )
         return CommandResult(tuple(args), 0, "", "")
 
     with patch.object(sysb, "_run_native_cmd", side_effect=_fake_cmd):

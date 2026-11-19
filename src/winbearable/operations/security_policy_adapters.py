@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import AuditPolicyPort, FirewallPort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import (
     AuditpolSnapshot,
     EnvironmentInfo,
@@ -40,7 +40,7 @@ class AuditpolOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -70,7 +70,7 @@ class AuditpolOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[AuditpolSnapshot]:
@@ -104,7 +104,7 @@ class AuditpolOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -133,7 +133,7 @@ class AuditpolOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: AuditPolicyPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -141,7 +141,7 @@ class AuditpolOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -186,7 +186,7 @@ class WevtutilOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -224,7 +224,7 @@ class WevtutilOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[WevtutilSnapshot]:
@@ -249,7 +249,7 @@ class WevtutilOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -282,7 +282,7 @@ class WevtutilOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: AuditPolicyPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -290,7 +290,7 @@ class WevtutilOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AuditPolicyPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -332,7 +332,7 @@ class FirewallGroupOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FirewallPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -360,7 +360,7 @@ class FirewallGroupOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FirewallPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[FirewallGroupSnapshot]:
@@ -394,7 +394,7 @@ class FirewallGroupOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FirewallPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -426,7 +426,7 @@ class FirewallGroupOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: FirewallPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -434,7 +434,7 @@ class FirewallGroupOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FirewallPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,

@@ -264,6 +264,7 @@ def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest
         ),
     ):
         assert sys_win.is_vscode_extension_installed("ms-python.python") is True
+        sys_win._vscode_extensions_cache = None
         assert sys_win.is_vscode_extension_installed("ms-python.python") is False
         assert sys_win.uninstall_vscode_extension("ms-python.python") is True
         assert sys_win.set_firewall_group_enabled("@FirewallAPI.dll,-1", True) is True
@@ -353,6 +354,7 @@ def test_system_backend_native_tool_wrappers(tmp_path: Path, monkeypatch: pytest
         ),
     ):
         assert sys_win.get_git_global_config("core.eol") == "lf"
+        sys_win._git_global_config_cache.clear()
         assert sys_win.get_git_global_config("core.eol") is None
         assert sys_win.set_git_global_config("core.eol", None) is True
         assert sys_win.set_git_global_config("core.eol", "lf") is True

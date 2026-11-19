@@ -29,17 +29,34 @@ def build_private_sddl(user_sid: str) -> str:
     return f"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{user_sid})"
 
 
-def find_permissive_sddl_trustees(sddl: str) -> list[str]:
-    """Return any broad-access Allow trustees present in a DACL SDDL string."""
+def find_permissive_sddl_trustees(sddl: str, *, allowed_user_sid: str | None = None) -> list[str]:
+    """Return any broad-access or foreign Allow trustees (or NULL/empty DACLs) in an SDDL string."""
+    upper_sddl = sddl.upper()
+    if "NO_ACCESS_CONTROL" in upper_sddl:
+        return ["NULL_OR_EMPTY_DACL"]
+    aces = _ACE_RE.findall(sddl)
+    has_allow_ace = False
+    allowed_set = {"SY", "BA", "CO", "OW", "S-1-5-18", "S-1-5-32-544"}
+    if allowed_user_sid:
+        allowed_set.add(allowed_user_sid.upper())
+
     found: list[str] = []
-    for ace_body in _ACE_RE.findall(sddl):
+    for ace_body in aces:
         parts = ace_body.split(";")
         if len(parts) < 6:
             continue
         ace_type = parts[0].strip().upper()
+        if ace_type not in {"A", "OA"}:
+            continue
+        has_allow_ace = True
         trustee = parts[5].strip().upper()
-        if ace_type in {"A", "OA"} and trustee in _BROAD_TRUSTEES and trustee not in found:
+        if (
+            trustee in _BROAD_TRUSTEES or (allowed_user_sid is not None and trustee not in allowed_set)
+        ) and trustee not in found:
             found.append(trustee)
+
+    if "D:" in upper_sddl and not has_allow_ace:
+        return ["NULL_OR_EMPTY_DACL"]
     return found
 
 
@@ -202,7 +219,7 @@ def verify_windows_private_acl(path: Path, *, windll_override: Any = None) -> No
             finally:
                 if sddl_ptr.value:
                     kernel32.LocalFree(sddl_ptr)
-            permissive = find_permissive_sddl_trustees(sddl)
+            permissive = find_permissive_sddl_trustees(sddl, allowed_user_sid=current_sid)
             if permissive:
                 raise PermissionDeniedError(
                     f"Refusing state path with permissive Windows ACL ({', '.join(permissive)}): {path}",

@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import FeaturePort, ServicePort, TaskPort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import (
     EnvironmentInfo,
     OperationJournalEntry,
@@ -31,7 +31,7 @@ class ServiceOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ServicePort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -87,7 +87,7 @@ class ServiceOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ServicePort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[ServiceSnapshot]:
@@ -114,7 +114,7 @@ class ServiceOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ServicePort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -164,7 +164,7 @@ class ServiceOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: ServicePort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -172,7 +172,7 @@ class ServiceOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ServicePort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -211,7 +211,7 @@ class TaskOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: TaskPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -242,7 +242,7 @@ class TaskOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: TaskPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[ScheduledTaskSnapshot]:
@@ -261,7 +261,7 @@ class TaskOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: TaskPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -293,7 +293,7 @@ class TaskOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: TaskPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -301,7 +301,7 @@ class TaskOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: TaskPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -335,7 +335,7 @@ class FeatureOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FeaturePort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -366,7 +366,7 @@ class FeatureOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FeaturePort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[OptionalFeatureSnapshot]:
@@ -385,7 +385,7 @@ class FeatureOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FeaturePort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -417,7 +417,7 @@ class FeatureOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: FeaturePort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -425,7 +425,7 @@ class FeatureOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: FeaturePort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
