@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import os
 from dataclasses import fields
 from pathlib import Path
 from unittest.mock import patch
@@ -254,7 +255,11 @@ def test_surviving_mutant_controls_and_unknown_edition_fail_closed(
     # Mutant 1: forbidden system roots still rejected even when USERPROFILE is broadened
     monkeypatch.setenv("USERPROFILE", str(Path(tmp_path.anchor)))
     monkeypatch.setenv("HOME", str(Path(tmp_path.anchor)))
-    sys_dir = str(Path(tmp_path.anchor) / "Windows" / "System32" / "cmd.exe")
+    sys_dir = (
+        str(Path(tmp_path.anchor) / "Windows" / "System32" / "cmd.exe")
+        if os.name == "nt"
+        else str(Path(tmp_path.anchor) / "etc" / "passwd")
+    )
     with pytest.raises(PermissionDeniedError):
         validate_file_spec_path(sys_dir)
 
