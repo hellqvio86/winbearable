@@ -33,8 +33,8 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `explorer.disable_snap_flyout` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Disable Snap Assist Hover Flyout |
 | `explorer.disable_sync_provider_notifications` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Disable OneDrive/Sync Provider Banners in Explorer |
 | `explorer.launch_to_this_pc` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Open File Explorer to 'This PC' |
-| `explorer.show_file_extensions` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Always Show File Extensions in File Explorer |
-| `explorer.show_hidden_files` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Show All Hidden Files and Dotfiles in File Explorer |
+| `explorer.show_file_extensions` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `edge-quiet`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Always Show File Extensions in File Explorer |
+| `explorer.show_hidden_files` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `edge-quiet`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Show All Hidden Files and Dotfiles in File Explorer |
 | `hardening.audit_core_subcategories` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable Core Security Audit Policy Subcategories (GUID-based) |
 | `hardening.browser_privacy_baseline` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enforce Edge & Chrome Browser Privacy Baseline (No Password Sync, Strict Tracking) |
 | `hardening.cmdline_process_audit` | `hardening` | Yes | `low` | `18.8.3.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Include Command Line in Process Creation Events (4688) |

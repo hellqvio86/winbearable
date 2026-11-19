@@ -6,3 +6,5 @@ enabled = false
 
 [tweaks]
 "edge.quieting_baseline" = true
+"explorer.show_file_extensions" = true
+"explorer.show_hidden_files" = true
