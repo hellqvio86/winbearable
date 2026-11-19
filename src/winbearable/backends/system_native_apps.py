@@ -76,6 +76,7 @@ class NativeAppMixin:
                 package_id,
                 "--exact",
                 "--accept-source-agreements",
+                "--disable-interactivity",
             ],
             timeout=60.0,
         )
