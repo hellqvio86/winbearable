@@ -15,10 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from ..const import MAX_CMD_OUTPUT_CHARS
+from ..log import get_logger
 from ..models import OperationOutcome, OperationStatus
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS
 from .system_protocol import GIB_BYTES
 from .win32_ctypes import get_win32_dll
+
+_logger = get_logger(__name__)
 
 
 def sys32_exe(exe_name: str, windll_override: Any = None) -> str:
@@ -259,8 +262,25 @@ def run_subprocess_bounded(
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
+        _logger.debug(
+            "Subprocess completed: %s (rc=%d)",
+            args[0] if args else "",
+            proc.returncode,
+            extra={
+                "event": "subprocess.complete",
+                "cmd": args[:4],
+                "returncode": proc.returncode,
+                "stderr_len": len(stderr or ""),
+            },
+        )
         return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
     except subprocess.TimeoutExpired as exc:
+        _logger.warning(
+            "Subprocess timed out after %.1fs: %s",
+            timeout,
+            args[0] if args else "",
+            extra={"event": "subprocess.timeout", "cmd": args[:4], "timeout": timeout},
+        )
         terminate_process_tree(proc.pid, sys.platform)
         proc.kill()
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):

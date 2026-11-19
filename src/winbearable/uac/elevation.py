@@ -17,6 +17,7 @@ from typing import Any
 from ..backends.win32_ctypes import get_current_process_user_sid
 from ..backends.win32_fs import is_reparse_or_symlink
 from ..const import ERROR_CANCELLED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT
+from ..log import get_logger
 from .output import read_bounded_uac_output
 from .win32 import (
     DEFAULT_UAC_TERMINATE_GRACE_MS,
@@ -32,6 +33,8 @@ from .win32 import (
     last_win32_error,
     resolve_trusted_system32,
 )
+
+_logger = get_logger(__name__)
 
 
 def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
@@ -196,6 +199,16 @@ def run_elevated_wb(
         elevated_args = build_elevated_cmdline_args(argv, out_path, caller_sid=caller_sid)
         resolved_exe, launch_args = resolve_elevation_target(elevated_args, executable=executable)
         params = subprocess.list2cmdline(launch_args)
+        _logger.debug(
+            "Launching elevated child via ShellExecuteExW: %s",
+            resolved_exe,
+            extra={
+                "event": "uac.launch",
+                "executable": resolved_exe,
+                "out_path": str(out_path),
+                "timeout_ms": effective_timeout_ms,
+            },
+        )
 
         sei = ShellExecuteInfoW()
         sei.cbSize = ctypes.sizeof(ShellExecuteInfoW)

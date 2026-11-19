@@ -8,6 +8,7 @@ from pathlib import Path
 from ..backends.registry import RegistryBackend, expand_registry_spec
 from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
+from ..log import get_logger
 from ..models import (
     EnvironmentInfo,
     PlannedOperation,
@@ -296,6 +297,12 @@ def evaluate_profile(
         try:
             tweak = resolve_tweak_params(base_tweak, profile.params.get(tweak_id))
         except ValueError as exc:
+            get_logger(__name__).warning(
+                "Invalid tweak parameters for %s: %s",
+                tweak_id,
+                exc,
+                extra={"event": "tweak.param_error", "tweak_id": tweak_id, "error": str(exc)},
+            )
             results.append(make_check_result(base_tweak, TweakStatus.ERROR, str(exc)))
             continue
         results.append(detect_tweak(tweak, env, registry, system, allow_managed=allow_managed, expand_fn=expand_fn))
