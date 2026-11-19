@@ -297,7 +297,7 @@ jobs:
       - name: Build and hash package
         run: |
           uv build
-          (cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+          (cd dist && sha256sum *.whl *.tar.gz > ../SHA256SUMS.txt && sha256sum -c ../SHA256SUMS.txt)
 
       - name: Generate SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -358,7 +358,7 @@ jobs:
       - name: Build and verify Winget portable zip
         run: |
           uv run --group release --frozen python bin/build_winget.py
-          sha256sum -c dist/winbearable-*.zip.sha256
+          (cd dist && sha256sum -c winbearable-*.zip.sha256)
 
       - name: Upload Winget zip to release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3

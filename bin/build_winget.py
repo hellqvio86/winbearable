@@ -129,7 +129,7 @@ def main() -> int:
 
     sha256_hex = hashlib.sha256(zip_path.read_bytes()).hexdigest().upper()
     sha_file = dist_dir / f"{zip_path.name}.sha256"
-    sha_file.write_text(f"{sha256_hex}  {zip_path.name}\n", encoding="utf-8")
+    sha_file.write_text(f"{sha256_hex}  {zip_path.name}\n", encoding="utf-8", newline="\n")
 
     print(f"Built:  {zip_path}")
     print(f"SHA256: {sha256_hex}")
