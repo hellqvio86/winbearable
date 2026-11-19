@@ -344,9 +344,13 @@ def test_no_inline_imports_in_src_or_tests() -> None:
 
 
 def test_no_internal_ticket_ids_and_module_loc_ceiling() -> None:
-    """Enforce zero internal ticket IDs and a 750-LOC ceiling on production modules."""
+    """Enforce zero internal ticket IDs and a 600-LOC ceiling on production modules."""
     repo_root = Path(__file__).resolve().parent.parent
-    ticket_pat = re.compile(r"\b(?:T[0-3]-\d+|P[0-3]\.\d+|DEC-\d+|ENG-\d+|MGD-\d+|QA-\d+|WSL-\d+|R-\d+|B-\d+)\b")
+    ticket_pat = re.compile(
+        r"\b(?:T[0-3]-\d+|P[0-3]\.\d+|P[0-3]-[A-Z][A-Z0-9-]*|TWK-[A-Z0-9-]+|"
+        r"DEC-\d+|ENG-\d+|MGD-\d+|QA-\d+|WSL-\d+|R-\d+|B-\d+|"
+        r"N-\d+|C-\d+|S-\d+(?![-\d]))\b"
+    )
     ticket_hits: list[str] = []
     for base in (repo_root / "src" / "winbearable", repo_root / "bin", repo_root / "profiles", repo_root / "tests"):
         for path in sorted(base.rglob("*")):
@@ -360,9 +364,9 @@ def test_no_internal_ticket_ids_and_module_loc_ceiling() -> None:
     oversized = [
         f"{p.relative_to(repo_root)} ({sum(1 for _ in p.open(encoding='utf-8'))} LOC)"
         for p in sorted((repo_root / "src" / "winbearable").rglob("*.py"))
-        if sum(1 for _ in p.open(encoding="utf-8")) > 750
+        if sum(1 for _ in p.open(encoding="utf-8")) > 600
     ]
-    assert not oversized, "Production modules exceeding 750 LOC:\n" + "\n".join(oversized)
+    assert not oversized, "Production modules exceeding 600 LOC:\n" + "\n".join(oversized)
 
 
 def test_raw_subprocess_restricted_to_backend_boundaries() -> None:
@@ -421,3 +425,18 @@ def test_supply_chain_zero_runtime_deps_and_sha_pinned_actions() -> None:
             if match and not sha_pat.fullmatch(match.group(2)):
                 unpinned.append(f"{wf.name}:{idx} {match.group(1)}@{match.group(2)}")
     assert not unpinned, f"Unpinned GitHub Actions found: {unpinned}"
+
+
+def test_ci_workflow_sbom_and_release_invariants() -> None:
+    """Every anchore/sbom-action step disables auto-upload and release assets include SBOM/checksums."""
+    repo_root = Path(__file__).resolve().parent.parent
+    ci_text = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    sbom_blocks = ci_text.split("anchore/sbom-action@")
+    assert len(sbom_blocks) >= 4
+    for block in sbom_blocks[1:]:
+        window = block[:600]
+        assert "upload-artifact: false" in window
+        assert "upload-release-assets: false" in window
+    assert "workflow_dispatch" in ci_text
+    assert "sbom.spdx.json" in ci_text
+    assert "SHA256SUMS.txt" in ci_text

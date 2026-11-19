@@ -391,7 +391,7 @@ def handle_wsl(
             else:
                 sys.stderr.write(f"Error: {err_payload['error']}\n")
             return EXIT_BLOCKED
-        if bool(args.apply) and not getattr(sys_backend, "is_simulated", False):
+        if bool(args.apply) and not sys_backend.is_simulated:
             require_windows_for_mutation(env, "wsl firewall --apply")
         fw_res = deps.set_hyperv_fn(
             enabled=not bool(args.disable),
@@ -401,23 +401,26 @@ def handle_wsl(
         )
         if bool(args.apply) and fw_res["returncode"] == 0 and isinstance(fw_res.get("previous"), dict):
             prev_fw = fw_res["previous"]
+            post_fw = fw_res.get("verified") or fw_res.get("desired") or {}
             hv_snap = HypervFirewallSnapshot(
                 vm_creator_id=str(prev_fw.get("vm_creator_id") or fw_res["vm_creator_id"]),
                 previous_enabled=prev_fw.get("enabled"),
                 previous_inbound=prev_fw.get("default_inbound_action"),
                 previous_outbound=prev_fw.get("default_outbound_action"),
+                post_enabled=post_fw.get("enabled"),
+                post_inbound=post_fw.get("default_inbound_action", post_fw.get("default_inbound")),
+                post_outbound=post_fw.get("default_outbound_action", post_fw.get("default_outbound")),
             )
-            with store.transaction_lock():
-                store.append_run(
-                    RunRecord(
-                        run_id=f"hvfw-{uuid.uuid4().hex[:12]}",
-                        timestamp=datetime.now(UTC).isoformat(),
-                        profile_name="wsl-firewall",
-                        applied_tweaks=(),
-                        hyperv_firewall_snapshots=(hv_snap,),
-                        state=TransactionState.COMMITTED,
-                    )
+            store.append_run(
+                RunRecord(
+                    run_id=f"hvfw-{uuid.uuid4().hex[:12]}",
+                    timestamp=datetime.now(UTC).isoformat(),
+                    profile_name="wsl-firewall",
+                    applied_tweaks=(),
+                    hyperv_firewall_snapshots=(hv_snap,),
+                    state=TransactionState.COMMITTED,
                 )
+            )
         if args.json:
             print_json(fw_res)
         else:

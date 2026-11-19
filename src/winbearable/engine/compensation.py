@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +18,7 @@ from ..models import (
     GitConfigSnapshot,
     IcaclsSnapshot,
     OptionalFeatureSnapshot,
+    PermissionDeniedError,
     PowercfgSnapshot,
     RegistryKeySnapshot,
     RegistryValueSnapshot,
@@ -38,6 +38,7 @@ from ..operations import (
     identity,
 )
 from ..operations.package_and_file_adapters import FileConfigOperationAdapter
+from ..operations.path_policy import validate_file_spec_path
 from ..tweaks import get_tweak
 from ..wsl import get_wsl_distro_guid
 from .params import resolve_tweak_params
@@ -124,6 +125,24 @@ def compute_snapshot_fingerprints(snaps: PreApplySnapshots) -> dict[str, str]:
         fp[identity.file_id(fs.path)] = fs.sha256 or "absent"
     for ss in snaps.services:
         fp[identity.service_id(ss.service_name)] = str(ss.previous_start_type)
+    for ts in snaps.tasks:
+        fp[identity.task_id(ts.task_path)] = str(ts.previous_enabled)
+    for feat in snaps.features:
+        fp[identity.feature_id(feat.feature_name)] = str(feat.previous_enabled)
+    for ap in snaps.auditpol:
+        fp[identity.auditpol_id(ap.subcategory_guid)] = str(ap.previous_setting)
+    for we in snaps.wevtutil:
+        fp[identity.wevtutil_id(we.channel)] = f"{we.previous_enabled}:{we.previous_max_size_bytes}"
+    for fw in snaps.firewall_groups:
+        fp[identity.firewall_group_id(fw.group_resource_id)] = str(fw.previous_enabled)
+    for fsu in snaps.fsutil:
+        fp[identity.fsutil_id(fsu.directory)] = str(fsu.previous_enabled)
+    for pwr in snaps.powercfg:
+        fp[identity.powercfg_id()] = str(pwr.previous_enabled)
+    for gc in snaps.git_config:
+        fp[identity.git_config_id(gc.key)] = f"{gc.existed}:{gc.previous_value!r}"
+    for ic in snaps.icacls:
+        fp[identity.icacls_id(ic.path_template)] = str(ic.backup_acl_path is not None)
     return fp
 
 
@@ -135,53 +154,33 @@ def compute_dry_run_fingerprints(
     expand_fn: Callable[[str], Path] | None = None,
 ) -> dict[str, str]:
     """Read-only precondition fingerprints matching compute_snapshot_fingerprints format for `wb plan`."""
-    fp: dict[str, str] = {}
-    for res in evaluations:
-        if res.status != TweakStatus.DRIFTED:
-            continue
-        tweak = resolve_tweak_params(
-            get_tweak(res.tweak_id),
-            profile_params.get(res.tweak_id) if profile_params else None,
-        )
-        for spec in tweak.registry_specs:
-            if spec.value_name is None:
-                tid = identity.registry_key_id(spec.hive, spec.key_path, spec.view)
-                fp[tid] = "present" if registry.key_exists(spec.hive, spec.key_path, view=spec.view) else "absent"
-            else:
-                tid = identity.registry_value_id(spec.hive, spec.key_path, spec.value_name, spec.view)
-                val = registry.get_value(spec.hive, spec.key_path, spec.value_name, view=spec.view)
-                fp[tid] = f"{val[1]}:{val[0]!r}" if val is not None else "absent"
-        for fspec in tweak.file_specs:
-            p = (
-                expand_fn(fspec.path_template)
-                if expand_fn is not None
-                else Path(os.path.expandvars(os.path.expanduser(fspec.path_template)))
-            )
-            sha = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
-            fp[identity.file_id(str(p))] = sha or "absent"
-        for sspec in tweak.service_specs:
-            fp[identity.service_id(sspec.service_name)] = str(
-                system.get_service_start_type(registry, sspec.service_name)
-            )
-    return fp
+    snaps = collect_pre_apply_snapshots(
+        evaluations,
+        registry,
+        system,
+        backup_dir=None,
+        profile_params=profile_params,
+        expand_fn=expand_fn,
+    )
+    return compute_snapshot_fingerprints(snaps)
 
 
 def _snapshot_compensation_batches(run_record: RunRecord) -> list[tuple[str, list[Any]]]:
     return [
-        ("registry", list(run_record.registry_snapshots)),
-        ("registry", list(run_record.registry_key_snapshots)),
-        ("service", list(run_record.service_snapshots)),
-        ("scheduled_task", list(run_record.task_snapshots)),
-        ("optional_feature", list(run_record.feature_snapshots)),
-        ("auditpol", list(run_record.auditpol_snapshots)),
-        ("wevtutil", list(run_record.wevtutil_snapshots)),
-        ("firewall_group", list(run_record.firewall_group_snapshots)),
-        ("fsutil_case_sensitive", list(run_record.fsutil_snapshots)),
-        ("powercfg_hibernate", list(run_record.powercfg_snapshots)),
-        ("git_config", list(run_record.git_config_snapshots)),
-        ("icacls_acl", list(run_record.icacls_snapshots)),
         ("hyperv_firewall", list(run_record.hyperv_firewall_snapshots)),
         ("file_config", list(run_record.file_snapshots)),
+        ("icacls_acl", list(run_record.icacls_snapshots)),
+        ("git_config", list(run_record.git_config_snapshots)),
+        ("powercfg_hibernate", list(run_record.powercfg_snapshots)),
+        ("fsutil_case_sensitive", list(run_record.fsutil_snapshots)),
+        ("firewall_group", list(run_record.firewall_group_snapshots)),
+        ("wevtutil", list(run_record.wevtutil_snapshots)),
+        ("auditpol", list(run_record.auditpol_snapshots)),
+        ("optional_feature", list(run_record.feature_snapshots)),
+        ("scheduled_task", list(run_record.task_snapshots)),
+        ("service", list(run_record.service_snapshots)),
+        ("registry", list(run_record.registry_key_snapshots)),
+        ("registry", list(run_record.registry_snapshots)),
     ]
 
 
@@ -194,15 +193,16 @@ def _compensate_wsl(
     errors: list[str] = []
     if run_record.wslconfig_path:
         try:
-            target_cfg = Path(run_record.wslconfig_path)
+            target_cfg = validate_file_spec_path(run_record.wslconfig_path)
+            bak_path: Path | None = None
+            if run_record.wsl_backup_path:
+                bak_path = validate_file_spec_path(run_record.wsl_backup_path)
             has_conflict = False
             if not force_rollback and run_record.wslconfig_post_sha256 is not None:
                 cur_sha = hashlib.sha256(target_cfg.read_bytes()).hexdigest() if target_cfg.is_file() else None
                 pre_sha: str | None = None
-                if run_record.wslconfig_existed and run_record.wsl_backup_path:
-                    bak = Path(run_record.wsl_backup_path)
-                    if bak.is_file():
-                        pre_sha = hashlib.sha256(bak.read_bytes()).hexdigest()
+                if run_record.wslconfig_existed and bak_path is not None and bak_path.is_file():
+                    pre_sha = hashlib.sha256(bak_path.read_bytes()).hexdigest()
                 matches_pre = (cur_sha is None) if run_record.wslconfig_existed is False else (cur_sha == pre_sha)
                 if not matches_pre and cur_sha != run_record.wslconfig_post_sha256:
                     errors.append(f"restore_conflict wslconfig {run_record.wslconfig_path}")
@@ -210,11 +210,9 @@ def _compensate_wsl(
             if not has_conflict:
                 if run_record.wslconfig_existed is False:
                     target_cfg.unlink(missing_ok=True)
-                elif run_record.wsl_backup_path:
-                    bak = Path(run_record.wsl_backup_path)
-                    if bak.is_file():
-                        atomic_write_bytes(target_cfg, bak.read_bytes())
-        except OSError as exc:
+                elif bak_path is not None and bak_path.is_file():
+                    atomic_write_bytes(target_cfg, bak_path.read_bytes())
+        except (OSError, ValueError, PermissionDeniedError) as exc:
             errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
 
     for d_snap in reversed(run_record.wsl_distro_snapshots):
@@ -274,9 +272,29 @@ def compensate_run_record(
 
     attempted_targets: set[str] | None = None
     if run_record.operation_journal:
-        attempted_targets = {
-            e.target_id for e in run_record.operation_journal if e.outcome in {"applied", "failed", "unknown"}
-        }
+        allowed_outcomes = {"applied", "failed", "unknown"}
+        if run_record.state == TransactionState.APPLYING:
+            allowed_outcomes.add("planned")
+        attempted_targets = {e.target_id for e in run_record.operation_journal if e.outcome in allowed_outcomes}
+
+    errors.extend(_compensate_wsl(run_record, registry, system, force_rollback))
+
+    pkg_batches: list[tuple[str, str]] = [
+        *[("winget_package", pkg_id) for pkg_id in run_record.installed_winget_packages],
+        *[("vscode_extension", ext_id) for ext_id in run_record.installed_vscode_extensions],
+    ]
+    if pkg_batches:
+        winget_adapter = get_operation_adapter("winget_package")
+        errors.extend(
+            winget_adapter.compensate(
+                pkg_batches,
+                registry,
+                system,
+                force=force_rollback,
+                skip_package_uninstall=skip_package_uninstall,
+                attempted_targets=attempted_targets,
+            )
+        )
 
     for kind, batch in _snapshot_compensation_batches(run_record):
         if batch:
@@ -292,22 +310,4 @@ def compensate_run_record(
                     attempted_targets=attempted_targets,
                 )
             )
-
-    pkg_batches: list[tuple[str, str]] = [
-        *[("winget_package", pkg_id) for pkg_id in run_record.installed_winget_packages],
-        *[("vscode_extension", ext_id) for ext_id in run_record.installed_vscode_extensions],
-    ]
-    if pkg_batches:
-        winget_adapter = get_operation_adapter("winget_package")
-        errors.extend(
-            winget_adapter.compensate(
-                pkg_batches,
-                registry,
-                system,
-                force=force_rollback,
-                skip_package_uninstall=skip_package_uninstall,
-            )
-        )
-
-    errors.extend(_compensate_wsl(run_record, registry, system, force_rollback))
     return errors

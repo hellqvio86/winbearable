@@ -18,6 +18,7 @@ from ..models import (
 )
 from .base import OperationApplyContext, now_iso, raise_system_error
 from .identity import fsutil_id, git_config_id, powercfg_id
+from .path_policy import validate_icacls_user_only_path
 
 
 class FsutilOperationAdapter:
@@ -34,21 +35,23 @@ class FsutilOperationAdapter:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
         for spec in tweak.fsutil_specs:
-            fid = fsutil_id(spec.directory)
-            actual = system.is_dir_case_sensitive(spec.directory)
+            resolved_dir = str(validate_icacls_user_only_path(spec.directory))
+            fid = fsutil_id(resolved_dir)
+            actual = system.is_dir_case_sensitive(resolved_dir)
             ops.append(
                 PlannedOperation(
                     operation_type=self.kind,
-                    target=spec.directory,
+                    target=resolved_dir,
                     action="enable" if spec.enabled else "disable",
                     before_state=f"case_sensitive={actual}",
                     after_state=f"case_sensitive={spec.enabled}",
                     reversible=True,
+                    scope="user",
                     target_id=fid,
                 )
             )
             if actual != spec.enabled:
-                drifted.append(f"fsutil caseSensitive {spec.directory}: {actual} -> {spec.enabled}")
+                drifted.append(f"fsutil caseSensitive {resolved_dir}: {actual} -> {spec.enabled}")
         return ops, drifted, []
 
     def snapshot(
@@ -61,11 +64,12 @@ class FsutilOperationAdapter:
     ) -> list[FsutilSnapshot]:
         snaps: list[FsutilSnapshot] = []
         for fs_spec in tweak.fsutil_specs:
-            fid = fsutil_id(fs_spec.directory)
+            resolved_dir = str(validate_icacls_user_only_path(fs_spec.directory))
+            fid = fsutil_id(resolved_dir)
             if fid in seen_ids:
                 continue
-            prev_cs = system.is_dir_case_sensitive(fs_spec.directory)
-            snaps.append(FsutilSnapshot(directory=fs_spec.directory, previous_enabled=prev_cs))
+            prev_cs = system.is_dir_case_sensitive(resolved_dir)
+            snaps.append(FsutilSnapshot(directory=resolved_dir, previous_enabled=prev_cs))
             seen_ids.add(fid)
         return snaps
 
@@ -80,15 +84,16 @@ class FsutilOperationAdapter:
         entries: list[OperationJournalEntry] = []
         for fs_spec in tweak.fsutil_specs:
             started = now_iso()
-            fid = fsutil_id(fs_spec.directory)
-            prev_cs = system.is_dir_case_sensitive(fs_spec.directory)
-            if not system.set_dir_case_sensitive(fs_spec.directory, fs_spec.enabled):
+            resolved_dir = str(validate_icacls_user_only_path(fs_spec.directory))
+            fid = fsutil_id(resolved_dir)
+            prev_cs = system.is_dir_case_sensitive(resolved_dir)
+            if not system.set_dir_case_sensitive(resolved_dir, fs_spec.enabled):
                 raise_system_error(
                     system,
-                    f"Failed to set NTFS case sensitivity on '{fs_spec.directory}' to {fs_spec.enabled}.",
+                    f"Failed to set NTFS case sensitivity on '{resolved_dir}' to {fs_spec.enabled}.",
                 )
             if ctx.checkpoint_cb:
-                ctx.checkpoint_cb(f"{tweak.tweak_id}:fsutil:{fs_spec.directory}")
+                ctx.checkpoint_cb(f"{tweak.tweak_id}:fsutil:{resolved_dir}")
             entry = OperationJournalEntry(
                 target_id=fid,
                 operation_type=self.kind,
@@ -127,15 +132,16 @@ class FsutilOperationAdapter:
                 continue
             if attempted_targets is not None and fsutil_id(snap.directory) not in attempted_targets:
                 continue
+            resolved_dir = str(validate_icacls_user_only_path(snap.directory))
             if not force and snap.post_enabled is not None:
-                cur_cs = system.is_dir_case_sensitive(snap.directory)
+                cur_cs = system.is_dir_case_sensitive(resolved_dir)
                 if cur_cs == snap.previous_enabled and cur_cs != snap.post_enabled:
                     continue
                 if cur_cs != snap.post_enabled:
-                    errors.append(f"restore_conflict fsutil {snap.directory}")
+                    errors.append(f"restore_conflict fsutil {resolved_dir}")
                     continue
-            if not system.set_dir_case_sensitive(snap.directory, snap.previous_enabled):
-                errors.append(f"fsutil {snap.directory}")
+            if not system.set_dir_case_sensitive(resolved_dir, snap.previous_enabled):
+                errors.append(f"fsutil {resolved_dir}")
         return errors
 
 
@@ -493,6 +499,7 @@ class OneDriveOperationAdapter:
             before_state="present" if installed else "uninstalled",
             after_state="uninstalled",
             reversible=False,
+            scope="user",
             target_id="onedrive:client",
         )
         drifted = ["OneDrive client: installed -> uninstalled"] if installed else []

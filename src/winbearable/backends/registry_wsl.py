@@ -54,6 +54,8 @@ class WslInteropRegistryBackend:
         return []
 
     def _run_reg_query(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        child_env = dict(os.environ)
+        child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
         return subprocess.run(
             [self._reg_exe, "query", *args],
             capture_output=True,
@@ -62,6 +64,7 @@ class WslInteropRegistryBackend:
             errors="replace",
             timeout=15.0,
             shell=False,
+            env=child_env,
         )
 
     _HIVE_ALIASES: dict[str, str] = {

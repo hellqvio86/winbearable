@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import warnings
 from pathlib import Path
 from typing import Any
@@ -160,8 +161,14 @@ def _parse_wsl_section(
         return v
 
     default_user = _opt_str("default_user", defaults.default_user)
-    if default_user is not None and default_user.strip().lower() == "root":
-        raise ProfileValidationError("wsl.default_user cannot be 'root'.")
+    if default_user is not None:
+        clean_user = default_user.strip()
+        if clean_user.lower() == "root" or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}\$?", clean_user):
+            raise ProfileValidationError(f"Invalid wsl.default_user {default_user!r}.")
+    if "distro" in raw_wsl:
+        raw_distro_tbl = raw_wsl["distro"]
+        if not isinstance(raw_distro_tbl, dict) or any(not isinstance(v, dict) for v in raw_distro_tbl.values()):
+            raise ProfileValidationError("wsl.distro must be a table mapping distro names to settings tables.")
 
     raw_ports = raw_wsl.get("ignored_ports", defaults.ignored_ports)
     ignored_ports: tuple[int, ...] | None = None

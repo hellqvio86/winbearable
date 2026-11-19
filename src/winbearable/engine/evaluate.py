@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+
 from ..backends.registry import RegistryBackend, expand_registry_spec
 from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
@@ -101,6 +104,8 @@ def detect_tweak(
     registry: RegistryBackend,
     system: SystemBackend,
     allow_managed: bool = True,
+    *,
+    expand_fn: Callable[[str], Path] | None = None,
 ) -> TweakCheckResult:
     """Evaluate a single tweak's current state against the host environment."""
     try:
@@ -187,7 +192,9 @@ def detect_tweak(
         )
         for item in reg_details
     ]
-    non_reg_ops, non_reg_drifted, unverified_reasons = inspect_non_registry_operations(tweak, registry, system)
+    non_reg_ops, non_reg_drifted, unverified_reasons = inspect_non_registry_operations(
+        tweak, registry, system, expand_fn=expand_fn
+    )
     planned_ops.extend(non_reg_ops)
     drifted_reasons.extend(non_reg_drifted)
 
@@ -267,6 +274,8 @@ def evaluate_profile(
     skip_ids: set[str] | None = None,
     category_filter: str | None = None,
     allow_managed: bool = True,
+    *,
+    expand_fn: Callable[[str], Path] | None = None,
 ) -> list[TweakCheckResult]:
     """Evaluate all enabled (or explicitly selected) tweaks in a profile."""
     results: list[TweakCheckResult] = []
@@ -284,5 +293,5 @@ def evaluate_profile(
         tweak = resolve_tweak_params(get_tweak(tweak_id), profile.params.get(tweak_id))
         if category_filter and tweak.category.lower() != category_filter.lower():
             continue
-        results.append(detect_tweak(tweak, env, registry, system, allow_managed=allow_managed))
+        results.append(detect_tweak(tweak, env, registry, system, allow_managed=allow_managed, expand_fn=expand_fn))
     return results

@@ -2,6 +2,20 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.19.0] - 2026-11-19
+
+### Security
+
+- **Rollback & Recovery Path Validation:** Validated `FileSnapshot.path`, `wslconfig_path`, `wsl_backup_path`, and `FsutilOperationAdapter` directories against `path_policy.py` (`validate_file_spec_path` / `validate_icacls_user_only_path`), rejected drive/filesystem roots and exact user-profile root targets, added dangling-symlink and reparse-point checks across `StateStore` locks/backups and `export_registry_backup`, and enforced `tempfile.gettempdir()` containment plus descriptor cleanup in `write_uac_output_safe`.
+- **UAC Elevation & Caller-SID Hardening:** Registered hidden `--uac-output`/`--uac-caller-sid` flags on `rollback` and `recover`, resolved `@file` for `--expected-fingerprints`, failed closed when `caller_sid` is set and `current_sid` is unavailable, refused cross-SID user-scope `apply` and `rollback`, and blocked elevated execution of user-writable `code.cmd` and `git.exe`.
+- **WSL & Locale Hardening:** Added `--fixed-value`/`--` to `git config --system --unset`, validated `distro` in `deep_audit_wsl_distro`, rejected `root` and invalid usernames in `wsl.default_user`, rejected delimiter/newline injection in INI/TOML mergers, removed English `icacls` and `/reset` fallbacks in favor of SDDL + SID verification, and set `NoDefaultCurrentDirectoryInExePath=1` in `_run_reg_query`.
+
+### Fixed & Changed
+
+- **Transaction & Compensation Integrity:** Included `"planned"` targets during `APPLYING` compensation, fixed `HypervFirewallOperationAdapter.compensate` dictionary keys, populated `post_*` snapshots across all snapshotted operation types, reversed compensation order, fixed `compute_dry_run_fingerprints` for non-registry operations, and canonicalized `operation_journal[i]["tweak_id"]` during state migration.
+- **Architecture, Protocols & Schemas:** Split `RunRecord`, `IcaclsOperationAdapter`, `NativeAppMixin`, `handle_doctor`, and `ApplyContext` so every production module stays under 600 LOC; aligned `SystemBackend`/`RegistryBackend` protocols; routed `wb init` TOML generation through `dict_to_toml`; populated `JSON_SCHEMAS`; and fixed SmartScreen/Credential Guard posture reporting.
+- **CI, Winget & Tooling:** Disabled `anchore/sbom-action` auto-uploads to eliminate release asset races, added `update_installer_manifest_sha256` to `bin/build_winget.py` / `bin/publish_winget.py`, hardened `Makefile`/`.githooks/pre-commit`, linked [microsoft/winget-pkgs#481812](https://github.com/microsoft/winget-pkgs/pull/481812) in `README.md`, and raised Win32/security module Linux CI coverage above 90%.
+
 ## [0.18.0] - 2026-11-19
 
 ### Security & Architecture

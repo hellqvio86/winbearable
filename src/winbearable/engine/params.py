@@ -47,7 +47,7 @@ class TweakMutationError(RuntimeError):
 
 
 def format_op_failure(system: SystemBackend, fallback_msg: str) -> str:
-    outcome = getattr(system, "last_outcome", None)
+    outcome = system.last_outcome
     if outcome is not None and not outcome.ok:
         detail = outcome.message.strip() if outcome.message else fallback_msg
         return (
@@ -60,7 +60,7 @@ def format_op_failure(system: SystemBackend, fallback_msg: str) -> str:
 
 def capture_failure_outcome(system: SystemBackend, base_message: str) -> OperationOutcome:
     """Capture structured OperationOutcome from backend or synthesize UNKNOWN outcome."""
-    raw = getattr(system, "last_outcome", None)
+    raw = system.last_outcome
     if isinstance(raw, OperationOutcome) and not raw.ok:
         detail = format_op_failure(system, base_message)
         return OperationOutcome(
@@ -365,7 +365,7 @@ def require_native_backends(
     """Refuse mutating operations against simulated backends unless allow_simulated is set."""
     if allow_simulated:
         return
-    if getattr(registry, "is_simulated", False) or getattr(system, "is_simulated", False):
+    if registry.is_simulated or system.is_simulated:
         raise UnsupportedPlatformError(
             "Refusing mutating operation against simulated/in-memory backend. "
             "Use native Windows backends for real changes."

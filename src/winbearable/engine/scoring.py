@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..backends.posture import safe_get_reg
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
-from ..const import HIVE_HKLM
 from ..models import AuditDimension, EnvironmentInfo, TweakCheckResult, TweakStatus
 from ..tweaks import get_all_tweaks
 from .evaluate import detect_tweak
@@ -111,11 +111,14 @@ def calculate_hardening_score(
 
 def inspect_defender_smartscreen_posture(registry: RegistryBackend) -> dict[str, Any]:
     """Observe Defender PUA and Windows SmartScreen registry posture with honest confidence."""
-    pua_policy = registry.get_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows Defender", "PUAProtection")
-    pua_local = registry.get_value(HIVE_HKLM, r"SOFTWARE\Microsoft\Windows Defender", "PUAProtection")
+    ok_pua_pol, pua_policy = safe_get_reg(registry, r"SOFTWARE\Policies\Microsoft\Windows Defender", "PUAProtection")
+    ok_pua_loc, pua_local = safe_get_reg(registry, r"SOFTWARE\Microsoft\Windows Defender", "PUAProtection")
     pua_raw = pua_policy[0] if pua_policy is not None else (pua_local[0] if pua_local is not None else None)
     pua_map = {0: "disabled", 1: "enabled", 2: "audit"}
-    if isinstance(pua_raw, int) and pua_raw in pua_map:
+    if not ok_pua_pol and not ok_pua_loc:
+        pua_state = "inaccessible"
+        pua_confidence = "unknown"
+    elif isinstance(pua_raw, int) and pua_raw in pua_map:
         pua_state = pua_map[pua_raw]
         pua_confidence = "partial"
     elif pua_raw is None:
@@ -125,11 +128,14 @@ def inspect_defender_smartscreen_posture(registry: RegistryBackend) -> dict[str,
         pua_state = f"unknown({pua_raw!r})"
         pua_confidence = "unknown"
 
-    ss_policy = registry.get_value(HIVE_HKLM, r"SOFTWARE\Policies\Microsoft\Windows\System", "EnableSmartScreen")
-    ss_explorer = registry.get_value(
-        HIVE_HKLM, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer", "SmartScreenEnabled"
+    ok_ss_pol, ss_policy = safe_get_reg(registry, r"SOFTWARE\Policies\Microsoft\Windows\System", "EnableSmartScreen")
+    ok_ss_exp, ss_explorer = safe_get_reg(
+        registry, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer", "SmartScreenEnabled"
     )
-    if ss_policy is not None:
+    if not ok_ss_pol and not ok_ss_exp:
+        ss_state = "inaccessible"
+        ss_confidence = "unknown"
+    elif ss_policy is not None:
         ss_val = ss_policy[0]
         if ss_val == 0:
             ss_state = "disabled"
@@ -161,12 +167,12 @@ def inspect_defender_smartscreen_posture(registry: RegistryBackend) -> dict[str,
         "smartscreen": {
             "state": ss_state,
             "confidence": ss_confidence,
-            "managed_by_wb": False,
+            "managed_by_wb": ss_policy is not None,
             "source": ("policy" if ss_policy is not None else ("explorer" if ss_explorer is not None else "none")),
         },
         "note": (
             "Registry policy values alone provide partial verification; Defender Tamper Protection "
-            "or third-party AV may override runtime enforcement, and winbearable does not manage SmartScreen."
+            "or third-party AV may override runtime enforcement."
         ),
     }
 
@@ -178,12 +184,14 @@ def inspect_vbs_credential_guard_posture(registry: RegistryBackend) -> dict[str,
     cg_key = rf"{dg_key}\Scenarios\CredentialGuard"
     lsa_key = r"SYSTEM\CurrentControlSet\Control\Lsa"
 
-    vbs_raw = registry.get_value(HIVE_HKLM, dg_key, "EnableVirtualizationBasedSecurity")
-    hvci_raw = registry.get_value(HIVE_HKLM, hvci_key, "Enabled")
-    lsa_cfg = registry.get_value(HIVE_HKLM, lsa_key, "LsaCfgFlags")
-    cg_enabled = registry.get_value(HIVE_HKLM, cg_key, "Enabled")
+    ok_vbs, vbs_raw = safe_get_reg(registry, dg_key, "EnableVirtualizationBasedSecurity")
+    ok_hvci, hvci_raw = safe_get_reg(registry, hvci_key, "Enabled")
+    ok_lsa, lsa_cfg = safe_get_reg(registry, lsa_key, "LsaCfgFlags")
+    ok_cg, cg_enabled = safe_get_reg(registry, cg_key, "Enabled")
 
-    def _bin_state(val: tuple[Any, str] | None) -> tuple[str, str]:
+    def _bin_state(ok: bool, val: tuple[Any, str] | None) -> tuple[str, str]:
+        if not ok:
+            return "inaccessible", "unknown"
         if val is None:
             return "unset", "unknown"
         if val[0] == 1:
@@ -192,10 +200,12 @@ def inspect_vbs_credential_guard_posture(registry: RegistryBackend) -> dict[str,
             return "disabled", "partial"
         return f"unknown({val[0]!r})", "unknown"
 
-    vbs_state, vbs_conf = _bin_state(vbs_raw)
-    hvci_state, hvci_conf = _bin_state(hvci_raw)
+    vbs_state, vbs_conf = _bin_state(ok_vbs, vbs_raw)
+    hvci_state, hvci_conf = _bin_state(ok_hvci, hvci_raw)
 
-    if lsa_cfg is not None:
+    if not ok_lsa and not ok_cg:
+        cg_state, cg_conf = "inaccessible", "unknown"
+    elif lsa_cfg is not None:
         flag = lsa_cfg[0]
         if flag == 1:
             cg_state, cg_conf = "enabled_with_uefi_lock", "partial"
@@ -206,7 +216,7 @@ def inspect_vbs_credential_guard_posture(registry: RegistryBackend) -> dict[str,
         else:
             cg_state, cg_conf = f"unknown({flag!r})", "unknown"
     else:
-        cg_state, cg_conf = _bin_state(cg_enabled)
+        cg_state, cg_conf = _bin_state(ok_cg, cg_enabled)
 
     return {
         "vbs": {"state": vbs_state, "confidence": vbs_conf},
@@ -220,6 +230,6 @@ def inspect_vbs_credential_guard_posture(registry: RegistryBackend) -> dict[str,
             "VBS, HVCI, and Credential Guard share the Hyper-V hypervisor with WSL2; "
             "enabling them isolates kernel/LSA memory but can add CPU, memory, and I/O overhead "
             "(especially on memory-constrained or nested-virtualization hosts). "
-            "Credential Guard is observe-only in winbearable."
+            "Credential Guard is not auto-enabled by default profiles (opt-in high-risk tweak only)."
         ),
     }

@@ -145,7 +145,9 @@ def test_conflict_aware_rollback_for_all_operation_types(tmp_path: Path) -> None
     sys_b.optional_features.pop("TelnetClient", None)
     sys_b.auditpol_subcategories["{0CCE9210-69AE-11D9-BED3-505054503030}"] = "No Auditing"
     sys_b.event_log_configs["Security"] = (False, 1024)
-    sys_b.case_sensitive_dirs[r"C:\src"] = False
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    sys_b.case_sensitive_dirs[str(src_dir)] = False
     sys_b.git_global_config["core.autocrlf"] = "true"
     reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled", 0, REG_DWORD)
     reg.set_value(HIVE_HKCU, r"Software\ConflictKey", "V", 1, REG_DWORD)
@@ -182,7 +184,7 @@ def test_conflict_aware_rollback_for_all_operation_types(tmp_path: Path) -> None
         firewall_group_snapshots=(
             FirewallGroupSnapshot(group_resource_id="@FirewallAPI.dll,-1", previous_enabled=True, post_enabled=False),
         ),
-        fsutil_snapshots=(FsutilSnapshot(directory=r"C:\src", previous_enabled=False, post_enabled=True),),
+        fsutil_snapshots=(FsutilSnapshot(directory=str(src_dir), previous_enabled=False, post_enabled=True),),
         powercfg_snapshots=(PowercfgSnapshot(previous_enabled=True, post_enabled=False),),
         git_config_snapshots=(
             GitConfigSnapshot(
@@ -421,8 +423,6 @@ def test_backend_protocol_contract_for_unknown_targets() -> None:
     nat = NativeSystemBackend(platform_override="linux")
     assert mem.is_scheduled_task_enabled(r"\Missing\Task") is None
     assert mem.is_optional_feature_enabled("MissingFeature") is None
-    assert (
-        nat.is_scheduled_task_enabled(r"\Missing\Task") is False
-        or nat.is_scheduled_task_enabled(r"\Missing\Task") is None
-    )
+    assert nat.is_scheduled_task_enabled(r"\Missing\Task") is None
+    assert nat.is_optional_feature_enabled("MissingFeature") is None
     assert mem.run_wsl_command(["-d", "Ubuntu", "--", "cat", "/etc/wsl.conf"]).returncode != 0

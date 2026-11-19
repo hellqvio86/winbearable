@@ -173,6 +173,8 @@ def _merge_toml_top_level(existing_text: str, desired_keys: dict[str, Any]) -> s
     table_lines = lines[first_table_idx:]
 
     for k, v in desired_keys.items():
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", k):
+            raise ValueError(f"Unsupported non-bare TOML key {k!r}.")
         if isinstance(v, dict):
             raise ValueError(f"Nested dict TOML merge for key {k!r} is unsupported; use top-level scalar/list values.")
         val_repr = json.dumps(v) if isinstance(v, (str, bool, int, float, list)) else repr(v)
@@ -327,8 +329,8 @@ def apply_file_spec(
 
 
 def restore_file_snapshot(snapshot: FileSnapshot) -> None:
-    """Restore a FileSnapshot atomically with byte-level fidelity."""
-    target = Path(snapshot.path)
+    """Restore a FileSnapshot atomically with byte-level fidelity after path policy validation."""
+    target = validate_file_spec_path(snapshot.path)
     if not snapshot.existed:
         if target.is_file():
             target.unlink()

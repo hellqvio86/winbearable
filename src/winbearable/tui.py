@@ -15,7 +15,6 @@ from .models import (
     RiskLevel,
     TweakCheckResult,
     TweakStatus,
-    UnsupportedPlatformError,
 )
 from .state import StateStore
 
@@ -51,12 +50,9 @@ def apply_from_tui(
     allow_high_risk: bool = False,
     allow_irreversible: bool = False,
     allow_simulated: bool = False,
+    allow_managed: bool = False,
 ) -> ApplySummary:
     """Apply drifted tweaks in the profile from the TUI, recording rollback state."""
-    if not env.is_windows:
-        raise UnsupportedPlatformError(
-            f"Applying tweaks from the TUI is only supported on Windows (current OS: {env.os_name})."
-        )
     return run_profile_command(
         profile=profile,
         env=env,
@@ -67,6 +63,7 @@ def apply_from_tui(
         allow_high_risk=allow_high_risk,
         allow_irreversible=allow_irreversible,
         allow_simulated=allow_simulated,
+        allow_managed=allow_managed,
     )
 
 
@@ -340,10 +337,12 @@ def launch_tui(
     system: SystemBackend,
     state_store: StateStore | None = None,
     runner: Callable[[list[tuple[str, str, str, str, str, str]]], int] | None = None,
+    *,
+    allow_managed: bool = False,
 ) -> int:
     """Launch the interactive Textual TUI or explain how to install winbearable[tui]."""
     if runner is not None:
-        evaluations = evaluate_profile(profile, env, registry, system, allow_managed=False)
+        evaluations = evaluate_profile(profile, env, registry, system, allow_managed=allow_managed)
         return runner(format_tui_rows(evaluations))
 
     if not is_textual_available():

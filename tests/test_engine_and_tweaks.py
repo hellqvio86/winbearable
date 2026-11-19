@@ -417,12 +417,12 @@ def test_write_ahead_journal_and_compensation_on_failure(state_store: StateStore
     # Earlier registry mutation was compensated back to original value
     assert registry.get_value(HIVE_HKCU, run_key, "OneDrive") == ("OneDrive.exe", REG_SZ)
 
-    # Journal retains the ROLLED_BACK record when earlier registry mutation is compensated cleanly
+    # Journal retains the FAILED record when compensation of the failing task also fails
     runs = state_store.load_runs()
     assert len(runs) == 1
-    assert runs[0].state == TransactionState.ROLLED_BACK
+    assert runs[0].state == TransactionState.FAILED
     assert runs[0].error is not None
-    assert state_store.get_incomplete_runs() == []
+    assert len(state_store.get_incomplete_runs()) == 1
 
 
 def test_irreversible_guard_and_graceful_process_stop(state_store: StateStore) -> None:

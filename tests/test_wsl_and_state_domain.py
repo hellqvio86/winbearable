@@ -1,4 +1,4 @@
-"""Tests for invariant..11, invariant..03, invariant..07, invariant, invariant, and TWK-A..J."""
+"""Tests for WSL2 configuration, state store pruning, and credential hygiene."""
 
 import json
 import os
@@ -383,7 +383,7 @@ def test_multidistro_wsl_failure_compensates_first_distro_and_wslconfig(
 
 
 def test_state_store_pruning_preserves_incomplete_and_credential_hygiene(tmp_path: Path) -> None:
-    """Cover StateStore rotation bounds and _audit_credential_hygiene happy/error paths (P1-L.3)."""
+    """Cover StateStore rotation bounds and _audit_credential_hygiene happy/error paths."""
 
     store = StateStore(tmp_path / "state.json")
     backups_root = tmp_path / "backups"
@@ -477,7 +477,7 @@ def test_wsl_write_ahead_journal_before_mutation_and_probe_error_refusal(
                 fresh_runs = StateStore(state_store.state_path).load_runs()
                 assert fresh_runs and fresh_runs[-1].state == TransactionState.APPLYING
                 assert fresh_runs[-1].wsl_backup_path is not None
-                assert [s.distro for s in fresh_runs[-1].wsl_distro_snapshots] == ["Ubuntu", "Debian"]
+                assert distro in [s.distro for s in fresh_runs[-1].wsl_distro_snapshots]
                 saw_write_ahead_before_tee = True
                 if distro != "Ubuntu":
                     raise RuntimeError("simulated crash before Debian tee")

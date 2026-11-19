@@ -14,8 +14,10 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from .backends.system_native_cmd import sys32_exe
 from .const import WSL_VM_CREATOR_ID
 
 _ACTION_MAP = {"block": "Block", "allow": "Allow", "notconfigured": "NotConfigured"}
@@ -40,11 +42,7 @@ CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 
 def _sys32_path(*parts: str) -> str:
-    sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
-    if sys_root.endswith("\\") or sys_root.endswith("/"):
-        sys_root = sys_root[:-1]
-    sep = "\\" if "\\" in sys_root or (len(sys_root) >= 2 and sys_root[1] == ":") else "/"
-    return sep.join([sys_root, "System32", *parts])
+    return str(Path(sys32_exe(parts[0])).joinpath(*parts[1:]))
 
 
 def _powershell_exe() -> str:

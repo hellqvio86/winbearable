@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,24 @@ from pathlib import Path
 from winbearable.const import __version__
 
 ROOT = Path(__file__).resolve().parent.parent
+INSTALLER_MANIFEST = ROOT / "packaging" / "winget" / "hellqvio86.winbearable.installer.yaml"
+
+
+def update_installer_manifest_sha256(sha256_hex: str, manifest_path: Path | None = None) -> Path:
+    """Update InstallerSha256 in the Winget installer manifest with a validated 64-hex digest."""
+    if not re.fullmatch(r"[0-9A-Fa-f]{64}", sha256_hex):
+        raise ValueError(f"Invalid SHA-256 digest: {sha256_hex!r}")
+    target = manifest_path or INSTALLER_MANIFEST
+    text = target.read_text(encoding="utf-8")
+    updated, count = re.subn(
+        r"(?m)^(\s*InstallerSha256:\s*)\S+",
+        rf"\g<1>{sha256_hex.upper()}",
+        text,
+    )
+    if count != 1:
+        raise ValueError(f"Expected 1 InstallerSha256 line in {target}, found {count}")
+    target.write_text(updated, encoding="utf-8", newline="\n")
+    return target
 
 
 def _parse_version_tuple(version: str) -> tuple[int, int, int, int]:
@@ -130,6 +149,8 @@ def main() -> int:
     sha256_hex = hashlib.sha256(zip_path.read_bytes()).hexdigest().upper()
     sha_file = dist_dir / f"{zip_path.name}.sha256"
     sha_file.write_text(f"{sha256_hex}  {zip_path.name}\n", encoding="utf-8", newline="\n")
+    if INSTALLER_MANIFEST.is_file():
+        update_installer_manifest_sha256(sha256_hex)
 
     print(f"Built:  {zip_path}")
     print(f"SHA256: {sha256_hex}")

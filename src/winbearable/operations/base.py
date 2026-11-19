@@ -33,7 +33,7 @@ def now_iso() -> str:
 
 def raise_system_error(system: SystemBackend, message: str, *, category: str = "system_error") -> None:
     """Raise a typed WinbearableError subclass based on SystemBackend.last_outcome."""
-    outcome = getattr(system, "last_outcome", None)
+    outcome = system.last_outcome
     if isinstance(outcome, OperationOutcome) and outcome.status != OperationStatus.OK:
         detail = f"{message} ({outcome.status}: {outcome.message})"
         if outcome.status == OperationStatus.TIMEOUT:

@@ -8,7 +8,7 @@ from .enums import TransactionState
 from .errors import InvalidStateTransitionError
 
 if TYPE_CHECKING:
-    from .snapshots import RunRecord
+    from .run_record import RunRecord
 
 ALLOWED_TRANSACTION_TRANSITIONS: dict[TransactionState, frozenset[TransactionState]] = {
     TransactionState.PLANNED: frozenset(

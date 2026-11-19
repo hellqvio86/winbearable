@@ -85,14 +85,21 @@ def recover_incomplete_runs(
             else:
                 final_state = TransactionState.FAILED
             final_error = "; ".join(comp_errors) if comp_errors else rec.error
+            skip_pkg = was_failed and not force
             updated_journal = tuple(
                 replace(
                     entry,
                     rollback_outcome=(
-                        "conflict"
-                        if any(entry.target_id in err or entry.tweak_id in err for err in comp_errors)
+                        "skipped"
+                        if skip_pkg and entry.operation_type in {"winget_package", "vscode_extension"}
                         else (
-                            "rolled_back" if entry.outcome == "applied" and not comp_errors else entry.rollback_outcome
+                            "conflict"
+                            if any(entry.target_id in err or entry.tweak_id in err for err in comp_errors)
+                            else (
+                                "rolled_back"
+                                if entry.outcome == "applied" and not comp_errors
+                                else entry.rollback_outcome
+                            )
                         )
                     ),
                 )

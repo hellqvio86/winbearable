@@ -121,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force snapshot restore even if post-apply external modifications are detected",
     )
+    rollback_parser.add_argument("--uac-output", dest="uac_output", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    rollback_parser.add_argument(
+        "--uac-caller-sid", dest="uac_caller_sid", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
     rollback_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # wb recover
@@ -143,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-conflicts",
         action="store_true",
         help="Mark runs with only restore_conflict items as partially_rolled_back to preserve user edits",
+    )
+    recover_parser.add_argument("--uac-output", dest="uac_output", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    recover_parser.add_argument(
+        "--uac-caller-sid", dest="uac_caller_sid", default=argparse.SUPPRESS, help=argparse.SUPPRESS
     )
     recover_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
@@ -326,18 +334,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _absolutize_flag_value(flag: str, val: str) -> str:
+    if flag == "--expected-fingerprints" and val.startswith("@"):
+        cand = Path(val[1:])
+        return f"@{cand if cand.is_absolute() else cand.resolve()}"
+    cand = Path(val)
+    if not cand.is_absolute() and (flag != "--profile" or cand.exists()):
+        return str(cand.resolve())
+    return val
+
+
 def absolutize_elevated_argv(raw_argv: list[str]) -> list[str]:
     """Resolve relative file path arguments before UAC elevation changes CWD to System32."""
-    path_flags = {"--profile", "--wslconfig", "--output", "--plan-file"}
+    path_flags = {"--profile", "--wslconfig", "--output", "--plan-file", "--expected-fingerprints"}
     out: list[str] = []
     idx = 0
     while idx < len(raw_argv):
         tok = raw_argv[idx]
         if tok in path_flags and idx + 1 < len(raw_argv):
-            val = raw_argv[idx + 1]
-            cand = Path(val)
-            if not cand.is_absolute() and (tok != "--profile" or cand.exists()):
-                val = str(cand.resolve())
+            val = _absolutize_flag_value(tok, raw_argv[idx + 1])
             out.extend([tok, val])
             idx += 2
             continue
@@ -345,10 +360,7 @@ def absolutize_elevated_argv(raw_argv: list[str]) -> list[str]:
         for flag in path_flags:
             prefix = f"{flag}="
             if tok.startswith(prefix):
-                val = tok[len(prefix) :]
-                cand = Path(val)
-                if not cand.is_absolute() and (flag != "--profile" or cand.exists()):
-                    val = str(cand.resolve())
+                val = _absolutize_flag_value(flag, tok[len(prefix) :])
                 out.append(f"{prefix}{val}")
                 matched_eq = True
                 break

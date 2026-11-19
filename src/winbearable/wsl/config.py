@@ -240,7 +240,7 @@ def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBack
         return
     lf_content = distro_plan.merged_content.replace("\r\n", "\n").replace("\r", "\n")
     expected_sha256 = hashlib.sha256(lf_content.encode("utf-8")).hexdigest()
-    if getattr(system, "is_simulated", False):
+    if system.is_simulated:
         write_res = system.run_wsl_command(
             ["-d", distro_plan.distro, "-u", "root", "--", "tee", "/etc/wsl.conf"],
             input_text=lf_content,

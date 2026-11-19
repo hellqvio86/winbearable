@@ -2,24 +2,13 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..const import HIVE_HKLM
-from ..models import EnvironmentInfo, RegistryView
+from ..models import EnvironmentInfo, OperationOutcome, RegistryView
 from .registry_protocol import RegistryBackend
-
-
-def sys32_exe(exe_name: str) -> str:
-    """Return full System32 path on Windows to avoid PATH hijacking."""
-    if sys.platform == "win32":
-        win_dir = Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))
-        return str(win_dir / "System32" / exe_name)
-    return exe_name
-
 
 GIB_BYTES = 1024 * 1024 * 1024
 
@@ -36,6 +25,20 @@ class CommandResult:
 
 class SystemBackend(Protocol):
     """Protocol for native OS inspection, services, tasks, features, winget apps, and processes."""
+
+    is_simulated: bool
+    last_outcome: OperationOutcome | None
+    command_history: list[dict[str, Any]]
+
+    def run_tool(
+        self,
+        argv: list[str],
+        *,
+        input_text: str | None = None,
+        timeout: float = 120.0,
+        allowed_returncodes: tuple[int, ...] = (0,),
+    ) -> OperationOutcome:
+        """Execute a native tool and return a normalized OperationOutcome."""
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         """Inspect host environment using native registry and Win32 APIs."""

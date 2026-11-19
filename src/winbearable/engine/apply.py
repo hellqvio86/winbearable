@@ -97,7 +97,7 @@ def execute_tweak_mutations(
         try:
             entries.extend(adapter.apply(tweak, env, registry, system, ctx))
         except WinbearableError as exc:
-            raw_out = getattr(system, "last_outcome", None)
+            raw_out = system.last_outcome
             rc = raw_out.returncode if isinstance(raw_out, OperationOutcome) and not raw_out.ok else None
             cmd = raw_out.command if isinstance(raw_out, OperationOutcome) and not raw_out.ok else ()
             raise TweakMutationError(
@@ -110,13 +110,15 @@ def execute_tweak_mutations(
     if not (tweak.winget_specs and ext_skipped_elevated):
         for adapter in adapters:
             if not adapter.verify(tweak, registry, system):
-                post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
+                post_check = detect_tweak(
+                    tweak, env, registry, system, allow_managed=allow_managed, expand_fn=expand_fn
+                )
                 msg = (
                     f"Post-apply verification failed for '{tweak.tweak_id}' ({adapter.kind}): "
                     f"{post_check.status} ({post_check.detail})"
                 )
                 raise TweakMutationError(OperationOutcome(status=OperationStatus.UNKNOWN, message=msg))
-        post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed)
+        post_check = detect_tweak(tweak, env, registry, system, allow_managed=allow_managed, expand_fn=expand_fn)
         if post_check.status != TweakStatus.APPLIED:
             raise TweakMutationError(
                 OperationOutcome(
@@ -198,7 +200,7 @@ def apply_profile(
                 wsl_planner=wsl_planner,
                 wsl_applier=wsl_applier,
             )
-        return FinalizeJournalPhase().run(ctx, registry=registry, state_store=state_store)
+        return FinalizeJournalPhase().run(ctx, registry=registry, system=system, state_store=state_store)
 
 
 def run_profile_command(

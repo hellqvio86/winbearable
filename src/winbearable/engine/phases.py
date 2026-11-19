@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,15 +20,11 @@ from ..models import (
     OperationOutcome,
     OperationStatus,
     ProfileSpec,
-    RegistryView,
     RiskLevel,
-    RunRecord,
     TransactionState,
-    TweakCheckResult,
     TweakStatus,
     WslDistroSnapshot,
 )
-from ..operations import identity
 from ..state import StateStore
 from ..tweaks import get_tweak
 from ..wsl import (
@@ -39,12 +35,11 @@ from ..wsl import (
     prepare_wsl_plan,
 )
 from .compensation import (
-    PreApplySnapshots,
     collect_pre_apply_snapshots,
-    compensate_run_record,
     compute_dry_run_fingerprints,
     compute_snapshot_fingerprints,
 )
+from .context import ApplyContext
 from .evaluate import evaluate_profile
 from .params import (
     ApplySummary,
@@ -55,136 +50,6 @@ from .params import (
     capture_failure_outcome,
     resolve_tweak_params,
 )
-
-
-@dataclass
-class ApplyContext:
-    """Mutable transaction state shared across apply_profile phases."""
-
-    profile: ProfileSpec
-    dry_run: bool
-    run_id_candidate: str
-    now_iso: str
-    backup_dir: Path
-    evaluations: list[TweakCheckResult]
-    final_results: list[TweakCheckResult]
-    drifted_indices: list[int]
-    planned_ids: tuple[str, ...]
-    snaps: PreApplySnapshots | None = None
-    live_fingerprints: dict[str, str] = field(default_factory=dict)
-    precondition_fingerprints: dict[str, str] = field(default_factory=dict)
-    file_hashes: dict[str, str | None] = field(default_factory=dict)
-    file_exists: dict[str, bool] = field(default_factory=dict)
-    applied_ids: list[str] = field(default_factory=list)
-    rolled_back_ids: list[str] = field(default_factory=list)
-    already_applied_ids: list[str] = field(default_factory=list)
-    skipped_policy_ids: list[str] = field(default_factory=list)
-    skipped_admin_ids: list[str] = field(default_factory=list)
-    skipped_build_ids: list[str] = field(default_factory=list)
-    skipped_edition_ids: list[str] = field(default_factory=list)
-    skipped_managed_ids: list[str] = field(default_factory=list)
-    failed_ids: list[str] = field(default_factory=list)
-    newly_installed_winget: list[str] = field(default_factory=list)
-    newly_installed_extensions: list[str] = field(default_factory=list)
-    completed_ops: list[str] = field(default_factory=list)
-    failure_outcomes: list[dict[str, Any]] = field(default_factory=list)
-    journal_entries: list[OperationJournalEntry] = field(default_factory=list)
-    exported_subtrees: set[tuple[str, str, RegistryView]] = field(default_factory=set)
-    wsl_backup_path: str | None = None
-    wsl_target_path: str | None = None
-    wslconfig_existed: bool | None = None
-    wslconfig_post_sha256: str | None = None
-    wsl_distro_snapshots: list[WslDistroSnapshot] = field(default_factory=list)
-    wsl_changed: bool = False
-    wsl_result: dict[str, Any] | None = None
-    run_id: str | None = None
-
-    def record_checkpoint(self, op_desc: str) -> None:
-        """Append an operation checkpoint description."""
-        self.completed_ops.append(op_desc)
-
-    def record_journal_entry(self, entry: OperationJournalEntry) -> None:
-        """Update an existing planned journal entry or append a new entry."""
-        for i, existing in enumerate(self.journal_entries):
-            if existing.target_id == entry.target_id and existing.outcome == "planned":
-                self.journal_entries[i] = entry
-                return
-        self.journal_entries.append(entry)
-
-    def populate_post_apply_states(self, registry: RegistryBackend) -> None:
-        """Record post-apply registry values and file hashes onto pre-apply snapshots."""
-        if self.snaps is None:
-            return
-        applied_target_ids = {e.target_id for e in self.journal_entries if e.outcome == "applied"}
-        for i, rs in enumerate(self.snaps.registry):
-            if identity.registry_value_id(rs.hive, rs.key_path, rs.value_name, rs.view) not in applied_target_ids:
-                continue
-            try:
-                cur = registry.get_value(rs.hive, rs.key_path, rs.value_name, view=rs.view)
-            except OSError:
-                continue
-            self.snaps.registry[i] = replace(
-                rs,
-                post_existed=cur is not None,
-                post_data=cur[0] if cur is not None else None,
-                post_type=cur[1] if cur is not None else None,
-            )
-        for i, fs in enumerate(self.snaps.files):
-            if identity.file_id(fs.path) not in applied_target_ids:
-                continue
-            try:
-                p = Path(fs.path)
-                post_sha = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
-            except OSError:
-                continue
-            self.snaps.files[i] = replace(fs, post_sha256=post_sha)
-
-    def make_record(
-        self,
-        state: TransactionState,
-        registry: RegistryBackend,
-        error: str | None = None,
-    ) -> RunRecord:
-        """Build a RunRecord snapshot for the current transaction state."""
-        if state == TransactionState.COMMITTED:
-            self.populate_post_apply_states(registry)
-            for i, entry in enumerate(self.journal_entries):
-                if entry.outcome == "planned":
-                    self.journal_entries[i] = replace(entry, outcome="skipped")
-        snaps = self.snaps
-        return RunRecord(
-            run_id=self.run_id_candidate,
-            timestamp=self.now_iso,
-            profile_name=self.profile.name,
-            applied_tweaks=tuple(self.applied_ids),
-            planned_tweaks=self.planned_ids,
-            registry_snapshots=tuple(snaps.registry) if snaps else (),
-            registry_key_snapshots=tuple(snaps.registry_keys) if snaps else (),
-            service_snapshots=tuple(snaps.services) if snaps else (),
-            task_snapshots=tuple(snaps.tasks) if snaps else (),
-            feature_snapshots=tuple(snaps.features) if snaps else (),
-            auditpol_snapshots=tuple(snaps.auditpol) if snaps else (),
-            wevtutil_snapshots=tuple(snaps.wevtutil) if snaps else (),
-            firewall_group_snapshots=tuple(snaps.firewall_groups) if snaps else (),
-            fsutil_snapshots=tuple(snaps.fsutil) if snaps else (),
-            powercfg_snapshots=tuple(snaps.powercfg) if snaps else (),
-            git_config_snapshots=tuple(snaps.git_config) if snaps else (),
-            icacls_snapshots=tuple(snaps.icacls) if snaps else (),
-            file_snapshots=tuple(snaps.files) if snaps else (),
-            installed_winget_packages=tuple(self.newly_installed_winget),
-            installed_vscode_extensions=tuple(self.newly_installed_extensions),
-            completed_operations=tuple(self.completed_ops),
-            failure_outcomes=tuple(self.failure_outcomes),
-            operation_journal=tuple(self.journal_entries),
-            precondition_fingerprints=self.live_fingerprints,
-            wsl_backup_path=self.wsl_backup_path,
-            wslconfig_path=self.wsl_target_path,
-            wslconfig_existed=self.wslconfig_existed,
-            wslconfig_post_sha256=self.wslconfig_post_sha256,
-            wsl_distro_snapshots=tuple(self.wsl_distro_snapshots),
-            state=state,
-            error=error,
-        )
 
 
 class PlanPhase:
@@ -227,6 +92,7 @@ class PlanPhase:
             skip_ids=skip_ids,
             category_filter=category_filter,
             allow_managed=allow_managed,
+            expand_fn=expand_fn,
         )
         drifted_high_risk = [
             res.tweak_id for res in evaluations if res.status == TweakStatus.DRIFTED and res.risk == RiskLevel.HIGH
@@ -297,11 +163,12 @@ class PlanPhase:
             live_fingerprints = compute_snapshot_fingerprints(snaps)
             if expected_fingerprints is not None:
                 for key, expected_fp in expected_fingerprints.items():
-                    if key in live_fingerprints and live_fingerprints[key] != expected_fp:
+                    if key not in live_fingerprints or live_fingerprints[key] != expected_fp:
+                        actual_fp = live_fingerprints.get(key, "<missing>")
                         raise ExternalDriftError(
                             f"Precondition drift detected before apply for '{key}': "
-                            f"expected {expected_fp!r}, got {live_fingerprints[key]!r}. Re-run `wb plan`.",
-                            context={"target_id": key, "expected": expected_fp, "actual": live_fingerprints[key]},
+                            f"expected {expected_fp!r}, got {actual_fp!r}. Re-run `wb plan`.",
+                            context={"target_id": key, "expected": expected_fp, "actual": actual_fp},
                         )
             ctx.snaps = snaps
             ctx.live_fingerprints = live_fingerprints
@@ -390,25 +257,13 @@ class MutateTweaksPhase:
                     )
                 )
                 ctx.final_results[idx] = replace(res, status=TweakStatus.ERROR, detail=err_msg, outcome=outcome)
-                comp_errors = compensate_run_record(
-                    ctx.make_record(TransactionState.ROLLING_BACK, registry), registry, system
+                ctx.compensate_and_record_failure(
+                    registry,
+                    system,
+                    state_store,
+                    err_msg,
+                    failing_tweak_id=res.tweak_id,
                 )
-                ctx.rolled_back_ids.extend(ctx.applied_ids)
-                ctx.applied_ids.clear()
-                irrev_notes = [
-                    tid
-                    for tid in ctx.rolled_back_ids
-                    if (tw := get_tweak(tid)) and (tw.irreversible or tw.uninstall_onedrive or tw.stop_processes)
-                ]
-                note = f" (irreversible ops cannot be undone: {', '.join(irrev_notes)})" if irrev_notes else ""
-                full_error = (
-                    f"{err_msg}{note}"
-                    if not comp_errors
-                    else f"{err_msg}{note} (rollback errors: {'; '.join(comp_errors)})"
-                )
-                final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-                state_store.upsert_run(ctx.make_record(final_state, registry, error=full_error))
-                ctx.run_id = ctx.run_id_candidate
                 return False
 
             ctx.applied_ids.append(res.tweak_id)
@@ -469,18 +324,11 @@ class MutateWslPhase:
             ctx.wsl_backup_path = str(prepared_wsl.backup_path) if prepared_wsl.backup_path is not None else None
             if prepared_wsl.wslconfig_changed:
                 ctx.wsl_target_path = str(prepared_wsl.target_wslconfig)
-                ctx.wslconfig_existed = prepared_wsl.target_wslconfig.is_file()
-            for d_plan in prepared_wsl.distro_plans:
-                if d_plan.changed:
-                    ctx.wsl_distro_snapshots.append(
-                        WslDistroSnapshot(
-                            distro=d_plan.distro,
-                            existed=d_plan.probe.status == "exists",
-                            previous_content=d_plan.probe.content,
-                            distro_guid=get_wsl_distro_guid(d_plan.distro, registry),
-                        )
-                    )
-            ctx.wsl_changed = prepared_wsl.wslconfig_changed or bool(ctx.wsl_distro_snapshots)
+                ctx.wslconfig_existed = getattr(
+                    prepared_wsl, "baseline_existed", prepared_wsl.target_wslconfig.is_file()
+                )
+            changed_distro_plans = [d_plan for d_plan in prepared_wsl.distro_plans if d_plan.changed]
+            ctx.wsl_changed = prepared_wsl.wslconfig_changed or bool(changed_distro_plans)
             if ctx.wsl_changed:
                 if not ctx.drifted_indices:
                     state_store.upsert_run(ctx.make_record(TransactionState.PLANNED, registry))
@@ -492,17 +340,22 @@ class MutateWslPhase:
                 state_store.upsert_run(ctx.make_record(TransactionState.APPLYING, registry))
 
             for d_plan in prepared_wsl.distro_plans:
+                if d_plan.changed:
+                    ctx.wsl_distro_snapshots.append(
+                        WslDistroSnapshot(
+                            distro=d_plan.distro,
+                            existed=d_plan.probe.status == "exists",
+                            previous_content=d_plan.probe.content,
+                            distro_guid=get_wsl_distro_guid(d_plan.distro, registry),
+                        )
+                    )
+                    state_store.upsert_run(ctx.make_record(TransactionState.APPLYING, registry))
                 apply_distro_wsl_conf(d_plan, system)
                 if d_plan.changed:
-                    snap_idx = next(
-                        (i for i, s in enumerate(ctx.wsl_distro_snapshots) if s.distro == d_plan.distro),
-                        None,
+                    ctx.wsl_distro_snapshots[-1] = replace(
+                        ctx.wsl_distro_snapshots[-1],
+                        post_sha256=hashlib.sha256(d_plan.merged_content.encode("utf-8")).hexdigest(),
                     )
-                    if snap_idx is not None:
-                        ctx.wsl_distro_snapshots[snap_idx] = replace(
-                            ctx.wsl_distro_snapshots[snap_idx],
-                            post_sha256=hashlib.sha256(d_plan.merged_content.encode("utf-8")).hexdigest(),
-                        )
                     state_store.upsert_run(ctx.make_record(TransactionState.APPLYING, registry))
 
             ctx.wsl_result = self._build_wsl_result(
@@ -514,42 +367,24 @@ class MutateWslPhase:
             )
         except PermissionError as exc:
             if wslconfig_path is not None:
-                comp_errors = compensate_run_record(
-                    ctx.make_record(TransactionState.ROLLING_BACK, registry), registry, system
-                )
-                ctx.rolled_back_ids.extend(ctx.applied_ids)
-                ctx.applied_ids.clear()
                 if ctx.drifted_indices or ctx.wsl_changed:
-                    final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-                    state_store.upsert_run(ctx.make_record(final_st, registry, error=f"WSL PermissionError: {exc}"))
+                    ctx.compensate_and_record_failure(registry, system, state_store, f"WSL PermissionError: {exc}")
                 raise
             ctx.wsl_result = {"enabled": True, "skipped": True, "reason": str(exc)}
             if ctx.wsl_changed:
-                comp_errors = compensate_run_record(
-                    ctx.make_record(TransactionState.ROLLING_BACK, registry), registry, system
+                ctx.failed_ids.append("wsl")
+                wsl_outcome = OperationOutcome(status=OperationStatus.ACCESS_DENIED, message=str(exc))
+                ctx.failure_outcomes.append({"tweak_id": "wsl", **wsl_outcome.to_dict()})
+                ctx.compensate_and_record_failure(
+                    registry, system, state_store, f"WSL skipped due to PermissionError: {exc}"
                 )
-                ctx.rolled_back_ids.extend(ctx.applied_ids)
-                ctx.applied_ids.clear()
-                final_st = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-                state_store.upsert_run(
-                    ctx.make_record(final_st, registry, error=f"WSL skipped due to PermissionError: {exc}")
-                )
-                ctx.run_id = ctx.run_id_candidate
         except (WslOperationError, OSError) as exc:
             err_msg = str(exc)
             ctx.failed_ids.append("wsl")
             wsl_outcome = OperationOutcome(status=OperationStatus.UNKNOWN, message=err_msg)
             ctx.failure_outcomes.append({"tweak_id": "wsl", **wsl_outcome.to_dict()})
             ctx.wsl_result = {"enabled": True, "error": err_msg, "outcome": wsl_outcome.to_dict()}
-            comp_errors = compensate_run_record(
-                ctx.make_record(TransactionState.ROLLING_BACK, registry), registry, system
-            )
-            ctx.rolled_back_ids.extend(ctx.applied_ids)
-            ctx.applied_ids.clear()
-            full_error = err_msg if not comp_errors else f"{err_msg} (rollback errors: {'; '.join(comp_errors)})"
-            final_state = TransactionState.FAILED if comp_errors else TransactionState.ROLLED_BACK
-            state_store.upsert_run(ctx.make_record(final_state, registry, error=full_error))
-            ctx.run_id = ctx.run_id_candidate
+            ctx.compensate_and_record_failure(registry, system, state_store, err_msg)
 
     @staticmethod
     def _build_wsl_result(
@@ -598,11 +433,12 @@ class FinalizeJournalPhase:
         ctx: ApplyContext,
         *,
         registry: RegistryBackend,
+        system: SystemBackend | None = None,
         state_store: StateStore,
     ) -> ApplySummary:
         """Finalize journal state and build ApplySummary."""
         if not ctx.dry_run and ctx.run_id is None and (ctx.drifted_indices or ctx.wsl_changed):
-            state_store.upsert_run(ctx.make_record(TransactionState.COMMITTED, registry))
+            state_store.upsert_run(ctx.make_record(TransactionState.COMMITTED, registry, system=system))
             ctx.run_id = ctx.run_id_candidate
 
         digest_payload = json.dumps(

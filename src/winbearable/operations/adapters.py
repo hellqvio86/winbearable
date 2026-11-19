@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
 from ..models import PlannedOperation, TweakDefinition
@@ -62,13 +65,20 @@ def inspect_non_registry_operations(
     tweak: TweakDefinition,
     registry: RegistryBackend,
     system: SystemBackend,
+    *,
+    expand_fn: Callable[[str], Path] | None = None,
 ) -> tuple[list[PlannedOperation], list[str], list[str]]:
     """Inspect all non-registry operations for a tweak via ordered OperationAdapters."""
     all_ops: list[PlannedOperation] = []
     all_drifted: list[str] = []
     all_unverified: list[str] = []
     for adapter in NON_REGISTRY_ADAPTERS:
-        ops, drifted, unverified = adapter.inspect(tweak, registry, system)
+        active_adapter = (
+            FileConfigOperationAdapter(expand_fn=expand_fn)
+            if isinstance(adapter, FileConfigOperationAdapter) and expand_fn is not None
+            else adapter
+        )
+        ops, drifted, unverified = active_adapter.inspect(tweak, registry, system)
         all_ops.extend(ops)
         all_drifted.extend(drifted)
         all_unverified.extend(unverified)

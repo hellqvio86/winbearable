@@ -117,7 +117,7 @@ def resolve_elevation_target(
         ):
             return str(_validate_elevation_executable(argv0_path, reparse_check=reparse_check)), elevated_args
 
-    sibling_wb = Path(sys.executable).resolve().with_name("wb.exe")
+    sibling_wb = Path(sys.executable).with_name("wb.exe")
     if sibling_wb.is_file():
         return str(_validate_elevation_executable(sibling_wb, reparse_check=reparse_check)), elevated_args
 

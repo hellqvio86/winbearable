@@ -17,6 +17,7 @@ if sys.platform == "win32":
 else:
     import fcntl
 
+from .backends.win32_fs import is_reparse_or_symlink
 from .const import APP_NAME, ENV_STATE_PATH, STATE_SCHEMA_VERSION
 from .models import (
     InvalidStateTransitionError,
@@ -122,6 +123,10 @@ def migrate_state_payload(payload: Any, *, source_label: str = "state.json") -> 
                 for fo in item["failure_outcomes"]:
                     if isinstance(fo, dict) and "tweak_id" in fo:
                         fo["tweak_id"] = resolve_tweak_id(str(fo["tweak_id"]))
+            if isinstance(item.get("operation_journal"), list):
+                for op_entry in item["operation_journal"]:
+                    if isinstance(op_entry, dict) and "tweak_id" in op_entry:
+                        op_entry["tweak_id"] = resolve_tweak_id(str(op_entry["tweak_id"]))
 
     if not isinstance(migrated.get("runs"), list):
         raise StateStoreError(f"Invalid state file at {source_label}: 'runs' must be a list.")
@@ -156,6 +161,11 @@ class StateStore:
         self._tx_rlock = threading.RLock()
         self.last_cleanup_warnings: list[str] = []
 
+    @staticmethod
+    def _ensure_not_reparse(path: Path) -> None:
+        if is_reparse_or_symlink(path) or any(is_reparse_or_symlink(p) for p in path.parents):
+            raise StateStoreError(f"Refusing symlink or reparse-point state path: {path}")
+
     @contextmanager
     def _file_lock(self, suffix: str) -> Iterator[None]:
         """Acquire a cooperative per-store file lock.
@@ -166,6 +176,7 @@ class StateStore:
         abnormally and leaves a stale ``*.lock`` / ``*.tx.lock`` file behind when no
         ``wb`` process is running, delete the lock file and run ``wb recover --apply``.
         """
+        self._ensure_not_reparse(self.state_path)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.state_path.parent, 0o700)
@@ -250,8 +261,8 @@ class StateStore:
     ) -> list[str]:
         warnings: list[str] = []
         backups_root = self.state_path.parent / "backups"
-        if backups_root.is_symlink() or not backups_root.is_dir():
-            if backups_root.is_symlink():
+        if is_reparse_or_symlink(backups_root) or not backups_root.is_dir():
+            if is_reparse_or_symlink(backups_root):
                 warnings.append(f"Skipped backup pruning: {backups_root} is a symlink/reparse point.")
             return warnings
         resolved_root = backups_root.resolve()
@@ -261,15 +272,13 @@ class StateStore:
             TransactionState.ROLLING_BACK,
             TransactionState.FAILED,
         }
-        protected_ids = (
-            {run.run_id for run in runs}
-            if prune_unreferenced
-            else {run.run_id for run in runs if run.state in incomplete_states}
-        )
-        resolved_known_ids = {run.run_id for run in runs} if known_ids is None else known_ids
-        candidates: list[tuple[float, Path]] = []
+        protected_ids = {run.run_id for run in runs if run.state in incomplete_states}
+        referenced_ids = {run.run_id for run in runs}
+        resolved_known_ids = referenced_ids if known_ids is None else known_ids
+        referenced_candidates: list[tuple[float, Path]] = []
+        unreferenced_dirs: list[Path] = []
         for entry in backups_root.iterdir():
-            if entry.is_symlink():
+            if is_reparse_or_symlink(entry):
                 warnings.append(f"Skipped symlink/reparse point in backups: {entry.name}")
                 continue
             if entry.name not in resolved_known_ids and not re.match(r"^\d{8}-\d{6}-[0-9a-f]{8}$", entry.name):
@@ -283,11 +292,16 @@ class StateStore:
             except OSError, ValueError:
                 warnings.append(f"Skipped backup directory outside root or inaccessible: {entry.name}")
                 continue
-            candidates.append((mtime, entry))
+            if entry.name in referenced_ids:
+                referenced_candidates.append((mtime, entry))
+            else:
+                unreferenced_dirs.append(entry)
 
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        stale_slice = candidates if prune_unreferenced else candidates[max_backup_dirs:]
-        for _, stale_dir in stale_slice:
+        referenced_candidates.sort(key=lambda item: item[0], reverse=True)
+        stale_dirs: list[Path] = [d for _, d in referenced_candidates[max_backup_dirs:]]
+        if prune_unreferenced:
+            stale_dirs.extend(unreferenced_dirs)
+        for stale_dir in stale_dirs:
             try:
                 shutil.rmtree(stale_dir)
             except OSError as exc:
@@ -295,6 +309,7 @@ class StateStore:
         return warnings
 
     def _write_runs_atomic_unlocked(self, runs: list[RunRecord]) -> None:
+        self._ensure_not_reparse(self.state_path)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.state_path.parent, 0o700)
@@ -372,7 +387,7 @@ class StateStore:
         bak_path = self.state_path.with_suffix(".json.bak")
         if not bak_path.is_file():
             return False
-        with self._locked():
+        with self.transaction_lock(), self._locked():
             raw_text = bak_path.read_text(encoding="utf-8")
             payload: Any = json.loads(raw_text)
             if not isinstance(payload, dict):
@@ -394,7 +409,7 @@ class StateStore:
 
     def migrate(self, *, dry_run: bool = True) -> dict[str, Any]:
         """Inspect and optionally migrate state.json on disk to STATE_SCHEMA_VERSION."""
-        with self._locked():
+        with self.transaction_lock(), self._locked():
             if not self.state_path.is_file():
                 return {
                     "state_path": str(self.state_path),
@@ -434,12 +449,12 @@ class StateStore:
 
     def save_runs(self, runs: list[RunRecord]) -> None:
         """Atomically persist all RunRecords to state.json."""
-        with self._locked():
+        with self.transaction_lock(), self._locked():
             self._save_runs_unlocked(runs)
 
     def append_run(self, record: RunRecord) -> None:
         """Append a newly completed RunRecord and persist atomically."""
-        with self._locked():
+        with self.transaction_lock(), self._locked():
             runs = self._load_runs_unlocked()
             runs.append(record)
             self._save_runs_unlocked(runs)

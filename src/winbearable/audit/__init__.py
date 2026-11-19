@@ -1,7 +1,5 @@
 """Read-only native security & posture audits (`wb audit` and `wb doctor` blockers)."""
 
-import sys
-
 from winbearable.audit.models import AuditFinding
 from winbearable.audit.models import safe_val as _safe_val
 from winbearable.audit.registry_checks import (
@@ -87,5 +85,4 @@ __all__ = [
     "_safe_val",
     "build_doctor_blockers",
     "run_security_audit",
-    "sys",
 ]

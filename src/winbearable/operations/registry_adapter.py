@@ -48,7 +48,6 @@ class RegistryOperationAdapter:
         for raw_spec in tweak.registry_specs:
             expanded = expand_registry_spec(raw_spec, registry)
             if not expanded and raw_spec.key_path_glob is not None:
-                unverified.append(f"0 matching subkeys for {raw_spec.hive}\\{raw_spec.key_path_glob}")
                 continue
             for reg_spec in expanded:
                 if reg_spec.action == ACTION_DELETE_KEY:

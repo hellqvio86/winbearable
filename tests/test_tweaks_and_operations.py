@@ -1,4 +1,4 @@
-"""Tests for invariant..11, invariant..03, invariant..07, invariant, invariant, and TWK-A..J."""
+"""Tests for tweak roundtrips, operation adapters, file mergers, and audit checks."""
 
 import json
 from dataclasses import replace
@@ -223,7 +223,7 @@ def test_file_config_adapter_json_jsonc_and_hash_guard(tmp_path: Path) -> None:
 
 
 def test_new_tweaks_roundtrip_and_tamper_protection(state_store: StateStore) -> None:
-    """TWK-A..J: Representative new tweaks roundtrip cleanly and TWK-H honours Tamper Protection."""
+    """Representative non-registry tweaks roundtrip cleanly and Defender tweaks honour Tamper Protection."""
     reg = InMemoryRegistryBackend()
     reg.set_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2, REG_DWORD)
     sys_b = InMemorySystemBackend(is_admin=True)
@@ -248,7 +248,7 @@ def test_new_tweaks_roundtrip_and_tamper_protection(state_store: StateStore) -> 
     for tid in sample_ids:
         assert detect_tweak(get_tweak(tid), env, reg, sys_b).status == TweakStatus.DRIFTED
 
-    # Tamper Protection blocks TWK-H tweaks
+    # Tamper Protection blocks Defender tweaks
     reg.set_value(HIVE_HKLM, DEFENDER_FEATURES_KEY, "TamperProtection", 5, REG_DWORD)
     asr_res = detect_tweak(get_tweak("hardening.defender_asr_audit"), env, reg, sys_b)
     assert asr_res.status == TweakStatus.BLOCKED_BY_POLICY
@@ -493,7 +493,7 @@ def test_parameterized_tweaks_and_terminal_error_paths(
 
 
 def test_ai_surface_tweaks_and_legacy_tls_audit_roundtrip_and_errors(state_store: StateStore) -> None:
-    """Cover TWK-C AI tweaks (roundtrip + irreversible guard) and chk.legacy_tls (clean + re-enabled)."""
+    """Cover AI tweaks (roundtrip + irreversible guard) and chk.legacy_tls (clean + re-enabled)."""
 
     reg = InMemoryRegistryBackend()
     sys_b = InMemorySystemBackend(

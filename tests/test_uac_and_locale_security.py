@@ -265,7 +265,7 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
 def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """S-01 & S-05: Native binaries resolve to absolute paths and tokens stay out of argv."""
+    """Native binaries resolve to absolute paths and tokens stay out of argv."""
 
     # 1. Source-level lint: no bare ".exe" / ".cmd" literals in _run_native_cmd([ or hyperv_firewall
     repo_root = Path(__file__).resolve().parents[1]
@@ -331,8 +331,8 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
     run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_dll)
     assert captured_dirs and captured_dirs[0].lower().endswith("\\system32")
 
-    # 4. S-05: bin/publish_winget.py passes token in WINGET_CREATE_GITHUB_TOKEN env var, not argv
-
+    # bin/publish_winget.py passes token in WINGET_CREATE_GITHUB_TOKEN env var, not argv
+    monkeypatch.syspath_prepend(str(repo_root / "bin"))
     pub_spec = importlib.util.spec_from_file_location("publish_winget", repo_root / "bin" / "publish_winget.py")
     assert pub_spec is not None and pub_spec.loader is not None
     pub_mod = importlib.util.module_from_spec(pub_spec)
@@ -347,8 +347,16 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
             wc_calls.append((list(args), kwargs.get("env")))  # type: ignore[arg-type]
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
+    fake_dist = tmp_path / "dist"
+    fake_dist.mkdir()
+    (fake_dist / f"winbearable-{pub_mod.__version__}-win-x64.zip.sha256").write_text("A" * 64 + "\n", encoding="utf-8")
+    fake_manifest = tmp_path / "installer.yaml"
+    fake_manifest.write_text("InstallerSha256: PENDING_RELEASE_BUILD_SHA256\n", encoding="utf-8")
+
     monkeypatch.setattr("sys.platform", "win32")
     with (
+        patch.object(pub_mod, "ROOT", tmp_path),
+        patch.object(pub_mod, "INSTALLER_MANIFEST", fake_manifest),
         patch.object(pub_mod, "_find_wingetcreate", return_value=r"C:\Tools\wingetcreate.exe"),
         patch.object(pub_mod.subprocess, "run", side_effect=_fake_subproc_run),
     ):
@@ -539,10 +547,8 @@ def test_file_config_robustness_hyperv_not_configured_and_service_paths(
     assert finding.severity == "low"
 
 
-def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path) -> None:
-    """S-02, S-03, C-02, C-07: UAC O_EXCL/reparse guard, TerminateProcess failure message, alias, 26H2 fixture."""
-
-    # S-02: write_uac_output_safe creates new wb-uac-*/uac-output.txt and rejects existing/untrusted/symlink targets
+def test_uac_safe_output_guards_existing_untrusted_and_symlink_targets(tmp_path: Path) -> None:
+    """write_uac_output_safe creates new wb-uac-*/uac-output.txt and rejects existing/untrusted/symlink targets."""
     uac_dir = tmp_path / "wb-uac-123"
     uac_dir.mkdir()
     out_file = uac_dir / "uac-output.txt"
@@ -565,7 +571,10 @@ def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path
         ):
             write_uac_output_safe(sym_dir / "uac-output.txt", "x")
 
-    # S-03: TerminateProcess returning 0 reports truthful non-terminated message
+
+def test_uac_timeout_reports_non_terminated_process_truthfully() -> None:
+    """TerminateProcess returning 0 reports truthful non-terminated message."""
+
     class _FakeKernel32:
         def ShellExecuteExW(self, *_a: object) -> int:
             return 1
@@ -584,7 +593,6 @@ def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path
 
     class _FakeShell32:
         def ShellExecuteExW(self, ptr: object) -> int:
-            # ctypes.byref(_ShellExecuteInfoW) -> set hProcess non-zero
             sei = ptr._obj  # type: ignore[attr-defined]
             sei.hProcess = ctypes.c_void_p(42)
             return 1
@@ -596,7 +604,9 @@ def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path
     with pytest.raises(UacTimeoutError, match="could not be terminated"), patch("sys.platform", "win32"):
         run_elevated_wb(["apply"], executable="wb.exe", windll_override=_FakeWindll(), timeout_ms=100)
 
-    # C-02: deprecated alias resolves with DeprecationWarning
+
+def test_deprecated_tweak_alias_resolves_with_warning(tmp_path: Path) -> None:
+    """Deprecated tweak alias resolves with DeprecationWarning and InMemorySystemBackend defaults to 26H2."""
     assert get_tweak("hardening.disable_guest_and_blank_passwords").tweak_id == "hardening.restrict_blank_passwords"
     alias_toml = tmp_path / "alias.toml"
     alias_toml.write_text(
@@ -606,8 +616,6 @@ def test_uac_safe_output_timeout_truthfulness_and_catalog_aliases(tmp_path: Path
     with pytest.warns(DeprecationWarning, match="deprecated tweak ID"):
         loaded = load_profile(str(alias_toml))
     assert loaded.tweaks.get("hardening.restrict_blank_passwords") is True
-
-    # C-07: InMemorySystemBackend defaults to 26H2
     assert InMemorySystemBackend().display_version == "26H2"
 
 
@@ -667,7 +675,7 @@ def test_uac_isolated_python_elevated_code_guard_wsl_backup_dir_and_network_audi
         iphlpapi = _FakeIphlpapi()
 
     env = InMemorySystemBackend(is_windows=True, windows_build=26300).detect_environment(InMemoryRegistryBackend())
-    with patch("winbearable.audit.sys.platform", "win32"):
+    with patch("winbearable.audit.win32_checks.sys.platform", "win32"):
         finding = _check_listening_ports(env, windll_override=_FakeWindll())
     assert "TCP4=1, TCP6=1, UDP4=1, UDP6=1" in finding.observation.evidence
     assert "445" in finding.observation.evidence and "5353" in finding.observation.evidence

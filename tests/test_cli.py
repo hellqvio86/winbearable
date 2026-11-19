@@ -366,7 +366,7 @@ def test_cli_detailed_exit_codes(
     onedrive_registry: InMemoryRegistryBackend,
     system: InMemorySystemBackend,
 ) -> None:
-    """P2-Q.1: --detailed-exitcode returns 2 on pending, 3 on blocked, and 0 on converged."""
+    """--detailed-exitcode returns 2 on pending, 3 on blocked, and 0 on converged."""
 
     code_pending, _, _ = cli_runner(["plan", "--profile", "user-only", "--detailed-exitcode"])
     assert code_pending == EXIT_PENDING_CHANGES

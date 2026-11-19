@@ -207,6 +207,8 @@ jobs:
           path: dist
           format: spdx-json
           output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
       - name: Create Git tag (only after build and SBOM succeed)
         if: steps.check_version.outputs.changed == 'true'
@@ -285,12 +287,18 @@ jobs:
         shell: bash
         run: |
           PKG_VER=$(PYTHONPATH=src python -c "from winbearable.const import __version__; print(__version__)")
-          if [ "${{ github.ref_type }}" != "tag" ]; then
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            if [ "${{ github.ref_name }}" != "v${PKG_VER}" ]; then
+              echo "Tag '${{ github.ref_name }}' does not match const.__version__ 'v${PKG_VER}'"
+              exit 1
+            fi
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if ! git tag --points-at HEAD | grep -Fxq "v${PKG_VER}"; then
+              echo "HEAD must carry tag 'v${PKG_VER}' for workflow_dispatch publish"
+              exit 1
+            fi
+          else
             echo "Publishing release requires a git tag ref (got ref_type=${{ github.ref_type }})"
-            exit 1
-          fi
-          if [ "${{ github.ref_name }}" != "v${PKG_VER}" ]; then
-            echo "Tag '${{ github.ref_name }}' does not match const.__version__ 'v${PKG_VER}'"
             exit 1
           fi
 
@@ -305,12 +313,18 @@ jobs:
           path: dist/
           format: spdx-json
           output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
-      - name: Upload SBOM to release
+      - name: Upload release assets and SBOM
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
-          files: sbom.spdx.json
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            SHA256SUMS.txt
+            sbom.spdx.json
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to PyPI
@@ -384,6 +398,8 @@ jobs:
           path: .
           format: spdx-json
           output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
       - name: Upload SBOM Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import platform
 from pathlib import Path
+from typing import Any
 
 from ..const import HIVE_HKLM, MIN_SUPPORTED_BUILD, NT_CURRENT_VERSION_KEY, REG_DWORD
-from ..models import EnvironmentInfo, OperationOutcome, RegistryView
+from ..models import EnvironmentInfo, OperationOutcome, OperationStatus, RegistryView
 from .posture import collect_posture_observations, safe_get_reg
 from .registry_protocol import RegistryBackend
 from .system_protocol import GIB_BYTES, CommandResult, read_service_start_state
@@ -69,6 +70,7 @@ class InMemorySystemBackend:
         self.wsl_commands_executed: list[tuple[list[str], str | None]] = []
         self.wsl_etc_conf: dict[str, str] = {}
         self.last_outcome: OperationOutcome | None = None
+        self.command_history: list[dict[str, Any]] = []
         self.auditpol_subcategories: dict[str, str] = {}
         self.auditpol_backups: dict[str, dict[str, str]] = {}
         self.event_log_configs: dict[str, tuple[bool, int]] = {
@@ -112,6 +114,7 @@ class InMemorySystemBackend:
             display_version=resolved_display,
             edition=resolved_edition,
             is_admin=self.is_admin,
+            host_auditable=self.is_windows,
             domain_joined=flags["domain_joined"],
             entra_joined=flags["entra_joined"],
             mdm_enrolled=flags["mdm_enrolled"],
@@ -132,7 +135,28 @@ class InMemorySystemBackend:
         state, val = read_service_start_state(registry, service_name)
         return val if state == "present" else None
 
+    def run_tool(
+        self,
+        argv: list[str],
+        *,
+        input_text: str | None = None,
+        timeout: float = 120.0,
+        allowed_returncodes: tuple[int, ...] = (0,),
+    ) -> OperationOutcome:
+        """Simulated run_tool returning OK and recording command history."""
+        out = OperationOutcome(status=OperationStatus.OK, returncode=0, command=tuple(argv))
+        self.last_outcome = out
+        self.command_history.append({"command": list(argv), "returncode": 0, "status": str(out.status)})
+        return out
+
     def set_service_start_type(self, registry: RegistryBackend, service_name: str, start_type: int) -> bool:
+        if start_type not in {0, 1, 2, 3, 4}:
+            self.last_outcome = OperationOutcome(
+                status=OperationStatus.UNKNOWN,
+                message=f"Invalid service start_type {start_type!r}; expected 0..4.",
+                command=("sc.exe", "config", service_name),
+            )
+            return False
         svc_key = f"SYSTEM\\CurrentControlSet\\Services\\{service_name}"
         if not registry.key_exists(HIVE_HKLM, svc_key):
             return False

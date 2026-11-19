@@ -14,12 +14,26 @@ from typing import Any
 
 from ..const import HIVE_HKLM
 from .registry import RegistryBackend
-from .system_native_cmd import resolve_git_exe, sys32_exe
+from .system_native_cmd import is_user_writable_binary, resolve_git_exe, sys32_exe
 from .system_protocol import CommandResult
+from .win32_ctypes import get_current_process_user_sid
+from .win32_fs import is_reparse_or_symlink
+
+_GUID_RE = re.compile(r"^\{?[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}?$")
+_FW_GROUP_RE = re.compile(r"^@[A-Za-z0-9_.-]+,-\d+$")
+_GIT_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+$")
+
+
+def _is_safe_arg(val: str) -> bool:
+    return bool(val) and not val.startswith(("-", "/")) and not any(ch in val for ch in ("\r", "\n", "\x00"))
+
+
+def _ensure_safe_backup_target(path: Path) -> bool:
+    return not is_reparse_or_symlink(path) and not any(is_reparse_or_symlink(p) for p in path.parents)
 
 
 def get_auditpol_subcategory(run_cmd: Callable[..., CommandResult], platform_name: str, guid: str) -> str | None:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _GUID_RE.fullmatch(guid):
         return None
     guid_arg = guid if guid.startswith("{") else f"{{{guid}}}"
     res = run_cmd([sys32_exe("auditpol.exe"), "/get", f"/subcategory:{guid_arg}", "/r", "/v"])
@@ -39,7 +53,7 @@ def get_auditpol_subcategory(run_cmd: Callable[..., CommandResult], platform_nam
 def set_auditpol_subcategory(
     run_cmd: Callable[..., CommandResult], platform_name: str, guid: str, success: bool, failure: bool
 ) -> bool:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _GUID_RE.fullmatch(guid):
         return False
     guid_arg = guid if guid.startswith("{") else f"{{{guid}}}"
     succ_flag = "enable" if success else "disable"
@@ -57,7 +71,7 @@ def set_auditpol_subcategory(
 
 
 def backup_auditpol(run_cmd: Callable[..., CommandResult], platform_name: str, output_csv: Path) -> bool:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _ensure_safe_backup_target(output_csv):
         return False
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     if output_csv.exists():
@@ -74,7 +88,7 @@ def restore_auditpol(run_cmd: Callable[..., CommandResult], platform_name: str, 
 def get_event_log_config(
     run_cmd: Callable[..., CommandResult], platform_name: str, channel: str
 ) -> tuple[bool | None, int | None]:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _is_safe_arg(channel):
         return None, None
     res = run_cmd([sys32_exe("wevtutil.exe"), "gl", channel, "/f:xml"])
     if res.returncode != 0:
@@ -99,7 +113,7 @@ def set_event_log_config(
     enabled: bool | None = None,
     max_size_bytes: int | None = None,
 ) -> bool:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _is_safe_arg(channel):
         return False
     cmd = [sys32_exe("wevtutil.exe"), "sl", channel]
     if enabled is not None:
@@ -123,7 +137,7 @@ def is_firewall_group_enabled(registry: RegistryBackend, group_resource_id: str)
 def set_firewall_group_enabled(
     run_cmd: Callable[..., CommandResult], platform_name: str, group_resource_id: str, enabled: bool
 ) -> bool:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _FW_GROUP_RE.fullmatch(group_resource_id):
         return False
     en_str = "yes" if enabled else "no"
     res = run_cmd(
@@ -142,7 +156,7 @@ def set_firewall_group_enabled(
 
 
 def export_firewall_policy(run_cmd: Callable[..., CommandResult], platform_name: str, output_wfw: Path) -> bool:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _ensure_safe_backup_target(output_wfw):
         return False
     output_wfw.parent.mkdir(parents=True, exist_ok=True)
     if output_wfw.exists():
@@ -224,11 +238,15 @@ def get_git_global_config(
     run_cmd: Callable[..., CommandResult],
     key: str,
     git_exe_resolver: Callable[[], str | None] = resolve_git_exe,
+    *,
+    is_admin: bool = False,
 ) -> str | None:
-    git_exe = git_exe_resolver()
-    if git_exe is None:
+    if not _GIT_KEY_RE.fullmatch(key):
         return None
-    res = run_cmd([git_exe, "config", "--global", "--get", key])
+    git_exe = git_exe_resolver()
+    if git_exe is None or (is_admin and is_user_writable_binary(git_exe)):
+        return None
+    res = run_cmd([git_exe, "config", "--global", "--get", "--", key])
     if res.returncode != 0:
         return None
     return res.stdout.strip()
@@ -239,18 +257,25 @@ def set_git_global_config(
     key: str,
     value: str | None,
     git_exe_resolver: Callable[[], str | None] = resolve_git_exe,
+    *,
+    is_admin: bool = False,
 ) -> bool:
+    if not _GIT_KEY_RE.fullmatch(key):
+        return False
     git_exe = git_exe_resolver()
-    if git_exe is None:
+    if git_exe is None or (is_admin and is_user_writable_binary(git_exe)):
         return False
     if value is None:
-        return run_cmd([git_exe, "config", "--global", "--unset", key]).returncode in (0, 5)
-    return run_cmd([git_exe, "config", "--global", key, value]).returncode == 0
+        return run_cmd([git_exe, "config", "--global", "--unset", "--", key]).returncode in (0, 5)
+    return run_cmd([git_exe, "config", "--global", "--", key, value]).returncode == 0
 
 
 def get_current_user_sid(run_cmd: Callable[..., CommandResult], platform_name: str) -> str | None:
     if platform_name != "win32":
         return None
+    native_sid = get_current_process_user_sid()
+    if native_sid is not None:
+        return native_sid
     res = run_cmd([sys32_exe("whoami.exe"), "/user", "/fo", "csv", "/nh"])
     if res.returncode != 0:
         return None
@@ -315,18 +340,11 @@ def is_ssh_acl_restricted(
                 sddl_lines = [ln.strip() for ln in sddl_text.splitlines() if "D:" in ln]
                 if sddl_lines:
                     return all(is_sddl_restricted_to_sid(ln, owner_sid) for ln in sddl_lines)
-    res = run_cmd([sys32_exe("icacls.exe"), expanded])
-    if res.returncode != 0:
-        return False
-    ace_lines = [ln.strip() for ln in res.stdout.splitlines() if ":" in ln and "(" in ln]
-    if len(ace_lines) != 1:
-        return False
-    low_ace = ace_lines[0].lower()
-    return not any(broad in low_ace for broad in ("everyone:", "authenticated users:", "builtin\\users:"))
+    return False
 
 
 def backup_acl(run_cmd: Callable[..., CommandResult], platform_name: str, path_str: str, backup_file: Path) -> bool:
-    if platform_name != "win32":
+    if platform_name != "win32" or not _ensure_safe_backup_target(backup_file):
         return False
     target = Path(os.path.expandvars(os.path.expanduser(path_str)))
     if not target.exists():
@@ -356,8 +374,9 @@ def restrict_acl_to_current_user(
     if not target.exists():
         return True
     owner_sid = sid_resolver() if sid_resolver is not None else get_current_user_sid(run_cmd, platform_name)
-    principal = f"*{owner_sid}" if owner_sid else (os.environ.get("USERNAME") or os.getlogin())
-    run_cmd([sys32_exe("icacls.exe"), str(target), "/reset"])
+    if not owner_sid:
+        return False
+    principal = f"*{owner_sid}"
     res = run_cmd(
         [
             sys32_exe("icacls.exe"),

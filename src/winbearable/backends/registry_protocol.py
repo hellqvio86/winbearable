@@ -20,6 +20,8 @@ from ..models import (
 class RegistryBackend(Protocol):
     """Protocol for reading, writing, and snapshotting Windows registry keys."""
 
+    is_simulated: bool
+
     def key_exists(self, hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> bool:
         """Return True if the specified registry key exists."""
 

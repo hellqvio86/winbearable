@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 from ..const import MAX_CMD_OUTPUT_CHARS
 from ..models import OperationOutcome, OperationStatus
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS
+from .system_protocol import GIB_BYTES
 from .win32_ctypes import get_win32_dll
 
 
@@ -78,6 +80,30 @@ def resolve_code_cmd() -> str:
     )
 
 
+def get_total_memory_bytes(platform_name: str, kernel32: Any | None) -> int:
+    """Return total physical memory in bytes (minimum 4 GiB fallback)."""
+    if platform_name == "win32" and kernel32 is not None:
+        try:
+            mem_fn = kernel32.GetPhysicallyInstalledSystemMemory
+            with contextlib.suppress(AttributeError, TypeError):
+                mem_fn.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+                mem_fn.restype = ctypes.c_int
+            mem_kb = ctypes.c_ulonglong(0)
+            if mem_fn(ctypes.byref(mem_kb)):
+                return max(4 * GIB_BYTES, int(mem_kb.value) * 1024)
+        except OSError, AttributeError, TypeError, ctypes.ArgumentError:
+            pass
+    sysconf = getattr(os, "sysconf", None)
+    if callable(sysconf):
+        try:
+            page_size = int(sysconf("SC_PAGE_SIZE"))
+            page_count = int(sysconf("SC_PHYS_PAGES"))
+            return max(4 * GIB_BYTES, page_size * page_count)
+        except AttributeError, ValueError, OSError:
+            pass
+    return 16 * GIB_BYTES
+
+
 def resolve_git_exe() -> str | None:
     """Resolve git.exe from trusted Program Files / user Winget paths first, then trusted PATH."""
     prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
@@ -103,14 +129,24 @@ def resolve_git_exe() -> str | None:
 
 
 def is_user_writable_binary(exe_path: str) -> bool:
-    """Return True if *exe_path* resides inside a user-writable profile directory."""
-    norm = os.path.normcase(os.path.abspath(exe_path))
-    for env_key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
+    """Return True if *exe_path* (or its resolved target) resides inside a user-writable directory."""
+    candidates = [os.path.abspath(exe_path)]
+    with contextlib.suppress(OSError):
+        candidates.append(str(Path(exe_path).resolve()))
+    roots: list[str] = []
+    for env_key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "TEMP", "TMP"):
         base = os.environ.get(env_key, "").strip()
         if base:
-            norm_base = os.path.normcase(os.path.abspath(base)).rstrip("\\/") + os.sep
-            if norm.startswith(norm_base):
-                return True
+            roots.append(base)
+    roots.append(tempfile.gettempdir())
+    home_parent = Path.home().parent
+    if home_parent.name.lower() == "users":
+        roots.append(str(home_parent))
+    norm_roots = [os.path.normcase(os.path.abspath(r)).rstrip("\\/") + os.sep for r in roots]
+    for cand in candidates:
+        norm = os.path.normcase(cand)
+        if any(norm.startswith(root) for root in norm_roots):
+            return True
     return False
 
 

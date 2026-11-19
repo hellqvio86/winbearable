@@ -18,8 +18,11 @@ case "$(uname -s 2>/dev/null || echo "")" in
     MINGW*|MSYS*|CYGWIN*)
         if [[ -d "${REPO_ROOT}/.venv/Scripts" ]]; then
             export PATH="${REPO_ROOT}/.venv/Scripts:${PATH}"
-        elif [[ -n "${TEMP:-}" && -d "${TEMP}/wb-venv-win/Scripts" ]]; then
-            export PATH="$(cygpath -u "${TEMP}")/wb-venv-win/Scripts:${PATH}"
+        elif [[ -n "${TEMP:-}" ]]; then
+            export UV_PROJECT_ENVIRONMENT="${TEMP}/wb-venv-win"
+            if [[ -d "${TEMP}/wb-venv-win/Scripts" ]]; then
+                export PATH="$(cygpath -u "${TEMP}")/wb-venv-win/Scripts:${PATH}"
+            fi
         fi
         ;;
     *)
@@ -54,26 +57,26 @@ echo "Running pre-commit quality & security gates..."
 echo "=========================================="
 
 echo "--> [1/4] Running Ruff lint & format check..."
-if command -v ruff >/dev/null 2>&1; then
-    ruff check .
-    ruff format --check .
-elif command -v uv >/dev/null 2>&1; then
-    uv run ruff check .
-    uv run ruff format --check .
+if command -v uv >/dev/null 2>&1; then
+    uv run --no-sync ruff check .
+    uv run --no-sync ruff format --check .
+elif [[ -x "${REPO_ROOT}/.venv/bin/ruff" ]]; then
+    "${REPO_ROOT}/.venv/bin/ruff" check .
+    "${REPO_ROOT}/.venv/bin/ruff" format --check .
 else
-    echo "ERROR: ruff or uv (.venv) is required for pre-commit lint/format checks!" >&2
+    echo "ERROR: uv or repo .venv ruff is required for pre-commit lint/format checks!" >&2
     exit 1
 fi
 
 echo "--> [2/4] Running Mypy strict type check & Pytest suite..."
-if command -v mypy >/dev/null 2>&1 && command -v pytest >/dev/null 2>&1; then
-    mypy src
-    pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
-elif command -v uv >/dev/null 2>&1; then
-    uv run mypy src
-    uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
+if command -v uv >/dev/null 2>&1; then
+    uv run --no-sync mypy src
+    uv run --no-sync pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
+elif [[ -x "${REPO_ROOT}/.venv/bin/mypy" && -x "${REPO_ROOT}/.venv/bin/pytest" ]]; then
+    "${REPO_ROOT}/.venv/bin/mypy" src
+    "${REPO_ROOT}/.venv/bin/pytest" --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
 else
-    echo "ERROR: mypy/pytest or uv (.venv) is required for pre-commit test checks!" >&2
+    echo "ERROR: uv or repo .venv mypy/pytest is required for pre-commit test checks!" >&2
     exit 1
 fi
 

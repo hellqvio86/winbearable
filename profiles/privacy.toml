@@ -1,6 +1,6 @@
 name = "privacy"
 extends = "owner"
-description = "Privacy and anti-nag baseline extending owner with TWK-B controls."
+description = "Privacy and anti-nag baseline extending owner with additional privacy controls."
 
 [tweaks]
 "privacy.language_list_optout" = true
