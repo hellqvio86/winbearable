@@ -11,6 +11,7 @@ from ..backends.win32_fs import is_reparse_or_symlink
 from ..models import PermissionDeniedError
 
 _UNRESOLVED_WIN_ENV_RE = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*%")
+_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 
 
 def _expand_raw_template(path_template: str) -> Path:
@@ -77,6 +78,11 @@ def validate_file_spec_path(path_template: str, *, allow_system_paths: bool = Fa
     target = _expand_raw_template(path_template)
     resolved = target.resolve()
     if not allow_system_paths:
+        if os.name != "nt" and _WIN_DRIVE_RE.match(str(target)):
+            raise PermissionDeniedError(
+                f"Refusing Windows drive path outside user-profile allowlist: {target}",
+                context={"path": str(target)},
+            )
         if resolved == Path(resolved.anchor):
             raise PermissionDeniedError(
                 f"Refusing FileSpec targeting filesystem root: {resolved}",
@@ -101,6 +107,11 @@ def validate_file_spec_path(path_template: str, *, allow_system_paths: bool = Fa
 def validate_icacls_user_only_path(path_str: str) -> Path:
     """Expand and enforce user-profile containment + reparse checks for IcaclsUserOnlySpec targets."""
     target = _expand_raw_template(path_str)
+    if os.name != "nt" and _WIN_DRIVE_RE.match(str(target)):
+        raise PermissionDeniedError(
+            f"Refusing Windows drive path outside user-profile allowlist: {target}",
+            context={"path": str(target)},
+        )
     resolved = target.resolve()
     _check_reparse_ancestors(target)
     home_roots = [Path.home().resolve(), Path(tempfile.gettempdir()).resolve()]
