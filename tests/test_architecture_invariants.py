@@ -250,7 +250,7 @@ def test_winget_trust_allowlist_and_plan_narrative() -> None:
     )
     ops, _, _ = adapter.inspect(trusted, reg, sys_b)
     assert "source=winget" in ops[0].after_state
-    assert "https://code.visualstudio.com/" in ops[0].after_state
+    assert f"url={PACKAGE_CATALOG['vscode'].source_url}" in ops[0].after_state
     assert "requires admin" in ops[0].after_state
 
 
