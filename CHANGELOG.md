@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.17.1] - 2026-11-19
+
+### Fixed
+
+- **Release Pipeline (PyPI & Winget):**
+  - Wrote `SHA256SUMS.txt` outside `dist/` in `.github/workflows/ci.yml` so `pypa/gh-action-pypi-publish` does not attempt to upload it as a distribution archive.
+  - Wrote `dist/winbearable-<version>-win-x64.zip.sha256` with LF (`\n`) line endings in `bin/build_winget.py` and verified it from inside `dist/` in `.github/workflows/ci.yml`.
+
 ## [0.17.0] - 2026-11-19
 
 ### Added & Changed
