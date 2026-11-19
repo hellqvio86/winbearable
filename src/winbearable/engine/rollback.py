@@ -9,7 +9,7 @@ from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
 from ..models import RollbackConflictError, RollbackFailureError, RunRecord, TransactionState
 from ..state import StateStore
-from .apply import compensate_run_record
+from .compensation import compensate_run_record
 from .params import IncompleteJournalError, require_native_backends
 
 

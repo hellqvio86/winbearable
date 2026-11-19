@@ -24,6 +24,35 @@ class WslOperationError(RuntimeError):
     """Raised when a WSL configuration write or command fails."""
 
 
+WSL_DISTRO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+DOTFILES_REPO_RE = re.compile(
+    r"^(?:https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=-]+|git@[A-Za-z0-9._-]+:[A-Za-z0-9._/-]+(?:\.git)?|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$"
+)
+
+
+def validate_wsl_distro_name(distro: str) -> str:
+    """Validate that a WSL distro name is safe to pass to wsl.exe."""
+    if not isinstance(distro, str) or ".." in distro or not WSL_DISTRO_NAME_RE.fullmatch(distro):
+        raise WslOperationError(
+            f"Invalid WSL distro name {distro!r}: must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}$ without '..'."
+        )
+    return distro
+
+
+def validate_dotfiles_repo(repo: str) -> str:
+    """Validate a dotfiles repo URL or owner/repo slug for chezmoi init."""
+    if (
+        not isinstance(repo, str)
+        or repo.startswith("-")
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in repo)
+        or any(ch in repo for ch in (" ", "\t", '"', "'", "`", "$", ";", "|", "&", "<", ">"))
+        or ".." in repo
+        or not DOTFILES_REPO_RE.fullmatch(repo)
+    ):
+        raise WslOperationError(f"Invalid chezmoi dotfiles_repo {repo!r}.")
+    return repo
+
+
 SECTION_HEADER_RE = re.compile(r"^\s*\[(?P<section>[^\]]+)\]\s*(?:#.*|;.*)?$")
 
 

@@ -233,7 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
     wsl_plan_p.add_argument("--wslconfig", default=None, help="Custom .wslconfig path")
     wsl_plan_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
-    wsl_apply_p = wsl_sub.add_parser("apply", help="Apply merged .wslconfig (75%% host RAM) and /etc/wsl.conf")
+    wsl_apply_p = wsl_sub.add_parser(
+        "apply",
+        help="Apply .wslconfig (75%% RAM) and /etc/wsl.conf (phase 2 of profile apply's atomic RunRecord)",
+    )
     wsl_apply_p.add_argument("--mode", choices=WSL_MODES, default=DEFAULT_WSL_MODE, help="WSL interop preset")
     wsl_apply_p.add_argument("--distro", default=None, help="Optional WSL distro name for /etc/wsl.conf")
     wsl_apply_p.add_argument("--memory-gb", type=int, default=None, help="Override WSL2 memory limit in GiB")

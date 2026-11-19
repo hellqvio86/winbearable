@@ -17,9 +17,9 @@ from winbearable.const import (
 from winbearable.engine import (
     ApplySummary,
     IncompleteJournalError,
-    _compensate_run_record,
     apply_profile,
     calculate_hardening_score,
+    compensate_run_record,
     evaluate_profile,
     inspect_defender_smartscreen_posture,
     inspect_vbs_credential_guard_posture,
@@ -329,7 +329,7 @@ def test_absent_service_skipped_and_unreadable_rollback_safe(tmp_path: Path) -> 
         state=TransactionState.ROLLING_BACK,
     )
     with patch.object(sysb, "set_scheduled_task_enabled", return_value=True) as mock_task:
-        comp_errors = _compensate_run_record(rec, reg, sysb)
+        comp_errors = compensate_run_record(rec, reg, sysb)
     assert any("DiagTrack" in err for err in comp_errors)
     assert reg.get_value(HIVE_HKLM, diag_key, "Start") == ("corrupt", REG_SZ)
     mock_task.assert_called_once()

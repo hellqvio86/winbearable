@@ -112,7 +112,7 @@ def test_registry_key_delete_and_glob_roundtrip(state_store: StateStore) -> None
         registry_specs=(RegistrySpec(hive=HIVE_HKCU, key_path=r"Software\TempDel", action=ACTION_DELETE_KEY),),
         provenance=_dummy_prov(),
     )
-    with patch.dict(TWEAK_CATALOG, {"test.del_key": del_tweak}):
+    with patch("winbearable.tweaks.catalog.TWEAK_CATALOG", {**TWEAK_CATALOG, "test.del_key": del_tweak}):
         p2 = ProfileSpec(name="del", description="del", tweaks={"test.del_key": True})
         apply_profile(
             p2, sys_b.detect_environment(reg_del), reg_del, sys_b, state_store, dry_run=False, allow_simulated=True

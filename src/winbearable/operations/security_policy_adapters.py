@@ -14,6 +14,7 @@ from ..models import (
     IcaclsSnapshot,
     OperationJournalEntry,
     OperationStatus,
+    PermissionDeniedError,
     PlannedOperation,
     TweakDefinition,
     WevtutilSnapshot,
@@ -21,6 +22,7 @@ from ..models import (
 )
 from .base import OperationApplyContext, now_iso, raise_system_error
 from .identity import auditpol_id, firewall_group_id, icacls_id, wevtutil_id
+from .path_policy import validate_icacls_user_only_path
 
 
 def _desired_auditpol_str(success: bool, failure: bool) -> str:
@@ -482,13 +484,15 @@ class IcaclsOperationAdapter:
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
+        unverified: list[str] = []
         for spec in tweak.icacls_specs:
+            resolved_target = validate_icacls_user_only_path(spec.path_template)
             iid = icacls_id(spec.path_template)
-            restricted = system.is_ssh_acl_restricted(spec.path_template)
+            restricted = system.is_ssh_acl_restricted(str(resolved_target))
             ops.append(
                 PlannedOperation(
                     operation_type=self.kind,
-                    target=spec.path_template,
+                    target=str(resolved_target),
                     action="restrict_to_current_user",
                     before_state="user_only" if restricted else "inherited/broad",
                     after_state="user_only (inheritance:r, grant:r *SID:F)",
@@ -499,8 +503,8 @@ class IcaclsOperationAdapter:
                 )
             )
             if not restricted:
-                drifted.append(f"icacls {spec.path_template}: inherited/broad -> user_only")
-        return ops, drifted, []
+                drifted.append(f"icacls {resolved_target}: inherited/broad -> user_only")
+        return ops, drifted, unverified
 
     def snapshot(
         self,
@@ -515,10 +519,11 @@ class IcaclsOperationAdapter:
             iid = icacls_id(ic_spec.path_template)
             if iid in seen_ids:
                 continue
+            resolved_target = validate_icacls_user_only_path(ic_spec.path_template)
             acl_bak: str | None = (
                 str(backup_dir / f"icacls_{len(seen_ids)}_{ic_idx}.acl") if backup_dir is not None else None
             )
-            if acl_bak is not None and not system.backup_acl(ic_spec.path_template, Path(acl_bak)):
+            if acl_bak is not None and not system.backup_acl(str(resolved_target), Path(acl_bak)):
                 raise WinbearableError(
                     f"Failed to back up ACL for '{ic_spec.path_template}'.",
                     category="backup_failed",
@@ -539,9 +544,10 @@ class IcaclsOperationAdapter:
         entries: list[OperationJournalEntry] = []
         for ic_spec in tweak.icacls_specs:
             started = now_iso()
+            resolved_target = validate_icacls_user_only_path(ic_spec.path_template)
             iid = icacls_id(ic_spec.path_template)
-            if not system.restrict_acl_to_current_user(ic_spec.path_template):
-                raise_system_error(system, f"Failed to restrict ACL on '{ic_spec.path_template}'.")
+            if not system.restrict_acl_to_current_user(str(resolved_target)):
+                raise_system_error(system, f"Failed to restrict ACL on '{resolved_target}'.")
             if ctx.checkpoint_cb:
                 ctx.checkpoint_cb(f"{tweak.tweak_id}:icacls:{ic_spec.path_template}")
             entry = OperationJournalEntry(
@@ -584,8 +590,14 @@ class IcaclsOperationAdapter:
                 continue
             if not snap.backup_acl_path or not Path(snap.backup_acl_path).is_file():
                 errors.append(f"icacls restore {snap.path_template}: missing ACL backup")
-            elif not force and not system.is_ssh_acl_restricted(snap.path_template):
-                errors.append(f"restore_conflict icacls {snap.path_template}")
-            elif not system.restore_acl(snap.path_template, Path(snap.backup_acl_path)):
-                errors.append(f"icacls restore {snap.path_template}")
+            else:
+                try:
+                    resolved_target = str(validate_icacls_user_only_path(snap.path_template))
+                except (PermissionDeniedError, ValueError) as exc:
+                    errors.append(f"icacls restore {snap.path_template}: {exc}")
+                    continue
+                if not force and not system.is_ssh_acl_restricted(resolved_target):
+                    errors.append(f"restore_conflict icacls {snap.path_template}")
+                elif not system.restore_acl(resolved_target, Path(snap.backup_acl_path)):
+                    errors.append(f"icacls restore {snap.path_template}")
         return errors

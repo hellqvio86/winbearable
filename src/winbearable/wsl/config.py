@@ -21,6 +21,7 @@ from .ini import (
     format_host_memory_gib,
     get_default_wslconfig_path,
     merge_ini_preserving_comments,
+    validate_wsl_distro_name,
 )
 
 
@@ -95,6 +96,7 @@ _WSL_FAILURE_MARKERS = (
 
 def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfProbe:
     """Probe /etc/wsl.conf in *distro*, distinguishing confirmed absence from read/WSL errors."""
+    validate_wsl_distro_name(distro)
     try:
         test_res = system.run_wsl_command(
             ["-d", distro, "-u", "root", "--", "sh", "-c", "test -e /etc/wsl.conf; echo WB_RC=$?"]
@@ -288,6 +290,8 @@ def plan_or_apply_wsl(
     installed_wsl_version: str | None = None,
 ) -> dict[str, Any]:
     """Plan or apply .wslconfig (sizing memory to 75% of host RAM) and per-distro /etc/wsl.conf."""
+    if distro is not None:
+        validate_wsl_distro_name(distro)
     target_wslconfig = wslconfig_path or get_default_wslconfig_path()
     had_wslconfig = target_wslconfig.is_file()
     existing_wslconfig = target_wslconfig.read_text(encoding="utf-8").lstrip("\ufeff") if had_wslconfig else ""

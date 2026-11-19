@@ -10,7 +10,7 @@ from typing import Any
 from ..backends.system import SystemBackend
 from ..const import DEFAULT_WSL_DISTRO
 from .audit import is_windows_credential_helper
-from .ini import WslOperationError
+from .ini import WslOperationError, validate_dotfiles_repo, validate_wsl_distro_name
 
 WSL_LINUX_SYSCTL_CONF = """# Managed by winbearable (wb wsl baseline)
 kernel.kptr_restrict = 2
@@ -33,6 +33,7 @@ def install_wsl_distro(
     set_default: bool = True,
 ) -> dict[str, Any]:
     """Install a WSL2 distribution via wsl.exe --install and optionally set it as default."""
+    validate_wsl_distro_name(distro)
     cmd = ["--install", "-d", distro]
     if web_download:
         cmd.append("--web-download")
@@ -63,6 +64,7 @@ def set_default_wsl_distro(
     dry_run: bool = True,
 ) -> dict[str, Any]:
     """Set the default Windows WSL2 distribution via `wsl.exe --set-default`."""
+    validate_wsl_distro_name(distro)
     cmd = ["--set-default", distro]
     returncode = 0
     if not dry_run:
@@ -84,8 +86,7 @@ def export_wsl_distro(
     keep_last: int | None = None,
 ) -> dict[str, Any]:
     """Export a WSL2 distribution to a backup tarball via wsl.exe --export and record sha256."""
-    if not distro or any(ch in distro for ch in ("/", "\\", "*", "?", "[", "]", "\x00")) or ".." in distro:
-        raise WslOperationError(f"Invalid WSL distro name for export: {distro!r}")
+    validate_wsl_distro_name(distro)
 
     cmd = ["--export", distro, str(output_file)]
     returncode = 0
@@ -155,6 +156,7 @@ def set_wsl_distro_sparse(
     dry_run: bool = True,
 ) -> dict[str, Any]:
     """Configure sparse VHD mode for a WSL2 distro via `wsl.exe --manage <distro> --set-sparse`."""
+    validate_wsl_distro_name(distro)
     cmd = ["--manage", distro, "--set-sparse", "true" if sparse else "false"]
     returncode = 0
     if not dry_run:
@@ -177,6 +179,7 @@ def import_wsl_distro(
     dry_run: bool = True,
 ) -> dict[str, Any]:
     """Import a WSL2 distribution from a rootfs tarball via wsl.exe --import."""
+    validate_wsl_distro_name(distro)
     cmd = ["--import", distro, str(install_dir), str(tarball_file), "--version", "2"]
     returncode = 0
     if not dry_run:
@@ -194,6 +197,7 @@ def import_wsl_distro(
 
 def detect_wsl_package_manager(system: SystemBackend, distro: str) -> str:
     """Detect the primary Linux package manager inside a WSL distro."""
+    validate_wsl_distro_name(distro)
     probe = (
         "if command -v apt-get >/dev/null; then echo apt; "
         "elif command -v dnf >/dev/null; then echo dnf; "
@@ -216,6 +220,9 @@ def apply_wsl_linux_baseline(
     dry_run: bool = True,
 ) -> dict[str, Any]:
     """Configure sysctl baseline, isolate Windows git credential helper, auto-patch, and optional packages/dotfiles."""
+    validate_wsl_distro_name(distro)
+    if dotfiles_repo is not None:
+        validate_dotfiles_repo(dotfiles_repo)
     sysctl_path = "/etc/sysctl.d/99-winbearable-wsl.conf"
     steps: list[str] = [
         (

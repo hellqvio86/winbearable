@@ -42,7 +42,7 @@ from .profiles import (
     migrate_profile_payload,
 )
 from .state import StateStore, migrate_state_payload
-from .tweaks import TWEAK_CATALOG, get_all_tweaks, get_tweak
+from .tweaks import get_all_tweaks, get_tweak
 from .wsl import (
     apply_wsl_linux_baseline,
     audit_wsl,
@@ -74,7 +74,6 @@ __all__ = [
     "ScheduledTaskSpec",
     "StateStore",
     "SystemBackend",
-    "TWEAK_CATALOG",
     "TweakCheckResult",
     "TweakDefinition",
     "TweakStatus",

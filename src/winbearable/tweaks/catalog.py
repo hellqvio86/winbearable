@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
+from types import MappingProxyType
 from typing import Any
 
 from ..models import TweakDefinition, TweakProvenance
@@ -15,8 +17,8 @@ from .validation import CatalogValidationError, validate_catalog
 
 def assemble_catalog(
     category_modules: tuple[Any, ...],
-    provenance_map: dict[str, TweakProvenance],
-) -> dict[str, TweakDefinition]:
+    provenance_map: Mapping[str, TweakProvenance],
+) -> Mapping[str, TweakDefinition]:
     """Assemble and exhaustively validate the tweak catalog at startup."""
     raw_catalog: dict[str, TweakDefinition] = {}
     for mod in category_modules:
@@ -33,14 +35,16 @@ def assemble_catalog(
     errors = validate_catalog(catalog)
     if errors:
         raise CatalogValidationError("Catalog validation failed:\n" + "\n".join(errors))
-    return catalog
+    return MappingProxyType(catalog)
 
 
-TWEAK_CATALOG: dict[str, TweakDefinition] = assemble_catalog(CATEGORY_MODULES, TWEAK_PROVENANCE)
+TWEAK_CATALOG: Mapping[str, TweakDefinition] = assemble_catalog(CATEGORY_MODULES, TWEAK_PROVENANCE)
 
-TWEAK_ID_ALIASES: dict[str, str] = {
-    "hardening.disable_guest_and_blank_passwords": "hardening.restrict_blank_passwords",
-}
+TWEAK_ID_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "hardening.disable_guest_and_blank_passwords": "hardening.restrict_blank_passwords",
+    }
+)
 
 
 def resolve_tweak_id(tweak_id: str) -> str:

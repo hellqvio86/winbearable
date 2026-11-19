@@ -135,6 +135,11 @@ def add_selection_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Allow machine-scope tweaks on domain/Entra/MDM-managed devices",
     )
+    p.add_argument(
+        "--allow-external-profiles",
+        action="store_true",
+        help="Allow profile include/extends references outside the profile directory",
+    )
 
 
 JSON_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -164,27 +169,50 @@ JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "schema_version",
             "profile_name",
             "dry_run",
+            "plan_digest",
             "applied_ids",
             "precondition_fingerprints",
             "results",
         ],
+        "properties": {
+            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
+        },
     },
     "status": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "wb status --json",
         "type": "object",
         "required": ["schema_version", "profile", "environment", "results"],
+        "properties": {
+            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
+        },
     },
     "doctor": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "wb doctor --json",
         "type": "object",
-        "required": ["schema_version", "version", "environment", "managed", "blockers", "audit", "wsl"],
+        "required": [
+            "schema_version",
+            "version",
+            "environment",
+            "managed",
+            "blockers",
+            "audit",
+            "wsl",
+            "refugee_summary",
+        ],
+        "properties": {
+            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
+            "refugee_summary": {"type": "object"},
+        },
     },
     "list": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "wb list --json",
         "type": "object",
         "required": ["schema_version", "count", "tweaks"],
+        "properties": {
+            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
+        },
     },
 }

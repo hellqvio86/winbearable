@@ -363,3 +363,61 @@ def test_no_internal_ticket_ids_and_module_loc_ceiling() -> None:
         if sum(1 for _ in p.open(encoding="utf-8")) > 750
     ]
     assert not oversized, "Production modules exceeding 750 LOC:\n" + "\n".join(oversized)
+
+
+def test_raw_subprocess_restricted_to_backend_boundaries() -> None:
+    """Raw subprocess.run/Popen calls are restricted to allowlisted backend boundary modules."""
+    repo_root = Path(__file__).resolve().parent.parent
+    src_root = repo_root / "src" / "winbearable"
+    allowlisted = {
+        "backends/system_native.py",
+        "backends/system_native_cmd.py",
+        "backends/registry_wsl.py",
+        "hyperv_firewall.py",
+        "wsl/audit.py",
+    }
+    violations: list[str] = []
+    for py_file in sorted(src_root.rglob("*.py")):
+        rel = py_file.relative_to(src_root).as_posix()
+        if rel in allowlisted:
+            continue
+        text = py_file.read_text(encoding="utf-8")
+        if re.search(r"\bsubprocess\.(?:run|Popen)\b", text):
+            violations.append(rel)
+    assert not violations, f"Raw subprocess.run/Popen outside allowlist: {violations}"
+
+
+def test_verify_matrix_covers_non_registry_categories() -> None:
+    """Every non-registry spec category in TWEAK_CATALOG must have a row in docs/verify-matrix.md."""
+    repo_root = Path(__file__).resolve().parent.parent
+    matrix_text = (repo_root / "docs" / "verify-matrix.md").read_text(encoding="utf-8")
+    category_markers = {
+        "service_specs": "sc.exe query",
+        "task_specs": "schtasks.exe /Query",
+        "feature_specs": "dism.exe",
+        "winget_specs": "winget.exe",
+        "auditpol_specs": "auditpol.exe",
+        "wevtutil_specs": "wevtutil.exe",
+        "firewall_group_specs": "netsh.exe advfirewall",
+        "icacls_specs": "icacls.exe",
+    }
+    for attr, marker in category_markers.items():
+        if any(getattr(tweak, attr) for tweak in TWEAK_CATALOG.values()):
+            assert marker in matrix_text, f"docs/verify-matrix.md missing verification entry for {attr} ({marker})"
+
+
+def test_supply_chain_zero_runtime_deps_and_sha_pinned_actions() -> None:
+    """pyproject.toml has zero required runtime dependencies and workflows pin actions to full 40-char SHAs."""
+    repo_root = Path(__file__).resolve().parent.parent
+    pyproject_text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^dependencies\s*=\s*\[\s*\]", pyproject_text), "Runtime dependencies must remain empty"
+
+    uses_pat = re.compile(r"uses:\s*([^@\s]+)@([^\s#]+)")
+    sha_pat = re.compile(r"^[0-9a-f]{40}$")
+    unpinned: list[str] = []
+    for wf in sorted((repo_root / ".github" / "workflows").glob("*.yml")):
+        for idx, line in enumerate(wf.read_text(encoding="utf-8").splitlines(), start=1):
+            match = uses_pat.search(line)
+            if match and not sha_pat.fullmatch(match.group(2)):
+                unpinned.append(f"{wf.name}:{idx} {match.group(1)}@{match.group(2)}")
+    assert not unpinned, f"Unpinned GitHub Actions found: {unpinned}"

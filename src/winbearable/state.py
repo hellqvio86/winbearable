@@ -158,6 +158,14 @@ class StateStore:
 
     @contextmanager
     def _file_lock(self, suffix: str) -> Iterator[None]:
+        """Acquire a cooperative per-store file lock.
+
+        On Windows, ``msvcrt.locking(..., msvcrt.LK_LOCK, 1)`` locks byte 0 of the
+        sidecar lock file cooperatively across ``winbearable`` processes; external tools
+        that ignore advisory byte-range locks are not blocked. If a process terminates
+        abnormally and leaves a stale ``*.lock`` / ``*.tx.lock`` file behind when no
+        ``wb`` process is running, delete the lock file and run ``wb recover --apply``.
+        """
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.state_path.parent, 0o700)

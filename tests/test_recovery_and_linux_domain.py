@@ -32,9 +32,9 @@ from winbearable.const import (
 )
 from winbearable.engine import (
     IrreversibleActionError,
-    _compensate_run_record,
     apply_profile,
     calculate_hardening_score,
+    compensate_run_record,
     detect_tweak,
     recover_incomplete_runs,
 )
@@ -522,7 +522,7 @@ def test_compensation_residuals_type_mismatch_and_disk_full(tmp_path: Path) -> N
         patch.object(sys_b, "uninstall_winget_package", return_value=True),
         patch.object(sys_b, "is_winget_package_installed", return_value=True),
     ):
-        comp_errors = _compensate_run_record(rec, reg, sys_b)
+        comp_errors = compensate_run_record(rec, reg, sys_b)
     assert "winget Microsoft.VisualStudioCode" in comp_errors
 
     # Type mismatch (REG_DWORD vs REG_SZ) never reports APPLIED

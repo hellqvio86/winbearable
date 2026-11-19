@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -18,6 +19,22 @@ from typing import Any
 from .const import WSL_VM_CREATOR_ID
 
 _ACTION_MAP = {"block": "Block", "allow": "Allow", "notconfigured": "NotConfigured"}
+_VM_CREATOR_GUID_RE = re.compile(r"^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$")
+
+
+def _validate_vm_creator_id(guid: str) -> str:
+    """Validate that a Hyper-V VM creator ID is a strict braced GUID."""
+    if not isinstance(guid, str) or not _VM_CREATOR_GUID_RE.fullmatch(guid):
+        raise ValueError(f"Invalid Hyper-V VM creator GUID: {guid!r}")
+    return guid
+
+
+def _ps_quote(value: str) -> str:
+    """Quote a PowerShell single-quoted literal after rejecting injection metacharacters."""
+    if any(tok in value for tok in (";", "`", "$(", "\r", "\n", "\x00")):
+        raise ValueError(f"Unsafe PowerShell literal value: {value!r}")
+    return "'" + value.replace("'", "''") + "'"
+
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -200,9 +217,10 @@ def get_wsl_hyperv_firewall_setting(
     """Query the active Hyper-V firewall setting for the WSL2 VMCreatorId as JSON."""
     if (platform_override or sys.platform) != "win32":
         return None
+    creator_literal = _ps_quote(_validate_vm_creator_id(WSL_VM_CREATOR_ID))
     ps_script = (
         "try { "
-        f"Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{WSL_VM_CREATOR_ID}' -ErrorAction Stop "
+        f"Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name {creator_literal} -ErrorAction Stop "
         "| Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction,LoopbackEnabled "
         "| ConvertTo-Json -Compress "
         "} catch { @{ error = $_.Exception.Message } | ConvertTo-Json -Compress; exit 1 }"
@@ -236,13 +254,14 @@ def set_wsl_hyperv_firewall_setting(
         enabled_str = "$true" if enabled else "$false"
     else:
         raise ValueError(f"Invalid enabled {enabled!r}; expected bool or 'NotConfigured'.")
+    creator_literal = _ps_quote(_validate_vm_creator_id(WSL_VM_CREATOR_ID))
     ps_script = (
         "try { "
-        f"Set-NetFirewallHyperVVMSetting -Name '{WSL_VM_CREATOR_ID}' "
+        f"Set-NetFirewallHyperVVMSetting -Name {creator_literal} "
         f"-Enabled {enabled_str} "
         f"-DefaultInboundAction {inbound} "
         f"-DefaultOutboundAction {outbound} -ErrorAction Stop; "
-        f"Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{WSL_VM_CREATOR_ID}' -ErrorAction Stop "
+        f"Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name {creator_literal} -ErrorAction Stop "
         "| Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction,LoopbackEnabled "
         "| ConvertTo-Json -Compress "
         "} catch { @{ error = $_.Exception.Message } | ConvertTo-Json -Compress; exit 1 }"
@@ -265,6 +284,13 @@ def set_wsl_hyperv_firewall_setting(
                 returncode = res.returncode
                 if returncode != 0:
                     error = _parse_ps_error_json(res.stdout, res.stderr, returncode)
+                    if any(
+                        tok in error.lower() for tok in ("constrainedlanguage", "applocker", "wdac", "executionpolicy")
+                    ):
+                        error = (
+                            f"{error} (PowerShell ConstrainedLanguage mode or AppLocker/WDAC may block "
+                            "NetSecurity cmdlets; adjust policy or configure Hyper-V firewall manually.)"
+                        )
                 else:
                     verified = _parse_ps_setting_json(res.stdout)
                     if verified is None:

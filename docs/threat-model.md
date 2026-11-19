@@ -49,7 +49,7 @@
 | **WSL distro `/etc/wsl.conf`** | `reversible` | Restores `WslDistroSnapshot` (`tee /etc/wsl.conf` or `rm -f /etc/wsl.conf`) per modified distro. |
 | **Hyper-V WSL firewall** | `reversible` | Configurable via `wb wsl firewall --disable --apply` and journaled for rollback. |
 
-## 6. Stable CLI Exit Code Taxonomy (`P2-Q.1`)
+## 6. Stable CLI Exit Code Taxonomy
 
 | Code | Constant | Meaning |
 | --- | --- | --- |
@@ -72,3 +72,12 @@
 - **UAC output file safety:** The elevated child validates `--uac-output` (`wb-uac-*\uac-output.txt`), rejects symlinks and Windows reparse points, and creates the output file exclusively (`O_CREAT | O_EXCL`).
 - **Elevation timeout & rollback:** Default elevation timeout is 30 minutes (`WINBEARABLE_UAC_TIMEOUT_MS` configurable). If `TerminateProcess` fails across the UIPI/integrity boundary from a medium-integrity parent, `winbearable` reports the failure honestly and warns that the elevated child may still hold the transaction lock.
 - **Rollback fidelity:** Firewall/auditpol rollback restores per-item (`restore_full_policy=False` default), `hardening.enable_lsa_protection` uses reversible `RunAsPPL=2`, `file_config` preserves BOM/order/non-ASCII on apply and exact bytes on rollback, and `.wslconfig` is deleted on rollback if it did not exist prior to apply.
+
+## 7. Input, Path, and Transaction Trust Boundaries
+
+- **Profile `include` / `extends` containment:** Relative references must resolve inside the parent profile directory or the built-in `profiles/` directory. Absolute paths, `..` traversal, and external targets are rejected unless `--allow-external-profiles` is explicitly passed.
+- **`FileSpec` & `IcaclsUserOnlySpec` path policy:** Expanded paths reject unresolved `%VAR%` placeholders, filesystem roots, Windows/system directories (`C:\Windows`, `Program Files`, `/etc`, `/usr`), and symlink/reparse ancestors. `IcaclsUserOnlySpec` is strictly restricted to user-profile paths; `FileSpec` rejects paths outside user directories unless `allow_system_paths=True` is declared in the catalog.
+- **Winget package allowlist:** `WingetSpec` installs are restricted to `PACKAGE_CATALOG` (`TRUSTED_WINGET_BY_ID`) and refuse unknown package IDs.
+- **WSL2 phase contract & distro validation:** When a profile enables `[wsl]`, `apply_profile` executes Windows tweaks first (`MutateTweaksPhase`) and host `.wslconfig` + per-distro `/etc/wsl.conf` second (`MutateWslPhase`) inside the **same** `RunRecord` transaction journal (`state.json`); a WSL failure triggers compensation of both WSL and already-applied tweaks. All distro names passed to `wsl.exe` are validated against `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` without `..`.
+- **Hyper-V PowerShell boundary:** `src/winbearable/hyperv_firewall.py` is the sole module permitted to invoke `powershell.exe` (`shell=False`), validating strict braced GUIDs and single-quoting literals while rejecting injection metacharacters.
+- **Cooperative state lock (`msvcrt.locking` / `fcntl.flock`):** On Windows, `StateStore` acquires a 1-byte cooperative lock on byte 0 of `.lock` / `.tx.lock`. If a crashed process leaves an incomplete journal or stale lock file, remove the stale lock file once no `wb` process is running and run `wb recover --apply`.

@@ -1,6 +1,8 @@
-"""Allowlisted winget package catalog and preset groups (PKG-01, PKG-02)."""
+"""Allowlisted winget package catalog and preset groups."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -15,7 +17,7 @@ class PackageDefinition:
     requires_admin: bool = False
 
 
-PACKAGE_CATALOG: dict[str, PackageDefinition] = {
+_RAW_PACKAGE_CATALOG: dict[str, PackageDefinition] = {
     "windows-terminal": PackageDefinition(
         name="windows-terminal",
         winget_id="Microsoft.WindowsTerminal",
@@ -114,9 +116,17 @@ PACKAGE_CATALOG: dict[str, PackageDefinition] = {
     ),
 }
 
-PACKAGE_PRESETS: dict[str, tuple[str, ...]] = {
-    "dev-core": ("windows-terminal", "git", "vscode"),
-    "launcher": ("everything", "flow-launcher"),
-    "tiling-wm": ("komorebi", "whkd", "glazewm"),
-    "fonts": ("jetbrains-mono-nerd-font",),
-}
+PACKAGE_CATALOG: Mapping[str, PackageDefinition] = MappingProxyType(_RAW_PACKAGE_CATALOG)
+
+TRUSTED_WINGET_BY_ID: Mapping[str, PackageDefinition] = MappingProxyType(
+    {pkg.winget_id: pkg for pkg in _RAW_PACKAGE_CATALOG.values()}
+)
+
+PACKAGE_PRESETS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "dev-core": ("windows-terminal", "git", "vscode"),
+        "launcher": ("everything", "flow-launcher"),
+        "tiling-wm": ("komorebi", "whkd", "glazewm"),
+        "fonts": ("jetbrains-mono-nerd-font",),
+    }
+)

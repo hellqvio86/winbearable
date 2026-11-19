@@ -9,11 +9,13 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from ..const import MAX_CMD_OUTPUT_CHARS
-from ..models import OperationStatus
+from ..models import OperationOutcome, OperationStatus
+from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS
 from .win32_ctypes import get_win32_dll
 
 
@@ -296,3 +298,29 @@ def communicate_bounded_with_truncation(
     t_out.join(timeout=2.0)
     t_err.join(timeout=2.0)
     return bytes(out_buf), bytes(err_buf), dropped["out"], dropped["err"]
+
+
+def run_tool(
+    argv: list[str],
+    runner: Callable[..., Any],
+    *,
+    input_text: str | None = None,
+    timeout: float = DEFAULT_CMD_TIMEOUT,
+    allowed_returncodes: tuple[int, ...] = (0,),
+) -> OperationOutcome:
+    """Execute a native tool via *runner* and normalize its result into an OperationOutcome."""
+    res = runner(argv, input_text=input_text, timeout=timeout)
+    if res.returncode in allowed_returncodes:
+        return OperationOutcome(
+            status=OperationStatus.OK,
+            returncode=res.returncode,
+            command=tuple(argv),
+        )
+    status = classify_cmd_failure(res.returncode, res.stdout, res.stderr)
+    diag = truncate_text(res.stderr or res.stdout, MAX_DIAGNOSTIC_CHARS, "diagnostic")
+    return OperationOutcome(
+        status=status,
+        message=diag,
+        returncode=res.returncode,
+        command=tuple(argv),
+    )

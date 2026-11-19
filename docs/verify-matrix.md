@@ -1,4 +1,4 @@
-# Windows Non-Registry Identifier Verification Matrix (`P0.4`)
+# Windows Non-Registry Identifier Verification Matrix
 
 This matrix tracks how every non-registry identifier in `winbearable` is verified on a real Windows 11 host (`>= 26300`, Pro/Enterprise/Education, no IoT/LTSC).
 
@@ -11,7 +11,8 @@ This matrix tracks how every non-registry identifier in `winbearable` is verifie
 | **Auditpol Subcategories** (`hardening.audit_core_subcategories`) | `auditpol.exe /get /subcategory:{GUID} /r /v` | 26300 | GUID-only arguments + numeric `SettingValue` (`0..3`) |
 | **Event Log Channels** (`hardening.event_log_sizes`, `hardening.enable_operational_logs`) | `wevtutil.exe gl "<Channel>" /f:xml` | 26300 | XML output (locale-independent) |
 | **Firewall Rule Groups** (`hardening.firewall_disable_risky_groups`) | `netsh.exe advfirewall firewall show rule group="<@FirewallAPI.dll,-ID>"` | 26300 | `@FirewallAPI.dll,-NNNNN` resource IDs only, never English display names |
-| **Hyper-V Firewall** (`wb wsl firewall`, `chk.hyperv_firewall`) | `Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'` | 26300 | Sole `DEC-01` PowerShell JSON exception; unavailable under CLM |
+| **ICACLS / SSH ACL** (`privacy.restrict_ssh_permissions`) | `icacls.exe "<Path>"` | 26300 | SDDL ownership/ACE check via Win32 SID (`LookupAccountSid`) |
+| **Hyper-V Firewall** (`wb wsl firewall`, `chk.hyperv_firewall`) | `Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'` | 26300 | Sole PowerShell JSON boundary; unavailable under ConstrainedLanguage mode |
 
 ## Running Host Snapshot Capture
 Run the env-gated Windows integration suite before releases:

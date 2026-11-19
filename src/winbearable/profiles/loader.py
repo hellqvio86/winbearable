@@ -303,15 +303,49 @@ def validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: s
 MAX_PROFILE_INHERITANCE_DEPTH = 8
 
 
-def _resolve_sibling_profile(parent_dir: Path, ref: str) -> str:
-    """Resolve a sibling .toml or .json profile relative to parent_dir, falling back to ref."""
+def _resolve_sibling_profile(
+    parent_dir: Path,
+    ref: str,
+    *,
+    allow_external: bool = False,
+    edge: str = "include",
+) -> str:
+    """Resolve a sibling .toml or .json profile relative to parent_dir, enforcing root containment."""
+    normalized_ref = ref.replace("\\", "/")
+    ref_path = Path(normalized_ref)
+    if not allow_external:
+        if ref_path.is_absolute() or (len(ref) >= 2 and ref[1] == ":") or ref.startswith("\\\\"):
+            raise ProfileValidationError(
+                f"Profile '{edge}' reference '{ref}' must be relative (pass --allow-external-profiles to override)."
+            )
+        if ".." in ref_path.parts:
+            raise ProfileValidationError(
+                f"Profile '{edge}' reference '{ref}' escapes parent directory "
+                "(pass --allow-external-profiles to override)."
+            )
+
+    parent_resolved = parent_dir.resolve()
+    builtin_resolved = get_builtin_profiles_dir().resolve()
+
+    def _verify_contained(cand: Path) -> Path:
+        resolved = cand.resolve()
+        if not allow_external and not (
+            resolved.is_relative_to(parent_resolved) or resolved.is_relative_to(builtin_resolved)
+        ):
+            raise ProfileValidationError(
+                f"Profile '{edge}' target '{cand}' resolves outside allowlisted profile roots ({resolved})."
+            )
+        return resolved
+
     if ref.endswith((".toml", ".json")):
         candidate = parent_dir / ref
-        return str(candidate) if candidate.is_file() else ref
+        if candidate.is_file():
+            return str(_verify_contained(candidate))
+        return ref
     for ext in (".toml", ".json"):
         candidate = parent_dir / f"{ref}{ext}"
         if candidate.is_file():
-            return str(candidate)
+            return str(_verify_contained(candidate))
     return ref
 
 
@@ -320,9 +354,21 @@ def load_profile(
     _visited: set[Path] | None = None,
     _chain: tuple[tuple[str, str], ...] = (),
     _edge: str = "root",
+    *,
+    allow_external_profiles: bool = False,
+    _allowed_roots: tuple[Path, ...] | None = None,
 ) -> ProfileSpec:
     """Load a TOML or JSON profile, migrate legacy fields, and resolve 'extends'/'include'."""
     profile_path = resolve_profile_path(name_or_path).resolve()
+    roots = _allowed_roots or (profile_path.parent, get_builtin_profiles_dir().resolve())
+    if (
+        _edge in ("extends", "include")
+        and not allow_external_profiles
+        and not any(profile_path.is_relative_to(r) for r in roots)
+    ):
+        raise ProfileValidationError(
+            f"Profile '{_edge}' target '{profile_path}' resolves outside allowlisted profile roots."
+        )
     current_chain = (*_chain, (_edge, str(profile_path)))
     if len(current_chain) > MAX_PROFILE_INHERITANCE_DEPTH:
         chain_str = " -> ".join(f"{edge}:{p}" for edge, p in current_chain)
@@ -346,8 +392,20 @@ def load_profile(
     if extends_ref is not None:
         if not isinstance(extends_ref, str):
             raise ProfileValidationError(f"Profile {profile_path} 'extends' must be a string.")
-        target_ref = _resolve_sibling_profile(profile_path.parent, extends_ref)
-        base_profile = load_profile(target_ref, _visited=path_visited, _chain=current_chain, _edge="extends")
+        target_ref = _resolve_sibling_profile(
+            profile_path.parent,
+            extends_ref,
+            allow_external=allow_external_profiles,
+            edge="extends",
+        )
+        base_profile = load_profile(
+            target_ref,
+            _visited=path_visited,
+            _chain=current_chain,
+            _edge="extends",
+            allow_external_profiles=allow_external_profiles,
+            _allowed_roots=roots,
+        )
 
     merged_tweaks: dict[str, bool] = {}
     if base_profile is not None:
@@ -367,8 +425,20 @@ def load_profile(
     for inc_ref in includes_raw:
         if not isinstance(inc_ref, str):
             raise ProfileValidationError(f"Profile {profile_path} 'include' entries must be strings.")
-        inc_target = _resolve_sibling_profile(profile_path.parent, inc_ref)
-        inc_profile = load_profile(inc_target, _visited=path_visited, _chain=current_chain, _edge="include")
+        inc_target = _resolve_sibling_profile(
+            profile_path.parent,
+            inc_ref,
+            allow_external=allow_external_profiles,
+            edge="include",
+        )
+        inc_profile = load_profile(
+            inc_target,
+            _visited=path_visited,
+            _chain=current_chain,
+            _edge="include",
+            allow_external_profiles=allow_external_profiles,
+            _allowed_roots=roots,
+        )
         merged_tweaks.update(inc_profile.tweaks)
         for p_name in inc_profile.packages:
             if p_name not in pkg_list:

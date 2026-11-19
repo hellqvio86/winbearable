@@ -1,14 +1,14 @@
 """Core evaluation, plan, apply, rollback, and hardening audit engine."""
 
-from winbearable.engine.apply import apply_profile, compensate_run_record, run_profile_command
-from winbearable.engine.apply import compensate_run_record as _compensate_run_record
-from winbearable.engine.apply import execute_tweak_mutations as _execute_tweak_mutations
+from winbearable.engine.apply import apply_profile, execute_tweak_mutations, run_profile_command
+from winbearable.engine.compensation import compensate_run_record
 from winbearable.engine.evaluate import detect_tweak, evaluate_profile
 from winbearable.engine.params import (
     ApplySummary,
     HighRiskConfirmationError,
     IncompleteJournalError,
     IrreversibleActionError,
+    TweakMutationError,
     is_edition_supported,
     is_iot_or_ltsc_edition,
     is_managed_device,
@@ -16,7 +16,6 @@ from winbearable.engine.params import (
     resolve_tweak_params,
     summarize_elevation_requirements,
 )
-from winbearable.engine.params import TweakMutationError as _TweakMutationError
 from winbearable.engine.rollback import recover_incomplete_runs, rollback_runs
 from winbearable.engine.scoring import (
     calculate_hardening_score,
@@ -31,15 +30,14 @@ __all__ = [
     "HighRiskConfirmationError",
     "IncompleteJournalError",
     "IrreversibleActionError",
-    "_TweakMutationError",
-    "_compensate_run_record",
-    "_execute_tweak_mutations",
+    "TweakMutationError",
     "apply_profile",
     "apply_wslconfig_target",
     "calculate_hardening_score",
     "compensate_run_record",
     "detect_tweak",
     "evaluate_profile",
+    "execute_tweak_mutations",
     "expand_file_spec_path",
     "inspect_defender_smartscreen_posture",
     "inspect_vbs_credential_guard_posture",

@@ -18,7 +18,9 @@ from ..models import (
     OperationStatus,
     PlannedOperation,
     TweakDefinition,
+    UnsupportedTargetError,
 )
+from ..packages import TRUSTED_WINGET_BY_ID
 from .base import OperationApplyContext, now_iso, raise_system_error
 from .identity import file_id, hyperv_firewall_id, vscode_ext_id, winget_id
 from .mergers import (
@@ -64,13 +66,21 @@ class WingetOperationAdapter:
                 if installed:
                     drifted.append(f"winget package {winget_spec.package_id}: installed -> uninstalled")
                 continue
+            pkg_meta = TRUSTED_WINGET_BY_ID.get(winget_spec.package_id)
+            if pkg_meta is None:
+                raise UnsupportedTargetError(
+                    f"Refusing untrusted winget package '{winget_spec.package_id}': "
+                    "not present in PACKAGE_CATALOG allowlist.",
+                    context={"package_id": winget_spec.package_id},
+                )
+            admin_note = ", requires admin" if winget_spec.scope == "machine" else ""
             ops.append(
                 PlannedOperation(
                     operation_type=self.kind,
                     target=f"{winget_spec.package_id} (scope={winget_spec.scope})",
                     action="install",
                     before_state="installed" if installed else "<missing>",
-                    after_state="installed",
+                    after_state=f"installed (source=winget, url={pkg_meta.source_url}{admin_note})",
                     reversible=True,
                     scope=winget_spec.scope,
                     requires_elevation=(winget_spec.scope == "machine"),
@@ -153,6 +163,12 @@ class WingetOperationAdapter:
                         ctx.journal_cb(entry)
                 continue
 
+            if winget_spec.package_id not in TRUSTED_WINGET_BY_ID:
+                raise UnsupportedTargetError(
+                    f"Refusing untrusted winget package '{winget_spec.package_id}': "
+                    "not present in PACKAGE_CATALOG allowlist.",
+                    context={"package_id": winget_spec.package_id},
+                )
             if not system.is_winget_package_installed(winget_spec.package_id):
                 if not system.install_winget_package(
                     package_id=winget_spec.package_id,
