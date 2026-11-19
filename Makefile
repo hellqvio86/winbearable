@@ -1,4 +1,4 @@
-.PHONY: venv lint test test-windows test-windows-docker docs clean format build publish winget-build winget-validate winget-publish run install version release-check hooks secrets trivy pre-commit
+.PHONY: venv lint test test-all test-windows test-windows-docker docs clean format build publish publish-local winget-build winget-validate winget-publish run install version release-check hooks secrets trivy pre-commit
 
 # renovate: datasource=docker depName=trufflesecurity/trufflehog
 TRUFFLEHOG_VERSION ?= 3.99.9
@@ -26,6 +26,13 @@ test: .venv
 test-windows: ## Run safe real-Windows integration tests locally (or in local Windows Docker container)
 	WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 uv run pytest tests/test_windows_integration.py -v
 
+test-all: lint test ## Run every local check (lint, mypy, unit + coverage, and Windows integration tests on Windows)
+	@if [ "$${OS:-}" = "Windows_NT" ] || [ -n "$${WINDIR:-}" ]; then \
+		WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 uv run pytest tests/test_windows_integration.py -v; \
+	else \
+		echo "Non-Windows host: skipped tests/test_windows_integration.py (run 'make test-windows' on Windows or 'make test-windows-docker')."; \
+	fi
+
 test-windows-docker: ## Build and run Dockerfile.windows in local Windows-container mode
 	docker build -f Dockerfile.windows -t winbearable-win-test .
 	docker run --rm winbearable-win-test
@@ -52,6 +59,8 @@ build: .venv
 
 publish: build
 	uv publish
+
+publish-local: release-check publish winget-publish ## Run full local quality gate, publish to PyPI, and publish Winget release locally without CI runners
 
 winget-build: ## Build portable Windows x64 zip of wb.exe for Winget
 	uv run --group release --frozen python bin/build_winget.py

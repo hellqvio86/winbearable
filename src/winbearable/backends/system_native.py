@@ -40,6 +40,9 @@ from .system_native_cmd import (
     terminate_process_tree,
     truncate_text,
 )
+from .system_native_cmd import (
+    run_tool as _run_tool_outcome,
+)
 from .system_native_sec import (
     backup_acl,
     get_auditpol_subcategory,
@@ -157,6 +160,23 @@ class NativeSystemBackend:
 
     def _terminate_process_tree(self, pid: int) -> None:
         terminate_process_tree(pid, self._platform, self._windll_override)
+
+    def run_tool(
+        self,
+        argv: list[str],
+        *,
+        input_text: str | None = None,
+        timeout: float = DEFAULT_CMD_TIMEOUT,
+        allowed_returncodes: tuple[int, ...] = (0,),
+    ) -> OperationOutcome:
+        """Execute a native tool and return a normalized OperationOutcome."""
+        return _run_tool_outcome(
+            argv,
+            self._run_native_cmd,
+            input_text=input_text,
+            timeout=timeout,
+            allowed_returncodes=allowed_returncodes,
+        )
 
     def _run_native_cmd(
         self,

@@ -318,7 +318,10 @@ def _handle_status(
     _dry_run: bool,
     _deps: CliDeps,
 ) -> int:
-    profile = load_profile(args.profile)
+    profile = load_profile(
+        args.profile,
+        allow_external_profiles=bool(getattr(args, "allow_external_profiles", False)),
+    )
     only_ids = parse_id_list(getattr(args, "only", None))
     skip_ids = parse_id_list(getattr(args, "skip", None))
     evaluations = evaluate_profile(
@@ -359,7 +362,10 @@ def _handle_plan(
     _dry_run: bool,
     _deps: CliDeps,
 ) -> int:
-    profile = load_profile(args.profile)
+    profile = load_profile(
+        args.profile,
+        allow_external_profiles=bool(getattr(args, "allow_external_profiles", False)),
+    )
     only_ids = parse_id_list(getattr(args, "only", None))
     skip_ids = parse_id_list(getattr(args, "skip", None))
     allow_managed = bool(getattr(args, "allow_managed", False))
@@ -408,7 +414,10 @@ def _handle_apply(
 ) -> int:
     if args.apply:
         require_windows_for_mutation(env, "wb apply --apply")
-    profile = load_profile(args.profile)
+    profile = load_profile(
+        args.profile,
+        allow_external_profiles=bool(getattr(args, "allow_external_profiles", False)),
+    )
     only_ids = parse_id_list(getattr(args, "only", None))
     skip_ids = parse_id_list(getattr(args, "skip", None))
     allow_managed = bool(getattr(args, "allow_managed", False))

@@ -15,8 +15,8 @@ from winbearable.cli import CliDeps, _absolutize_elevated_argv, run_cli
 from winbearable.const import HIVE_HKCU, HIVE_HKLM, REG_DWORD, REG_SZ
 from winbearable.engine import (
     ApplySummary,
-    _compensate_run_record,
     apply_profile,
+    compensate_run_record,
     detect_tweak,
     recover_incomplete_runs,
     rollback_runs,
@@ -240,7 +240,7 @@ def test_acl_backup_failure_aborts_and_missing_acl_backup_errors(tmp_path: Path)
             IcaclsSnapshot(path_template=str(tmp_path / ".ssh"), backup_acl_path=str(tmp_path / "missing.acl")),
         ),
     )
-    errs = _compensate_run_record(rec, reg, sys_b)
+    errs = compensate_run_record(rec, reg, sys_b)
     assert any("missing ACL backup" in e for e in errs)
 
 

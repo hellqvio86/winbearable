@@ -1,5 +1,7 @@
 """Catalog-level safety, schema, conflict, and provenance validation."""
 
+from collections.abc import Mapping
+
 from ..const import (
     ACTION_DELETE,
     ACTION_DELETE_KEY,
@@ -185,7 +187,7 @@ def _validate_operations(
             errors.append(f"{tweak.tweak_id}: empty winget package_id")
 
 
-def validate_catalog(catalog: dict[str, TweakDefinition]) -> list[str]:
+def validate_catalog(catalog: Mapping[str, TweakDefinition]) -> list[str]:
     """Validate all catalog tweaks for schema, conflicts, and safety/provenance metadata."""
     errors: list[str] = []
     seen_ids: set[str] = set()

@@ -25,10 +25,10 @@ from winbearable.const import (
 )
 from winbearable.engine import (
     IncompleteJournalError,
-    _compensate_run_record,
-    _execute_tweak_mutations,
-    _TweakMutationError,
+    TweakMutationError,
     apply_profile,
+    compensate_run_record,
+    execute_tweak_mutations,
     inspect_defender_smartscreen_posture,
     inspect_vbs_credential_guard_posture,
     recover_incomplete_runs,
@@ -163,7 +163,7 @@ def test_engine_compensate_run_record_all_snapshot_types_and_errors(tmp_path: Pa
         patch.object(sys_b, "set_hibernate_enabled", return_value=False),
         patch.object(sys_b, "set_git_global_config", return_value=False),
     ):
-        errs = _compensate_run_record(rec, reg, sys_b)
+        errs = compensate_run_record(rec, reg, sys_b)
     assert len(errs) >= 12
 
 
@@ -210,16 +210,16 @@ def test_engine_posture_inspection_variants_and_apply_failures(tmp_path: Path) -
     env = sys_b.detect_environment(reg2)
 
     t_fs = _sample_tweak("test.fs", service_specs=(), fsutil_specs=(FsutilCaseSensitiveSpec(str(tmp_path), True),))
-    with patch.object(sys_b, "set_dir_case_sensitive", return_value=False), pytest.raises(_TweakMutationError):
-        _execute_tweak_mutations(t_fs, env, reg2, sys_b, tmp_path, set(), [], [])
+    with patch.object(sys_b, "set_dir_case_sensitive", return_value=False), pytest.raises(TweakMutationError):
+        execute_tweak_mutations(t_fs, env, reg2, sys_b, tmp_path, set(), [], [])
 
     t_pwr = _sample_tweak("test.pwr", service_specs=(), powercfg_specs=(PowercfgHibernateSpec(False),))
-    with patch.object(sys_b, "set_hibernate_enabled", return_value=False), pytest.raises(_TweakMutationError):
-        _execute_tweak_mutations(t_pwr, env, reg2, sys_b, tmp_path, set(), [], [])
+    with patch.object(sys_b, "set_hibernate_enabled", return_value=False), pytest.raises(TweakMutationError):
+        execute_tweak_mutations(t_pwr, env, reg2, sys_b, tmp_path, set(), [], [])
 
     t_git = _sample_tweak("test.git", service_specs=(), git_config_specs=(GitConfigSpec("core.eol", "lf"),))
-    with patch.object(sys_b, "set_git_global_config", return_value=False), pytest.raises(_TweakMutationError):
-        _execute_tweak_mutations(t_git, env, reg2, sys_b, tmp_path, set(), [], [])
+    with patch.object(sys_b, "set_git_global_config", return_value=False), pytest.raises(TweakMutationError):
+        execute_tweak_mutations(t_git, env, reg2, sys_b, tmp_path, set(), [], [])
 
 
 def test_state_ini_file_and_timeout_hardening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

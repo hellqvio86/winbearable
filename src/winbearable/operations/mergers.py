@@ -17,22 +17,12 @@ from typing import Any
 from ..backends.win32_fs import replace_file_preserving_acl
 from ..models import FileSnapshot, FileSpec
 from ..wsl import merge_ini_preserving_comments
-
-_UNRESOLVED_WIN_ENV_RE = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*%")
+from .path_policy import validate_file_spec_path
 
 
 def expand_file_spec_path(path_template: str) -> Path:
-    """Expand %VAR% and ~ in a FileSpec path template, rejecting unresolved %VAR% tokens."""
-    expanded = _UNRESOLVED_WIN_ENV_RE.sub(
-        lambda m: os.environ.get(m.group(0)[1:-1], m.group(0)),
-        path_template,
-    )
-    expanded = os.path.expandvars(os.path.expanduser(expanded))
-    if _UNRESOLVED_WIN_ENV_RE.search(expanded):
-        raise ValueError(f"Unresolved environment variable in path template: {path_template!r}")
-    if os.name != "nt":
-        expanded = expanded.replace("\\", "/")
-    return Path(expanded)
+    """Expand %VAR% and ~ in a FileSpec path template and enforce user-profile allowlist policy."""
+    return validate_file_spec_path(path_template)
 
 
 def has_jsonc_comments(text: str) -> bool:

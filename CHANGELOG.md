@@ -2,6 +2,23 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.18.0] - 2026-11-19
+
+### Security & Architecture
+
+- **Trust Boundaries & Path Policy:**
+  - Contained profile `include` / `extends` references inside the parent profile directory or built-in `profiles/` directory (`ProfileValidationError` on `..`, absolute paths, or external targets unless `--allow-external-profiles` is passed).
+  - Enforced user-profile path policy for `FileSpec` (`operations/path_policy.py`) and `IcaclsUserOnlySpec` (`IcaclsOperationAdapter`), rejecting unresolved `%VAR%`, system directories, and symlink/reparse ancestors, while surfacing expanded paths in `wb plan`.
+  - Added strict `validate_wsl_distro_name()` and `validate_dotfiles_repo()` checks across WSL lifecycle/config entrypoints, plus strict GUID validation, `_ps_quote()` literal escaping, and ConstrainedLanguage/AppLocker guidance in `hyperv_firewall.py`.
+  - Restricted `WingetSpec` installs to `PACKAGE_CATALOG` (`TRUSTED_WINGET_BY_ID`) and surfaced winget source URL and admin requirements in `wb plan`.
+- **Engine Modularity, Immutability & Schema Alignment:**
+  - Extracted `PlanPhase`, `MutateTweaksPhase`, `MutateWslPhase`, and `FinalizeJournalPhase` into `src/winbearable/engine/phases.py`, removed private aliases from `engine/__init__.py`, and eliminated `rollback.py -> apply.py` coupling.
+  - Wrapped `TWEAK_CATALOG`, `TWEAK_ID_ALIASES`, `PACKAGE_CATALOG`, `PACKAGE_PRESETS`, and `TRUSTED_WINGET_BY_ID` in `MappingProxyType`, and removed `TWEAK_CATALOG` from top-level `winbearable.__all__`.
+  - Bumped `JSON_SCHEMA_VERSION` to `"2.0"`, aligned `JSON_SCHEMAS` (including `doctor` `refugee_summary`), and added `docs/schema-versioning.md`.
+  - Added `run_tool()` in `backends/system_native_cmd.py` / `NativeSystemBackend`, restricted raw `subprocess.run`/`Popen` via `test_catalog_lint.py`, and documented cooperative `msvcrt.locking` and WSL phase contracts in `docs/threat-model.md` and `docs/verify-matrix.md`.
+- **Local Test & Publish Tooling:**
+  - Added `make test-all` (lint, mypy, unit + coverage, and Windows integration tests on Windows) and `make publish-local` (local release gate + PyPI + Winget publish without GitHub Actions runners) to `Makefile`.
+
 ## [0.17.1] - 2026-11-19
 
 ### Fixed

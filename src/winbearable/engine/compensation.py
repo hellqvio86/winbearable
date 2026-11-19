@@ -44,7 +44,7 @@ from .params import resolve_tweak_params
 
 
 @dataclass
-class _PreApplySnapshots:
+class PreApplySnapshots:
     registry: list[RegistryValueSnapshot] = field(default_factory=list)
     registry_keys: list[RegistryKeySnapshot] = field(default_factory=list)
     services: list[ServiceSnapshot] = field(default_factory=list)
@@ -85,9 +85,9 @@ def collect_pre_apply_snapshots(
     profile_params: dict[str, dict[str, Any]] | None = None,
     *,
     expand_fn: Callable[[str], Path] | None = None,
-) -> _PreApplySnapshots:
+) -> PreApplySnapshots:
     """Capture all pre-change snapshots for drifted tweaks via OperationAdapters."""
-    snaps = _PreApplySnapshots()
+    snaps = PreApplySnapshots()
     seen_ids: set[str] = set()
     adapters: list[OperationAdapter] = [
         FileConfigOperationAdapter(expand_fn=expand_fn)
@@ -111,7 +111,7 @@ def collect_pre_apply_snapshots(
     return snaps
 
 
-def compute_snapshot_fingerprints(snaps: _PreApplySnapshots) -> dict[str, str]:
+def compute_snapshot_fingerprints(snaps: PreApplySnapshots) -> dict[str, str]:
     """Build a canonical precondition fingerprint map using operations.identity."""
     fp: dict[str, str] = {}
     for rs in snaps.registry:
