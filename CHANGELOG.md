@@ -2,6 +2,13 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.21.0] - 2026-11-19
+
+### Added
+
+- **Structured JSON Logging & Subcommand `--debug`:** Added `winbearable.log` (`JsonLogFormatter`, `configure_logging`, `get_logger`, `reset_logging`) emitting single-line JSON logs to `stderr` (keeping `--json` `stdout` clean) and optional rotating JSONL files (`--log-file` / `WINBEARABLE_LOG_PATH`), plus `--log-format {json,text}` (`WINBEARABLE_LOG_FORMAT`) and `WINBEARABLE_LOG_LEVEL`.
+- **Flexible `--debug` Placement & Diagnostics:** Enabled `--debug`, `--log-format`, and `--log-file` both before and after any subcommand (including `wb wsl ...`), preserved exception propagation under `--debug`, and added structured error/debug logging across CLI dispatch, bounded subprocess execution, UAC elevation launch, tweak parameter evaluation, and tweak apply/verification failures.
+
 ## [0.20.0] - 2026-11-19
 
 ### Security & Transaction Integrity
