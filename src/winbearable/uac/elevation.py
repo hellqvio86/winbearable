@@ -35,7 +35,11 @@ from .win32 import (
 
 
 def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
-    """Remove Python import/runtime injection variables in an elevated child environment."""
+    """Remove Python import/runtime injection variables before spawning child Python processes.
+
+    Note: the already-started elevated Python process relies on `-I` (for non-frozen python.exe
+    launches) rather than post-startup os.environ cleanup.
+    """
     target_env = env if env is not None else os.environ
     removed: list[str] = []
     for var in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP"):

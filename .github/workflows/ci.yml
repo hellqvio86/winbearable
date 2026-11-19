@@ -160,6 +160,8 @@ jobs:
       )
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -258,6 +260,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     needs: [all-checks]
     environment:
       name: pypi
@@ -316,6 +319,11 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@9d57eef8c06cd9d6b433effeeb7a6a77b3ff94ad # v4.2.2
+        with:
+          subject-path: dist/*
+
       - name: Upload release assets and SBOM
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
@@ -337,6 +345,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     needs: [all-checks]
     if: |
       always() &&
@@ -373,6 +383,11 @@ jobs:
         run: |
           uv run --group release --frozen python bin/build_winget.py
           (cd dist && sha256sum -c winbearable-*.zip.sha256)
+
+      - name: Attest Winget portable zip provenance
+        uses: actions/attest-build-provenance@9d57eef8c06cd9d6b433effeeb7a6a77b3ff94ad # v4.2.2
+        with:
+          subject-path: dist/winbearable-*.zip
 
       - name: Upload Winget zip to release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3

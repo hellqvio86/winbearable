@@ -30,15 +30,14 @@ Smoke-test the built executable before uploading:
 .\dist\wb\wb.exe plan --profile user-only --json
 ```
 
-## Publish & Submit to `microsoft/winget-pkgs`
+## Publish & Release Provenance
 
-For subsequent releases (after the `v<version>` GitHub Release is published), run:
+Releases are published exclusively through GitHub Actions CI:
 
-```powershell
-make winget-publish
-```
-
-(Or manually: `uv run python bin/publish_winget.py`, which builds the zip, uploads it to `v<version>`, and runs `wingetcreate update`.)
+1. **PyPI & Release Assets (`publish` job):** Uses OIDC Trusted Publishing (`pypa/gh-action-pypi-publish`) behind the protected `pypi` environment, attaches wheels, sdists, `SHA256SUMS.txt`, and `sbom.spdx.json` to the GitHub Release, and generates SLSA build provenance attestations via `actions/attest-build-provenance`.
+2. **Winget Portable Zip (`publish-winget-asset` job):** Builds `dist/winbearable-<version>-win-x64.zip` on `windows-latest` only on `release: published`, verifies SHA-256, attests provenance via `actions/attest-build-provenance`, and attaches the zip + `.sha256` to the GitHub Release.
+3. **Local Dry-Run Verification:** `make publish-local` runs `release-check`, `uv build`, and `winget validate` locally without uploading credentials or artifacts.
+4. **Authenticode / UAC Publisher Status:** `wb.exe` is currently unsigned (no commercial Authenticode certificate), so Windows UAC prompts display "Unknown publisher" and SmartScreen may warn on first run. Signed releases would require an Authenticode code-signing certificate or SignPath/Trusted Signing integration.
 
 1. **Upload the zip** (`dist/winbearable-<version>-win-x64.zip`) as a release asset on the GitHub Release for `v<version>`.
 2. **Update the manifests** in `packaging/winget/` (or generate them with `wingetcreate`):

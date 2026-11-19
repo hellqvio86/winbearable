@@ -9,7 +9,7 @@ from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
 from ..models import RollbackConflictError, RollbackFailureError, RunRecord, TransactionState
 from ..state import StateStore
-from .compensation import compensate_run_record
+from .compensation import compensate_run_record_issues
 from .params import IncompleteJournalError, require_native_backends
 
 
@@ -70,15 +70,18 @@ def recover_incomplete_runs(
             was_failed = rec.state == TransactionState.FAILED
             rolling_back = replace(rec, state=TransactionState.ROLLING_BACK)
             state_store.upsert_run(rolling_back)
-            comp_errors = compensate_run_record(
+            issues = compensate_run_record_issues(
                 rec,
                 registry,
                 system,
                 force_rollback=force,
                 skip_package_uninstall=was_failed and not force,
             )
-            only_conflicts = bool(comp_errors) and all(err.startswith("restore_conflict ") for err in comp_errors)
-            if not comp_errors:
+            comp_errors = [issue.message for issue in issues]
+            only_conflicts = bool(issues) and all(issue.kind == "conflict" for issue in issues)
+            conflict_targets = {issue.target_id for issue in issues if issue.kind == "conflict" and issue.target_id}
+            conflict_tweaks = {issue.tweak_id for issue in issues if issue.kind == "conflict" and issue.tweak_id}
+            if not issues:
                 final_state = TransactionState.ROLLED_BACK
             elif keep_conflicts and only_conflicts:
                 final_state = TransactionState.PARTIALLY_ROLLED_BACK
@@ -94,11 +97,12 @@ def recover_incomplete_runs(
                         if skip_pkg and entry.operation_type in {"winget_package", "vscode_extension"}
                         else (
                             "conflict"
-                            if any(entry.target_id in err or entry.tweak_id in err for err in comp_errors)
+                            if (
+                                entry.target_id in conflict_targets
+                                or (entry.target_id == "" and entry.tweak_id in conflict_tweaks)
+                            )
                             else (
-                                "rolled_back"
-                                if entry.outcome == "applied" and not comp_errors
-                                else entry.rollback_outcome
+                                "rolled_back" if entry.outcome == "applied" and not issues else entry.rollback_outcome
                             )
                         )
                     ),
@@ -154,10 +158,11 @@ def _rollback_runs_impl(
         for run_record in runs_to_revert:
             rolling_back = replace(run_record, state=TransactionState.ROLLING_BACK)
             state_store.upsert_run(rolling_back)
-            comp_errors = compensate_run_record(
+            issues = compensate_run_record_issues(
                 run_record, registry, system, restore_full_policy=restore_full_policy, force_rollback=force
             )
-            if comp_errors:
+            if issues:
+                comp_errors = [issue.message for issue in issues]
                 err_msg = f"Rollback errors: {'; '.join(comp_errors)}"
                 state_store.upsert_run(
                     replace(
@@ -166,7 +171,7 @@ def _rollback_runs_impl(
                         error=err_msg,
                     )
                 )
-                if all(err.startswith("restore_conflict ") for err in comp_errors):
+                if all(issue.kind == "conflict" for issue in issues):
                     raise RollbackConflictError(err_msg, context={"run_id": run_record.run_id, "errors": comp_errors})
                 raise RollbackFailureError(err_msg, context={"run_id": run_record.run_id, "errors": comp_errors})
             updated_journal = tuple(

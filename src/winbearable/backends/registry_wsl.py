@@ -19,6 +19,7 @@ from ..models import (
     RegistryView,
 )
 from .registry_protocol import normalize_key_path
+from .system_native_cmd import run_subprocess_bounded
 
 
 def is_wsl2() -> bool:
@@ -54,18 +55,7 @@ class WslInteropRegistryBackend:
         return []
 
     def _run_reg_query(self, args: list[str]) -> subprocess.CompletedProcess[str]:
-        child_env = dict(os.environ)
-        child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
-        return subprocess.run(
-            [self._reg_exe, "query", *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15.0,
-            shell=False,
-            env=child_env,
-        )
+        return run_subprocess_bounded([self._reg_exe, "query", *args], timeout=15.0)
 
     _HIVE_ALIASES: dict[str, str] = {
         "HKLM": "HKEY_LOCAL_MACHINE",

@@ -382,9 +382,6 @@ def test_raw_subprocess_restricted_to_backend_boundaries() -> None:
     allowlisted = {
         "backends/system_native.py",
         "backends/system_native_cmd.py",
-        "backends/registry_wsl.py",
-        "hyperv_firewall.py",
-        "wsl/audit.py",
     }
     violations: list[str] = []
     for py_file in sorted(src_root.rglob("*.py")):

@@ -23,10 +23,10 @@ from .models import (
     InvalidStateTransitionError,
     RunRecord,
     TransactionState,
+    resolve_tweak_id,
     validate_run_record_invariants,
     validate_transaction_transition,
 )
-from .tweaks import resolve_tweak_id
 
 DEFAULT_MAX_RUN_HISTORY = 100
 DEFAULT_MAX_BACKUP_DIRS = DEFAULT_MAX_RUN_HISTORY

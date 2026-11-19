@@ -1,4 +1,4 @@
-.PHONY: venv lint test test-all test-windows test-windows-docker docs clean format build publish publish-local winget-build winget-validate winget-publish run install version release-check hooks secrets trivy pre-commit
+.PHONY: venv lint test test-all test-windows docs clean format build publish-local winget-build winget-validate run install version release-check hooks secrets trivy pre-commit
 
 SHELL := /usr/bin/env bash
 export MSYS_NO_PATHCONV=1
@@ -32,12 +32,8 @@ test-all: lint test ## Run every local check (lint, mypy, unit + coverage, and W
 	@if [ "$${OS:-}" = "Windows_NT" ] || [ -n "$${WINDIR:-}" ]; then \
 		WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 uv run pytest tests/test_windows_integration.py -v; \
 	else \
-		echo "Non-Windows host: skipped tests/test_windows_integration.py (run 'make test-windows' on Windows or 'make test-windows-docker')."; \
+		echo "Non-Windows host: skipped tests/test_windows_integration.py (run 'make test-windows' on Windows)."; \
 	fi
-
-test-windows-docker: ## Build and run Dockerfile.windows in local Windows-container mode
-	docker build -f Dockerfile.windows -t winbearable-win-test .
-	docker run --rm winbearable-win-test
 
 docs: .venv ## Regenerate docs/tweaks-reference.md from TWEAK_CATALOG
 	uv run python bin/gen_docs.py
@@ -59,19 +55,13 @@ release-check: lint test secrets trivy ## Full pre-release quality gate
 build: .venv
 	uv build
 
-publish: build
-	uv publish
-
-publish-local: release-check publish winget-publish ## Run full local quality gate, publish to PyPI, and publish Winget release locally without CI runners
+publish-local: release-check build winget-validate ## Dry-run release verification locally (PyPI/GitHub uploads happen via CI OIDC only)
 
 winget-build: ## Build portable Windows x64 zip of wb.exe for Winget
 	uv run --group release --frozen python bin/build_winget.py
 
 winget-validate: ## Validate local packaging/winget manifests
 	winget validate --manifest packaging/winget
-
-winget-publish: ## Build zip, upload to GitHub Release v<version>, and submit Winget update PR
-	uv run python bin/publish_winget.py
 
 clean:
 	rm -rf .venv __pycache__ .pytest_cache .ruff_cache .mypy_cache dist coverage.json .coverage

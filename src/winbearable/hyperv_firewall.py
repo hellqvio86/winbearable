@@ -7,9 +7,7 @@ This module is the sole permitted PowerShell boundary in `winbearable`.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import re
 import subprocess
 import sys
@@ -17,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .backends.system_native_cmd import sys32_exe
+from .backends.system_native_cmd import run_subprocess_bounded, sys32_exe
 from .const import WSL_VM_CREATOR_ID
 
 _ACTION_MAP = {"block": "Block", "allow": "Allow", "notconfigured": "NotConfigured"}
@@ -50,40 +48,7 @@ def _powershell_exe() -> str:
 
 
 def _default_ps_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
-    child_env = dict(os.environ)
-    child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        shell=False,
-        env=child_env,
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=15.0)
-        return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
-    except subprocess.TimeoutExpired as exc:
-        if sys.platform == "win32" and proc.pid:
-            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-                subprocess.run(
-                    [_sys32_path("taskkill.exe"), "/T", "/F", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    shell=False,
-                    check=False,
-                    timeout=5.0,
-                )
-        proc.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-            proc.communicate(timeout=5.0)
-        raise subprocess.TimeoutExpired(cmd=args, timeout=15.0, output=exc.output, stderr=exc.stderr) from exc
-    finally:
-        if proc.stdout is not None:
-            proc.stdout.close()
-        if proc.stderr is not None:
-            proc.stderr.close()
+    return run_subprocess_bounded(args, timeout=15.0, raise_on_timeout=True)
 
 
 def _decode_enabled(raw: Any) -> bool | str | None:
