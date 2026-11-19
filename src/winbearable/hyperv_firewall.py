@@ -92,21 +92,25 @@ def _normalize_action(value: str, field_name: str) -> str:
     return normalized
 
 
+_ALLOWED_PS_SETTING_KEYS: frozenset[str] = frozenset(
+    {"Name", "Enabled", "DefaultInboundAction", "DefaultOutboundAction", "LoopbackEnabled"}
+)
+HYPERV_PS_SCHEMA_VERSION = "1.0"
+
+
 def _parse_ps_setting_json(raw_stdout: str) -> dict[str, Any] | None:
     stripped = raw_stdout.strip()
-    if not stripped:
+    if not stripped or len(stripped) > 65_536:
         return None
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
-        last_line = stripped.splitlines()[-1].strip()
-        try:
-            parsed = json.loads(last_line)
-        except json.JSONDecodeError:
-            return None
+        return None
     if isinstance(parsed, list):
         parsed = parsed[0] if len(parsed) == 1 else None
     if not isinstance(parsed, dict) or "error" in parsed:
+        return None
+    if any(k not in _ALLOWED_PS_SETTING_KEYS for k in parsed):
         return None
 
     raw_name = parsed.get("Name")

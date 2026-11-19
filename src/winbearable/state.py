@@ -17,16 +17,33 @@ if sys.platform == "win32":
 else:
     import fcntl
 
+from .backends.win32_acl import apply_windows_private_acl, verify_windows_private_acl
 from .backends.win32_fs import is_reparse_or_symlink
 from .const import APP_NAME, ENV_STATE_PATH, STATE_SCHEMA_VERSION
+from .log import get_logger
 from .models import (
     InvalidStateTransitionError,
+    PermissionDeniedError,
     RunRecord,
     TransactionState,
     resolve_tweak_id,
     validate_run_record_invariants,
     validate_transaction_transition,
 )
+
+_logger = get_logger(__name__)
+
+
+def _iter_run_backup_paths(run: RunRecord) -> list[Path]:
+    """Return all external backup file paths referenced by snapshots in *run*."""
+    paths: list[Path] = []
+    for snap in (*run.auditpol_snapshots, *run.icacls_snapshots, *run.firewall_group_snapshots):
+        for attr in ("backup_csv_path", "backup_acl_path", "backup_wfw_path"):
+            raw = getattr(snap, attr, None)
+            if raw:
+                paths.append(Path(str(raw)))
+    return paths
+
 
 DEFAULT_MAX_RUN_HISTORY = 100
 DEFAULT_MAX_BACKUP_DIRS = DEFAULT_MAX_RUN_HISTORY
@@ -166,6 +183,22 @@ class StateStore:
         if is_reparse_or_symlink(path) or any(is_reparse_or_symlink(p) for p in path.parents):
             raise StateStoreError(f"Refusing symlink or reparse-point state path: {path}")
 
+    def _ensure_secure_dir_unlocked(self, directory: Path) -> None:
+        self._ensure_not_reparse(directory)
+        existed = directory.exists()
+        directory.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(directory, 0o700)
+        elif not existed:
+            try:
+                apply_windows_private_acl(directory)
+            except PermissionDeniedError as exc:
+                raise StateStoreError(str(exc)) from exc
+        try:
+            verify_windows_private_acl(directory)
+        except PermissionDeniedError as exc:
+            raise StateStoreError(str(exc)) from exc
+
     @contextmanager
     def _file_lock(self, suffix: str) -> Iterator[None]:
         """Acquire a cooperative per-store file lock.
@@ -177,10 +210,9 @@ class StateStore:
         ``wb`` process is running, delete the lock file and run ``wb recover --apply``.
         """
         self._ensure_not_reparse(self.state_path)
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        if os.name == "posix":
-            os.chmod(self.state_path.parent, 0o700)
+        self._ensure_secure_dir_unlocked(self.state_path.parent)
         lock_path = self.state_path.with_suffix(suffix)
+        self._ensure_not_reparse(lock_path)
         with open(lock_path, "a+", encoding="utf-8") as lock_file:
             if sys.platform == "win32":
                 lock_file.seek(0)
@@ -213,12 +245,24 @@ class StateStore:
             yield
 
     def _load_runs_unlocked(self) -> list[RunRecord]:
+        self._ensure_not_reparse(self.state_path)
         if not self.state_path.is_file():
             return []
         try:
-            raw_text = self.state_path.read_text(encoding="utf-8")
+            verify_windows_private_acl(self.state_path)
+        except PermissionDeniedError as exc:
+            raise StateStoreError(str(exc)) from exc
+        try:
+            lstat_info = os.lstat(self.state_path)
+            with open(self.state_path, "rb") as fh:
+                fstat_info = os.fstat(fh.fileno())
+                if (lstat_info.st_ino and fstat_info.st_ino) and (
+                    lstat_info.st_dev != fstat_info.st_dev or lstat_info.st_ino != fstat_info.st_ino
+                ):
+                    raise StateStoreError(f"State file changed on disk during open: {self.state_path}")
+                raw_text = fh.read().decode("utf-8")
             payload: Any = json.loads(raw_text)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise StateStoreError(
                 f"Corrupted state file at {self.state_path}: {exc}. "
                 f"Check {self.state_path.with_suffix('.json.bak')} for recovery."
@@ -271,8 +315,14 @@ class StateStore:
             TransactionState.APPLYING,
             TransactionState.ROLLING_BACK,
             TransactionState.FAILED,
+            TransactionState.PARTIALLY_ROLLED_BACK,
         }
         protected_ids = {run.run_id for run in runs if run.state in incomplete_states}
+        for run in runs:
+            for bfile in _iter_run_backup_paths(run):
+                bparent = bfile.parent
+                if bparent.parent.resolve() == resolved_root:
+                    protected_ids.add(bparent.name)
         referenced_ids = {run.run_id for run in runs}
         resolved_known_ids = referenced_ids if known_ids is None else known_ids
         referenced_candidates: list[tuple[float, Path]] = []
@@ -381,6 +431,8 @@ class StateStore:
             prune_unreferenced=True,
             known_ids=all_known_ids,
         )
+        for warning in self.last_cleanup_warnings:
+            _logger.warning(warning, extra={"event": "state.backup_cleanup_warning"})
 
     def restore_from_backup(self) -> bool:
         """Validate and restore state.json from state.json.bak without overwriting the backup."""
@@ -492,3 +544,57 @@ class StateStore:
             TransactionState.FAILED,
         }
         return [run for run in self.load_runs() if run.state in incomplete_states]
+
+    def inspect_health(self) -> dict[str, Any]:
+        """Inspect state file integrity, ACLs, incomplete runs, and backup consistency."""
+        bak_path = self.state_path.with_suffix(".json.bak")
+        backups_root = self.state_path.parent / "backups"
+        health: dict[str, Any] = {
+            "state_path": str(self.state_path),
+            "state_exists": self.state_path.is_file(),
+            "backup_exists": bak_path.is_file(),
+            "state_valid": True,
+            "state_error": None,
+            "acl_ok": True,
+            "acl_error": None,
+            "incomplete_run_ids": [],
+            "missing_backup_files": [],
+            "orphaned_backup_dirs": [],
+        }
+        try:
+            verify_windows_private_acl(self.state_path.parent)
+            if self.state_path.is_file():
+                verify_windows_private_acl(self.state_path)
+        except PermissionDeniedError as exc:
+            health["acl_ok"] = False
+            health["acl_error"] = str(exc)
+
+        try:
+            runs = self.load_runs()
+        except StateStoreError as exc:
+            health["state_valid"] = False
+            health["state_error"] = str(exc)
+            return health
+
+        incomplete_states = {
+            TransactionState.PLANNED,
+            TransactionState.APPLYING,
+            TransactionState.ROLLING_BACK,
+            TransactionState.FAILED,
+        }
+        health["incomplete_run_ids"] = [r.run_id for r in runs if r.state in incomplete_states]
+        referenced_ids = {r.run_id for r in runs}
+        missing_files: list[str] = []
+        for run in runs:
+            for bfile in _iter_run_backup_paths(run):
+                if not bfile.is_file():
+                    missing_files.append(str(bfile))
+        health["missing_backup_files"] = sorted(set(missing_files))
+
+        orphans: list[str] = []
+        if backups_root.is_dir() and not is_reparse_or_symlink(backups_root):
+            for entry in sorted(backups_root.iterdir()):
+                if entry.is_dir() and entry.name not in referenced_ids:
+                    orphans.append(entry.name)
+        health["orphaned_backup_dirs"] = orphans
+        return health

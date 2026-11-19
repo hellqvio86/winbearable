@@ -15,15 +15,16 @@ This matrix tracks how every non-registry identifier in `winbearable` is verifie
 | **Hyper-V Firewall** (`wb wsl firewall`, `chk.hyperv_firewall`) | `Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'` | 26300 | Sole PowerShell JSON boundary; unavailable under ConstrainedLanguage mode |
 
 ## Running Host Snapshot Capture
-Run the env-gated Windows integration suite before releases:
+Run the env-gated Windows integration suite locally before releases (GitHub Actions PR CI intentionally uses `ubuntu-latest` only; `windows-latest` is reserved for release Winget asset builds):
 ```powershell
 $env:WINBEARABLE_RUN_WINDOWS_INTEGRATION = "1"
-pytest src/tests/test_windows_integration.py -v
+uv run pytest tests/test_windows_integration.py -v
 ```
+Revalidation policy: re-run `tests/test_windows_integration.py` on every minor release or after any change to Win32 `ctypes`, `winreg`, ACLs, UAC, WSL, services, tasks, or native subprocess wrappers.
 
 ## Verification Ledger (Implemented / Unit-Tested / Windows-Verified)
 
-Host verified: **Windows 11 Build `26300` (`Professional`, `Python 3.15.2`, `wsl_installed=True`, distros `["Ubuntu", "docker-desktop", "AlmaLinux-10"]`)**.
+Host verified (2026-11-19, `0.22.0`): **Windows 11 Build `26300` (`Professional`, `Python 3.15.2`, `wsl_installed=True`, `7 passed` in `tests/test_windows_integration.py`)**.
 
 | Item | Implemented | Unit-Tested (WSL2 Linux) | Windows-Verified (`win32`, Build `26300`, `Python 3.15.2`) |
 | --- | --- | --- | --- |

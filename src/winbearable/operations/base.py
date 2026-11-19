@@ -31,7 +31,7 @@ def now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
-def raise_system_error(system: SystemBackend, message: str, *, category: str = "system_error") -> None:
+def raise_system_error(system: Any, message: str, *, category: str = "system_error") -> None:
     """Raise a typed WinbearableError subclass based on SystemBackend.last_outcome."""
     outcome = system.last_outcome
     if isinstance(outcome, OperationOutcome) and outcome.status != OperationStatus.OK:

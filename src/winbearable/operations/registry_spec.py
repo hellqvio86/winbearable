@@ -33,6 +33,7 @@ class OperationKindSpec:
     run_record_field: str | None = None
     apply_order: int | None = None
     compensate_order: int | None = None
+    reversible: bool = True
 
 
 OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
@@ -171,3 +172,44 @@ COMPENSATION_BATCH_SPECS: tuple[OperationKindSpec, ...] = tuple(
         key=lambda s: s.compensate_order or 0,
     )
 )
+
+
+def validate_operation_registry(
+    specs: tuple[OperationKindSpec, ...] = OPERATION_KIND_SPECS,
+    adapter_kinds: set[str] | None = None,
+) -> None:
+    """Validate that *specs* has no duplicate snapshot ownership, missing compensation metadata, or duplicate orders."""
+    seen_snapshots: set[type[Any]] = set()
+    seen_apply_orders: set[int] = set()
+    seen_comp_orders: set[int] = set()
+    registered_kinds: set[str] = set()
+
+    for spec in specs:
+        if not spec.kind:
+            raise ValueError("OperationKindSpec.kind must be non-empty.")
+        registered_kinds.add(spec.kind)
+        if spec.snapshot_type is not None:
+            if spec.snapshot_type in seen_snapshots:
+                raise ValueError(f"Duplicate snapshot_type in OPERATION_KIND_SPECS: {spec.snapshot_type.__name__}")
+            seen_snapshots.add(spec.snapshot_type)
+            if not spec.pre_apply_field or not spec.run_record_field or spec.compensate_order is None:
+                raise ValueError(
+                    f"Incomplete snapshot spec for {spec.kind}/{spec.snapshot_type.__name__}: "
+                    "pre_apply_field, run_record_field, and compensate_order are required."
+                )
+        if spec.apply_order is not None:
+            if spec.apply_order in seen_apply_orders:
+                raise ValueError(f"Duplicate apply_order {spec.apply_order} in OPERATION_KIND_SPECS.")
+            seen_apply_orders.add(spec.apply_order)
+        if spec.compensate_order is not None:
+            if spec.compensate_order in seen_comp_orders:
+                raise ValueError(f"Duplicate compensate_order {spec.compensate_order} in OPERATION_KIND_SPECS.")
+            seen_comp_orders.add(spec.compensate_order)
+
+    if adapter_kinds is not None:
+        missing = sorted(adapter_kinds - registered_kinds)
+        if missing:
+            raise ValueError(f"Operation adapters missing from OPERATION_KIND_SPECS: {missing}")
+
+
+validate_operation_registry()

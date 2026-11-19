@@ -15,6 +15,7 @@ from .package_and_file_adapters import (
     WingetOperationAdapter,
 )
 from .registry_adapter import RegistryOperationAdapter
+from .registry_spec import validate_operation_registry
 from .system_adapters import (
     AuditpolOperationAdapter,
     FeatureOperationAdapter,
@@ -54,6 +55,7 @@ OPERATION_ADAPTERS: tuple[OperationAdapter, ...] = (
 )
 
 OPERATION_ADAPTER_MAP: dict[str, OperationAdapter] = {adapter.kind: adapter for adapter in OPERATION_ADAPTERS}
+validate_operation_registry(adapter_kinds=set(OPERATION_ADAPTER_MAP))
 
 
 def get_operation_adapter(kind: str) -> OperationAdapter:

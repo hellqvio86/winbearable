@@ -14,7 +14,7 @@ def _norm_win_path(path: str) -> str:
 def registry_value_id(hive: str, key_path: str, value_name: str, view: RegistryView = RegistryView.DEFAULT) -> str:
     """Return canonical target ID for a registry value (including architecture view)."""
     norm_hive = hive.strip().upper()
-    norm_key = key_path.strip().strip("\\").lower()
+    norm_key = key_path.strip().replace("/", "\\").strip("\\").lower()
     norm_val = value_name.strip().lower() if value_name else "(default)"
     return f"reg:{norm_hive}\\{norm_key}|{view}|{norm_val}"
 
@@ -22,7 +22,7 @@ def registry_value_id(hive: str, key_path: str, value_name: str, view: RegistryV
 def registry_key_id(hive: str, key_path: str, view: RegistryView = RegistryView.DEFAULT) -> str:
     """Return canonical target ID for a registry key (including architecture view)."""
     norm_hive = hive.strip().upper()
-    norm_key = key_path.strip().strip("\\").lower()
+    norm_key = key_path.strip().replace("/", "\\").strip("\\").lower()
     return f"regkey:{norm_hive}\\{norm_key}|{view}"
 
 

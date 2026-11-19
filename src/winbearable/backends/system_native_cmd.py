@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import io
 import os
 import shutil
 import subprocess
@@ -241,13 +242,38 @@ def terminate_process_tree(pid: int, platform_name: str, windll_override: Any = 
             )
 
 
+def _read_bounded_stream(stream: Any, max_chars: int) -> str:
+    """Read text from *stream* keeping at most *max_chars* characters in memory."""
+    if stream is None:
+        return ""
+    chunks: list[str] = []
+    total = 0
+    truncated = False
+    while True:
+        chunk = stream.read(4096)
+        if not chunk or not isinstance(chunk, str):
+            break
+        if not truncated:
+            remaining = max_chars - total
+            if len(chunk) <= remaining:
+                chunks.append(chunk)
+                total += len(chunk)
+            else:
+                if remaining > 0:
+                    chunks.append(chunk[:remaining])
+                truncated = True
+    out = "".join(chunks)
+    return f"{out}\n[... truncated to {max_chars} chars ...]" if truncated else out
+
+
 def run_subprocess_bounded(
     args: list[str],
     *,
     timeout: float = 15.0,
     raise_on_timeout: bool = False,
+    max_output_chars: int = MAX_CMD_OUTPUT_CHARS,
 ) -> subprocess.CompletedProcess[str]:
-    """Run an external command via shell=False with NoDefaultCurrentDirectoryInExePath=1 and bounded timeout/kill."""
+    """Run an external command via shell=False with NoDefaultCurrentDirectoryInExePath=1 and bounded timeout/output."""
     child_env = dict(os.environ)
     child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
     proc = subprocess.Popen(
@@ -260,8 +286,31 @@ def run_subprocess_bounded(
         shell=False,
         env=child_env,
     )
+    out_holder: list[str] = [""]
+    err_holder: list[str] = [""]
+    use_stream_readers = isinstance(getattr(proc, "stdout", None), io.IOBase)
+    t_out: threading.Thread | None = None
+    t_err: threading.Thread | None = None
+    if use_stream_readers:
+        t_out = threading.Thread(
+            target=lambda: out_holder.__setitem__(0, _read_bounded_stream(proc.stdout, max_output_chars)),
+            daemon=True,
+        )
+        t_err = threading.Thread(
+            target=lambda: err_holder.__setitem__(0, _read_bounded_stream(proc.stderr, max_output_chars)),
+            daemon=True,
+        )
+        t_out.start()
+        t_err.start()
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        if use_stream_readers:
+            proc.wait(timeout=timeout)
+            assert t_out is not None and t_err is not None
+            t_out.join(timeout=2.0)
+            t_err.join(timeout=2.0)
+            stdout, stderr = out_holder[0], err_holder[0]
+        else:
+            stdout, stderr = proc.communicate(timeout=timeout)
         _logger.debug(
             "Subprocess completed: %s (rc=%d)",
             args[0] if args else "",
@@ -284,10 +333,21 @@ def run_subprocess_bounded(
         terminate_process_tree(proc.pid, sys.platform)
         proc.kill()
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-            proc.communicate(timeout=5.0)
+            if use_stream_readers:
+                proc.wait(timeout=5.0)
+            else:
+                proc.communicate(timeout=5.0)
+        if t_out is not None:
+            t_out.join(timeout=1.0)
+        if t_err is not None:
+            t_err.join(timeout=1.0)
         if raise_on_timeout:
-            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout, output=exc.output, stderr=exc.stderr) from exc
-        return subprocess.CompletedProcess(args=args, returncode=124, stdout="", stderr=str(exc))
+            raise subprocess.TimeoutExpired(
+                cmd=args, timeout=timeout, output=out_holder[0] or exc.output, stderr=err_holder[0] or exc.stderr
+            ) from exc
+        return subprocess.CompletedProcess(
+            args=args, returncode=124, stdout=out_holder[0], stderr=err_holder[0] or str(exc)
+        )
     finally:
         if proc.stdout is not None:
             proc.stdout.close()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
@@ -47,6 +48,34 @@ _STANDARD_RECORD_ATTRS: frozenset[str] = frozenset(
 logging.getLogger(LOGGER_ROOT_NAME).addHandler(logging.NullHandler())
 
 
+_SECRET_TEXT_RE = re.compile(r"(?i)(\b(?:bearer|token|password|passwd|secret|api[_-]?key)\b\s*[:=]\s*)([^\s,;\"']+)")
+_WIN_USER_PATH_RE = re.compile(r"(?i)([A-Za-z]:\\Users\\)([^\\/\s\"']+)")
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Redact common secret tokens and local Windows profile usernames from log strings."""
+    masked = _SECRET_TEXT_RE.sub(r"\1<REDACTED>", text)
+    return _WIN_USER_PATH_RE.sub(r"\1<USER>", masked)
+
+
+def redact_sensitive_value(value: Any) -> Any:
+    """Recursively redact sensitive strings inside structured log context."""
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {
+            k: (
+                "<REDACTED>"
+                if str(k).lower() in {"token", "password", "secret", "api_key"}
+                else redact_sensitive_value(v)
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_sensitive_value(v) for v in value]
+    return value
+
+
 class JsonLogFormatter(logging.Formatter):
     """Format log records as single-line JSON objects for stderr and log files."""
 
@@ -55,17 +84,21 @@ class JsonLogFormatter(logging.Formatter):
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_sensitive_text(record.getMessage()),
         }
         for key, value in record.__dict__.items():
             if key not in _STANDARD_RECORD_ATTRS and not key.startswith("_") and key not in payload:
-                payload[key] = value
+                payload[key] = (
+                    "<REDACTED>"
+                    if str(key).lower() in {"token", "password", "secret", "api_key"}
+                    else redact_sensitive_value(value)
+                )
 
         if record.exc_info and record.exc_info[0] is not None:
             payload.setdefault("error_type", record.exc_info[0].__name__)
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_sensitive_text(self.formatException(record.exc_info))
         elif record.exc_text:
-            payload["exception"] = record.exc_text
+            payload["exception"] = redact_sensitive_text(record.exc_text)
 
         return json.dumps(payload, default=str, ensure_ascii=False)
 
