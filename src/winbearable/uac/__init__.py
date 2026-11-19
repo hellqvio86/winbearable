@@ -18,6 +18,7 @@ from .win32 import (
     UacCancelledError,
     UacElevationError,
     UacTimeoutError,
+    get_console_title,
     set_console_title,
 )
 from .win32 import (
@@ -40,6 +41,7 @@ __all__ = [
     "_get_win32_dlls",
     "_read_bounded_uac_output",
     "build_elevated_cmdline_args",
+    "get_console_title",
     "is_reparse_or_symlink",
     "msvcrt",
     "resolve_elevation_target",

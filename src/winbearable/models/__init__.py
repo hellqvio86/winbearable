@@ -1,5 +1,6 @@
 """Core immutable data models for winbearable."""
 
+from winbearable.models.aliases import TWEAK_ID_ALIASES, resolve_tweak_id
 from winbearable.models.enums import (
     AuditDimension,
     ObservationConfidence,
@@ -138,6 +139,7 @@ __all__ = [
     "ScheduledTaskSpec",
     "ServiceSnapshot",
     "ServiceSpec",
+    "TWEAK_ID_ALIASES",
     "TransactionState",
     "TweakCheckResult",
     "TweakDefinition",
@@ -154,6 +156,7 @@ __all__ = [
     "WslDistroSnapshot",
     "_decode_registry_data",
     "_encode_registry_data",
+    "resolve_tweak_id",
     "validate_run_record_invariants",
     "validate_transaction_transition",
 ]

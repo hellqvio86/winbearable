@@ -470,7 +470,7 @@ def test_wsl2_interop_readonly_registry_and_host_audit() -> None:
             stderr="ERROR: The system was unable to find the specified registry key or value.",
         )
 
-    with patch("subprocess.run", side_effect=fake_run):
+    with patch("winbearable.backends.registry_wsl.run_subprocess_bounded", side_effect=fake_run):
         backend = WslInteropRegistryBackend("/mnt/c/Windows/System32/reg.exe")
         dword = backend.get_value("HKLM", r"SOFTWARE\Test", "TestDword", RegistryView.VIEW_64)
         assert dword == (1, "REG_DWORD")
@@ -514,7 +514,7 @@ def test_wsl2_interop_readonly_registry_and_host_audit() -> None:
         auto_backend = create_default_registry_backend("linux")
         assert isinstance(auto_backend, WslInteropRegistryBackend)
 
-    with patch("subprocess.run", side_effect=fake_run):
+    with patch("winbearable.backends.registry_wsl.run_subprocess_bounded", side_effect=fake_run):
         env = NativeSystemBackend(
             platform_override="linux",
             wsl2_fn=lambda: True,

@@ -2,28 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
-from ..const import ACTION_SET, DEFENDER_FEATURES_KEY, HIVE_HKLM, REG_DWORD, UNSUPPORTED_IOT_LTSC_EDITION_IDS
+from ..const import DEFENDER_FEATURES_KEY, HIVE_HKLM, UNSUPPORTED_IOT_LTSC_EDITION_IDS
 from ..models import (
     AuditDimension,
     EnvironmentInfo,
-    FileSpec,
-    FsutilCaseSensitiveSpec,
     OperationOutcome,
     OperationStatus,
     PlannedOperation,
     RegistryChangeDetail,
-    RegistrySpec,
     TweakCheckResult,
     TweakDefinition,
     TweakStatus,
     UnsupportedPlatformError,
 )
 from ..state import StateStoreError
+from ..tweaks.param_schemas import apply_tweak_params
 
 
 class HighRiskConfirmationError(RuntimeError):
@@ -115,16 +113,26 @@ def is_iot_or_ltsc_edition(edition: str) -> bool:
     low = edition.strip().lower()
     if not low:
         return False
-    return "iot" in low or "ltsc" in low or low in UNSUPPORTED_IOT_LTSC_EDITION_IDS or low.startswith("server")
+    return (
+        "iot" in low
+        or "ltsc" in low
+        or low in UNSUPPORTED_IOT_LTSC_EDITION_IDS
+        or low.startswith(("server", "enterprises"))
+    )
 
 
-def is_edition_supported(env_edition: str, supported_editions: tuple[str, ...]) -> bool:
-    """Check whether env.edition is supported by a tweak's supported_editions (rejecting all IoT/LTSC SKUs)."""
+def is_edition_supported(
+    env_edition: str,
+    supported_editions: tuple[str, ...],
+    *,
+    allow_unknown_edition: bool = False,
+) -> bool:
+    """Check whether env.edition is supported by a tweak's supported_editions (failing closed on unknown/IoT/LTSC)."""
     if is_iot_or_ltsc_edition(env_edition):
         return False
     raw = env_edition.strip().lower()
     if not raw or raw == "unknown":
-        return True
+        return allow_unknown_edition
     canonical = _EDITION_CANONICAL_MAP.get(raw, raw)
     allowed = {_EDITION_CANONICAL_MAP.get(ed.strip().lower(), ed.strip().lower()) for ed in supported_editions}
     return canonical in allowed
@@ -266,72 +274,7 @@ class ApplySummary:
 
 def resolve_tweak_params(tweak: TweakDefinition, params: dict[str, Any] | None) -> TweakDefinition:
     """Resolve profile [params] overrides into concrete operation specs on a TweakDefinition."""
-    if not params:
-        return tweak
-    if tweak.tweak_id == "dev.case_sensitive_dirs":
-        dirs = params.get("directories")
-        if isinstance(dirs, (list, tuple)):
-            specs = tuple(FsutilCaseSensitiveSpec(directory=str(d), enabled=True) for d in dirs if str(d).strip())
-            if specs:
-                return replace(tweak, fsutil_specs=specs)
-    elif tweak.tweak_id == "hardening.update_active_hours":
-        start = params.get("active_hours_start")
-        end = params.get("active_hours_end")
-        if (
-            isinstance(start, int)
-            and not isinstance(start, bool)
-            and isinstance(end, int)
-            and not isinstance(end, bool)
-            and 0 <= start <= 23
-            and 0 <= end <= 23
-        ):
-            reg_specs = (
-                RegistrySpec(
-                    hive=HIVE_HKLM,
-                    key_path=r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
-                    value_name="ActiveHoursStart",
-                    value_data=start,
-                    value_type=REG_DWORD,
-                    action=ACTION_SET,
-                ),
-                RegistrySpec(
-                    hive=HIVE_HKLM,
-                    key_path=r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
-                    value_name="ActiveHoursEnd",
-                    value_data=end,
-                    value_type=REG_DWORD,
-                    action=ACTION_SET,
-                ),
-            )
-            return replace(tweak, registry_specs=reg_specs)
-    elif tweak.tweak_id == "dev.terminal_settings_defaults" and tweak.file_specs:
-        base_spec = tweak.file_specs[0]
-        desired = dict(base_spec.desired_keys)
-        if isinstance(params.get("default_profile_guid"), str) and params["default_profile_guid"].strip():
-            desired["defaultProfile"] = params["default_profile_guid"].strip()
-        if isinstance(params.get("font_face"), str) and params["font_face"].strip():
-            desired["profiles"] = {"defaults": {"font": {"face": params["font_face"].strip()}}}
-        return replace(
-            tweak,
-            file_specs=(
-                FileSpec(
-                    path_template=base_spec.path_template,
-                    file_format=base_spec.file_format,
-                    desired_keys=desired,
-                ),
-            ),
-        )
-    elif tweak.tweak_id == "hardening.defender_asr_audit" and "mode" in params:
-        raw_mode = params["mode"]
-        if not isinstance(raw_mode, str) or raw_mode.lower() not in {"audit", "block"}:
-            return replace(tweak, registry_specs=(), parameterized=True)
-        target_val = 1 if raw_mode.lower() == "block" else 2
-        updated_specs = tuple(
-            replace(spec, value_data=target_val) if spec.key_path.endswith(r"\ASR\Rules") else spec
-            for spec in tweak.registry_specs
-        )
-        return replace(tweak, registry_specs=updated_specs)
-    return tweak
+    return apply_tweak_params(tweak, params)
 
 
 def summarize_elevation_requirements(evaluations: list[TweakCheckResult]) -> dict[str, Any]:

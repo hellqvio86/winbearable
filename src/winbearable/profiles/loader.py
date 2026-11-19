@@ -19,6 +19,7 @@ from ..const import (
 from ..models import ProfileSpec, WslConfigSpec
 from ..packages import PACKAGE_CATALOG, PACKAGE_PRESETS
 from ..tweaks import TWEAK_CATALOG, TWEAK_ID_ALIASES, resolve_tweak_id
+from ..tweaks.param_schemas import apply_tweak_params
 from .schema_migration import (
     ProfileValidationError,
     find_key_line,
@@ -301,10 +302,15 @@ def validate_raw_profile(raw_data: dict[str, Any], source_label: str, content: s
     if not isinstance(raw_params, dict):
         raise ProfileValidationError(f"Profile '{source_label}' [params] section must be a table.")
     for tid, param_map in raw_params.items():
-        if resolve_tweak_id(tid) not in TWEAK_CATALOG:
+        resolved_tid = resolve_tweak_id(tid)
+        if resolved_tid not in TWEAK_CATALOG:
             raise ProfileValidationError(f"Profile '{source_label}' [params] references unknown tweak ID '{tid}'.")
         if not isinstance(param_map, dict):
             raise ProfileValidationError(f"Profile '{source_label}' [params.\"{tid}\"] must be a table.")
+        try:
+            apply_tweak_params(TWEAK_CATALOG[resolved_tid], param_map)
+        except ValueError as exc:
+            raise ProfileValidationError(f"Profile '{source_label}' invalid [params.\"{tid}\"]: {exc}") from exc
 
 
 MAX_PROFILE_INHERITANCE_DEPTH = 8

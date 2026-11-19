@@ -27,6 +27,7 @@ from ..operations import (
     get_operation_adapter,
 )
 from ..operations.package_and_file_adapters import FileConfigOperationAdapter
+from ..operations.registry_spec import APPLY_KIND_ORDER
 from ..state import StateStore
 from .evaluate import detect_tweak
 from .params import (
@@ -37,23 +38,7 @@ from .params import (
 )
 from .phases import FinalizeJournalPhase, MutateTweaksPhase, MutateWslPhase, PlanPhase
 
-_APPLY_KIND_ORDER: tuple[str, ...] = (
-    "process_stop",
-    "registry",
-    "service",
-    "scheduled_task",
-    "optional_feature",
-    "winget_package",
-    "auditpol",
-    "wevtutil",
-    "firewall_group",
-    "fsutil_case_sensitive",
-    "powercfg_hibernate",
-    "git_config",
-    "icacls_acl",
-    "file_config",
-    "onedrive_uninstall",
-)
+_APPLY_KIND_ORDER = APPLY_KIND_ORDER
 
 
 def execute_tweak_mutations(

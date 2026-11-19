@@ -11,6 +11,29 @@ from typing import Any
 _REPLACEFILE_WRITE_THROUGH = 0x00000001
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 
+IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+IO_REPARSE_TAG_SYMLINK = 0xA000000C
+IO_REPARSE_TAG_APPEXECLINK = 0x8000001B
+IO_REPARSE_TAG_WOF = 0x80000017
+IO_REPARSE_TAG_DEDUP = 0x80000013
+ALLOWED_REPARSE_TAGS: frozenset[int] = frozenset(
+    {
+        IO_REPARSE_TAG_APPEXECLINK,
+        IO_REPARSE_TAG_WOF,
+        IO_REPARSE_TAG_DEDUP,
+        0x9000001A,  # IO_REPARSE_TAG_CLOUD
+        0x9000101A,  # IO_REPARSE_TAG_CLOUD_1
+        0x9000201A,  # IO_REPARSE_TAG_CLOUD_2
+        0x9000301A,  # IO_REPARSE_TAG_CLOUD_3
+        0x9000401A,  # IO_REPARSE_TAG_CLOUD_4
+        0x9000501A,  # IO_REPARSE_TAG_CLOUD_5
+        0x9000601A,  # IO_REPARSE_TAG_CLOUD_6
+        0x9000701A,  # IO_REPARSE_TAG_CLOUD_7
+        0x9000801A,  # IO_REPARSE_TAG_CLOUD_8
+        0x9000F01A,  # IO_REPARSE_TAG_CLOUD_MASK
+    }
+)
+
 
 def replace_file_preserving_acl(
     target_path: Path,
@@ -49,8 +72,21 @@ def replace_file_preserving_acl(
     os.replace(str(temp_path), target_path)
 
 
+def get_reparse_tag(path: Path) -> int | None:
+    """Return the Windows reparse tag for *path* if available, else None."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    attrs = getattr(st, "st_file_attributes", 0)
+    if not (attrs & _FILE_ATTRIBUTE_REPARSE_POINT):
+        return None
+    tag = int(getattr(st, "st_reparse_tag", 0))
+    return tag or None
+
+
 def is_reparse_or_symlink(path: Path) -> bool:
-    """Return True if *path* is a symlink or Windows reparse point (junction/mount point)."""
+    """Return True if *path* is a symlink or a disallowed Windows reparse point (junction/mount point)."""
     if path.is_symlink():
         return True
     try:
@@ -58,4 +94,7 @@ def is_reparse_or_symlink(path: Path) -> bool:
     except OSError:
         return False
     attrs = getattr(st, "st_file_attributes", 0)
-    return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+    if not (attrs & _FILE_ATTRIBUTE_REPARSE_POINT):
+        return False
+    tag = int(getattr(st, "st_reparse_tag", 0))
+    return not (tag and tag in ALLOWED_REPARSE_TAGS)

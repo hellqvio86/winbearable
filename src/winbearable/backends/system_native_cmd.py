@@ -238,6 +238,43 @@ def terminate_process_tree(pid: int, platform_name: str, windll_override: Any = 
             )
 
 
+def run_subprocess_bounded(
+    args: list[str],
+    *,
+    timeout: float = 15.0,
+    raise_on_timeout: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run an external command via shell=False with NoDefaultCurrentDirectoryInExePath=1 and bounded timeout/kill."""
+    child_env = dict(os.environ)
+    child_env["NoDefaultCurrentDirectoryInExePath"] = "1"
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        env=child_env,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
+    except subprocess.TimeoutExpired as exc:
+        terminate_process_tree(proc.pid, sys.platform)
+        proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            proc.communicate(timeout=5.0)
+        if raise_on_timeout:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout, output=exc.output, stderr=exc.stderr) from exc
+        return subprocess.CompletedProcess(args=args, returncode=124, stdout="", stderr=str(exc))
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+
+
 def truncate_text(text: str, limit: int, label: str = "output") -> str:
     """Truncate *text* to *limit* characters with an explicit marker."""
     if len(text) <= limit:

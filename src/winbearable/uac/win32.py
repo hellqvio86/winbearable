@@ -74,6 +74,10 @@ def configure_win32_signatures(shell32: Any, kernel32: Any) -> None:
     kernel32.SetConsoleTitleW.argtypes = [ctypes.c_wchar_p]
     kernel32.SetConsoleTitleW.restype = ctypes.c_int
 
+    if hasattr(kernel32, "GetConsoleTitleW"):
+        kernel32.GetConsoleTitleW.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong]
+        kernel32.GetConsoleTitleW.restype = ctypes.c_ulong
+
     if hasattr(kernel32, "GetSystemDirectoryW"):
         kernel32.GetSystemDirectoryW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
         kernel32.GetSystemDirectoryW.restype = ctypes.c_uint
@@ -119,6 +123,21 @@ def resolve_trusted_system32(kernel32: Any) -> str:
             return buf.value
     sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
     return f"{sys_root.rstrip('/\\')}\\System32"
+
+
+def get_console_title(windll_override: Any = None) -> str | None:
+    """Return the current Windows console window/tab title via kernel32 GetConsoleTitleW."""
+    if windll_override is None and sys.platform != "win32":
+        return None
+    try:
+        _, kernel32 = get_win32_dlls(windll_override)
+        if not hasattr(kernel32, "GetConsoleTitleW"):
+            return None
+        buf = ctypes.create_unicode_buffer(1024)
+        length = int(kernel32.GetConsoleTitleW(buf, len(buf)))
+        return buf.value if length > 0 else None
+    except AttributeError, OSError, UacElevationError:
+        return None
 
 
 def set_console_title(title: str = "winbearable", windll_override: Any = None) -> bool:

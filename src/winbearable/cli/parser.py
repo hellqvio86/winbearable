@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ..const import DEFAULT_WSL_DISTRO, DEFAULT_WSL_MODE, WSL_MODES, __version__
+from ..const import DEFAULT_WSL_DISTRO, DEFAULT_WSL_MODE, MIN_SUPPORTED_BUILD, WSL_MODES, __version__
 from .render import JSON_SCHEMAS, add_selection_args
 
 
@@ -18,7 +18,11 @@ def build_parser() -> argparse.ArgumentParser:
             "native Python, zero PowerShell for core tweaks (optional Hyper-V firewall only)."
         ),
     )
-    parser.add_argument("--version", action="version", version=f"winbearable {__version__}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"winbearable {__version__} (Windows 11 26H2+, Build >= {MIN_SUPPORTED_BUILD}, No IoT/LTSC)",
+    )
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks on unexpected errors")
     parser.add_argument("--uac-output", dest="uac_output", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--uac-caller-sid", dest="uac_caller_sid", default=None, help=argparse.SUPPRESS)

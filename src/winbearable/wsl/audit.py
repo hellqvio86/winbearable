@@ -11,6 +11,7 @@ from typing import Any
 
 from ..backends.registry import RegistryBackend, is_wsl2
 from ..backends.system import NativeSystemBackend, SystemBackend
+from ..backends.system_native_cmd import run_subprocess_bounded
 from ..const import DEFAULT_WSL_DISTRO
 from ..models import EnvironmentInfo
 from .config import lint_wsl_conf_lf, probe_distro_wsl_conf
@@ -60,14 +61,9 @@ def read_git_system_credential_helpers(git_config_path: Path | None = None) -> l
     if git_exe is None:
         return []
     try:
-        res = subprocess.run(
+        res = run_subprocess_bounded(
             [git_exe, "config", "--system", "--get-all", "credential.helper"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=5.0,
-            shell=False,
         )
         if res.returncode != 0:
             return []

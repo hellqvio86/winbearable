@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
 
-from ..models import TweakDefinition, TweakProvenance
+from ..models import TWEAK_ID_ALIASES, TweakDefinition, TweakProvenance, resolve_tweak_id
 from .categories import CATEGORY_MODULES, CategoryModule
 from .consts import CIS_BENCHMARK_NAME, CIS_BENCHMARK_VERSION
 from .helpers import cis_control
@@ -38,17 +38,6 @@ def assemble_catalog(
 
 
 TWEAK_CATALOG: Mapping[str, TweakDefinition] = assemble_catalog(CATEGORY_MODULES, TWEAK_PROVENANCE)
-
-TWEAK_ID_ALIASES: Mapping[str, str] = MappingProxyType(
-    {
-        "hardening.disable_guest_and_blank_passwords": "hardening.restrict_blank_passwords",
-    }
-)
-
-
-def resolve_tweak_id(tweak_id: str) -> str:
-    """Resolve deprecated tweak ID aliases to their canonical catalog ID."""
-    return TWEAK_ID_ALIASES.get(tweak_id, tweak_id)
 
 
 def get_tweak(tweak_id: str) -> TweakDefinition:

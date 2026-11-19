@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
@@ -16,6 +17,7 @@ from ..models import (
     FirewallGroupSnapshot,
     FsutilSnapshot,
     GitConfigSnapshot,
+    HypervFirewallSnapshot,
     IcaclsSnapshot,
     OptionalFeatureSnapshot,
     PermissionDeniedError,
@@ -39,8 +41,9 @@ from ..operations import (
 )
 from ..operations.package_and_file_adapters import FileConfigOperationAdapter
 from ..operations.path_policy import validate_file_spec_path
+from ..operations.registry_spec import COMPENSATION_BATCH_SPECS, SNAPSHOT_FIELD_BY_TYPE
 from ..tweaks import get_tweak
-from ..wsl import get_wsl_distro_guid
+from ..wsl import get_wsl_distro_guid, probe_distro_wsl_conf
 from .params import resolve_tweak_params
 
 
@@ -59,23 +62,10 @@ class PreApplySnapshots:
     git_config: list[GitConfigSnapshot] = field(default_factory=list)
     icacls: list[IcaclsSnapshot] = field(default_factory=list)
     files: list[FileSnapshot] = field(default_factory=list)
+    hyperv_firewall: list[HypervFirewallSnapshot] = field(default_factory=list)
 
 
-_SNAPSHOT_FIELD_BY_TYPE: dict[type[Any], str] = {
-    RegistryValueSnapshot: "registry",
-    RegistryKeySnapshot: "registry_keys",
-    ServiceSnapshot: "services",
-    ScheduledTaskSnapshot: "tasks",
-    OptionalFeatureSnapshot: "features",
-    AuditpolSnapshot: "auditpol",
-    WevtutilSnapshot: "wevtutil",
-    FirewallGroupSnapshot: "firewall_groups",
-    FsutilSnapshot: "fsutil",
-    PowercfgSnapshot: "powercfg",
-    GitConfigSnapshot: "git_config",
-    IcaclsSnapshot: "icacls",
-    FileSnapshot: "files",
-}
+_SNAPSHOT_FIELD_BY_TYPE = SNAPSHOT_FIELD_BY_TYPE
 
 
 def collect_pre_apply_snapshots(
@@ -107,8 +97,9 @@ def collect_pre_apply_snapshots(
         for adapter in adapters:
             for snap in adapter.snapshot(tweak, registry, system, backup_dir, seen_ids):
                 bucket_name = _SNAPSHOT_FIELD_BY_TYPE.get(type(snap))
-                if bucket_name is not None:
-                    getattr(snaps, bucket_name).append(snap)
+                if bucket_name is None:
+                    raise TypeError(f"Unregistered snapshot type in OperationKindSpec: {type(snap).__name__}")
+                getattr(snaps, bucket_name).append(snap)
     return snaps
 
 
@@ -167,20 +158,9 @@ def compute_dry_run_fingerprints(
 
 def _snapshot_compensation_batches(run_record: RunRecord) -> list[tuple[str, list[Any]]]:
     return [
-        ("hyperv_firewall", list(run_record.hyperv_firewall_snapshots)),
-        ("file_config", list(run_record.file_snapshots)),
-        ("icacls_acl", list(run_record.icacls_snapshots)),
-        ("git_config", list(run_record.git_config_snapshots)),
-        ("powercfg_hibernate", list(run_record.powercfg_snapshots)),
-        ("fsutil_case_sensitive", list(run_record.fsutil_snapshots)),
-        ("firewall_group", list(run_record.firewall_group_snapshots)),
-        ("wevtutil", list(run_record.wevtutil_snapshots)),
-        ("auditpol", list(run_record.auditpol_snapshots)),
-        ("optional_feature", list(run_record.feature_snapshots)),
-        ("scheduled_task", list(run_record.task_snapshots)),
-        ("service", list(run_record.service_snapshots)),
-        ("registry", list(run_record.registry_key_snapshots)),
-        ("registry", list(run_record.registry_snapshots)),
+        (spec.kind, list(getattr(run_record, spec.run_record_field)))
+        for spec in COMPENSATION_BATCH_SPECS
+        if spec.run_record_field is not None
     ]
 
 
@@ -224,13 +204,16 @@ def _compensate_wsl(
                 )
                 continue
         if not force_rollback and d_snap.post_sha256 is not None:
-            probe = system.run_wsl_command(["-d", d_snap.distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
-            if probe.returncode != 0:
-                errors.append(
-                    f"wsl distro '{d_snap.distro}' probe failed during rollback: {probe.stderr or probe.returncode}"
-                )
+            probe = probe_distro_wsl_conf(d_snap.distro, system)
+            if probe.status == "error":
+                errors.append(f"wsl distro '{d_snap.distro}' probe failed during rollback: {probe.evidence}")
                 continue
-            cur_sha = hashlib.sha256(probe.stdout.encode("utf-8")).hexdigest()
+            if probe.status == "missing":
+                if not d_snap.existed:
+                    continue
+                errors.append(f"restore_conflict wsl_distro {d_snap.distro}")
+                continue
+            cur_sha = hashlib.sha256(probe.content.encode("utf-8")).hexdigest()
             pre_sha = hashlib.sha256(d_snap.previous_content.encode("utf-8")).hexdigest() if d_snap.existed else None
             if cur_sha == pre_sha and cur_sha != d_snap.post_sha256:
                 continue
@@ -257,6 +240,60 @@ def _compensate_wsl(
     return errors
 
 
+@dataclass(frozen=True)
+class CompensationIssue:
+    """Structured compensation outcome for rollback/recovery classification."""
+
+    kind: Literal["conflict", "error"]
+    target_id: str | None
+    tweak_id: str | None
+    message: str
+
+
+def _matches_identifier(text: str, identifier: str) -> bool:
+    if not identifier:
+        return False
+    return bool(re.search(rf"(?<![\w.]){re.escape(identifier)}(?![\w.])", text))
+
+
+def _classify_compensation_error(err: str, run_record: RunRecord) -> CompensationIssue:
+    kind: Literal["conflict", "error"] = "conflict" if err.startswith("restore_conflict ") else "error"
+    reg_match = re.match(r"^restore_conflict registry (HK[A-Z_]+)\\(.+?) \[(.+)\]$", err)
+    if reg_match:
+        hive, key_path, val_name = reg_match.groups()
+        norm_val = "" if val_name == "(Default)" else val_name
+        reg_tid = identity.registry_value_id(hive, key_path, norm_val)
+        for entry in run_record.operation_journal:
+            if entry.target_id.split("|")[0] == reg_tid.split("|")[0] and entry.target_id.endswith(
+                f"|{norm_val.lower()}"
+            ):
+                return CompensationIssue(kind=kind, target_id=entry.target_id, tweak_id=entry.tweak_id, message=err)
+    for entry in run_record.operation_journal:
+        if _matches_identifier(err, entry.target_id) or _matches_identifier(err, entry.tweak_id):
+            return CompensationIssue(kind=kind, target_id=entry.target_id, tweak_id=entry.tweak_id, message=err)
+    return CompensationIssue(kind=kind, target_id=None, tweak_id=None, message=err)
+
+
+def compensate_run_record_issues(
+    run_record: RunRecord,
+    registry: RegistryBackend,
+    system: SystemBackend,
+    restore_full_policy: bool = False,
+    force_rollback: bool = False,
+    skip_package_uninstall: bool = False,
+) -> list[CompensationIssue]:
+    """Execute conflict-aware compensating rollback and return structured CompensationIssue items."""
+    errors = compensate_run_record(
+        run_record,
+        registry,
+        system,
+        restore_full_policy=restore_full_policy,
+        force_rollback=force_rollback,
+        skip_package_uninstall=skip_package_uninstall,
+    )
+    return [_classify_compensation_error(err, run_record) for err in errors]
+
+
 def compensate_run_record(
     run_record: RunRecord,
     registry: RegistryBackend,
@@ -273,7 +310,7 @@ def compensate_run_record(
     attempted_targets: set[str] | None = None
     if run_record.operation_journal:
         allowed_outcomes = {"applied", "failed", "unknown"}
-        if run_record.state == TransactionState.APPLYING:
+        if run_record.state in {TransactionState.APPLYING, TransactionState.ROLLING_BACK}:
             allowed_outcomes.add("planned")
         attempted_targets = {e.target_id for e in run_record.operation_journal if e.outcome in allowed_outcomes}
 

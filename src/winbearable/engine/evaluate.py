@@ -290,8 +290,13 @@ def evaluate_profile(
     for tweak_id in candidate_ids:
         if skip_ids and tweak_id in skip_ids:
             continue
-        tweak = resolve_tweak_params(get_tweak(tweak_id), profile.params.get(tweak_id))
-        if category_filter and tweak.category.lower() != category_filter.lower():
+        base_tweak = get_tweak(tweak_id)
+        if category_filter and base_tweak.category.lower() != category_filter.lower():
+            continue
+        try:
+            tweak = resolve_tweak_params(base_tweak, profile.params.get(tweak_id))
+        except ValueError as exc:
+            results.append(make_check_result(base_tweak, TweakStatus.ERROR, str(exc)))
             continue
         results.append(detect_tweak(tweak, env, registry, system, allow_managed=allow_managed, expand_fn=expand_fn))
     return results

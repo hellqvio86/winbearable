@@ -49,6 +49,7 @@ from ..state import StateStore, StateStoreError
 from ..uac import (
     UacCancelledError,
     UacElevationError,
+    get_console_title,
     sanitize_elevated_python_env,
     set_console_title,
     write_uac_output_safe,
@@ -544,5 +545,10 @@ def _run_cli_body(
 
 def main() -> None:
     """Console script entrypoint for `wb` and `winbearable`."""
+    prev_title = get_console_title()
     set_console_title("winbearable")
-    sys.exit(run_cli())
+    try:
+        sys.exit(run_cli())
+    finally:
+        if prev_title is not None:
+            set_console_title(prev_title)

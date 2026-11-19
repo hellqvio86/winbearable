@@ -2,6 +2,20 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.20.0] - 2026-11-19
+
+### Security & Transaction Integrity
+
+- **Idempotent WSL & Interrupted Recovery:** Switched `_compensate_wsl` to sentinel-based `probe_distro_wsl_conf` so already-absent `/etc/wsl.conf` files no longer error on subsequent `recover` runs, included `"planned"` journal targets when resuming interrupted `ROLLING_BACK` runs, and replaced substring `"restore_conflict "` classification in `rollback.py` with structured `CompensationIssue` records.
+- **Reparse Tag Inspection & Fail-Closed Edition Guard:** Added `get_reparse_tag` / `ALLOWED_REPARSE_TAGS` in `backends/win32_fs.py` to allow `AppExecLink` and cloud/WOF tags while rejecting symlink/mount-point reparse tags, made `is_edition_supported` fail closed on `"Unknown"` / empty editions and `EnterpriseS*` substrings, and added targeted tests for all surviving mutation controls.
+- **UAC & Console Title Polish:** Restored the caller's PowerShell/Terminal console title on exit via `GetConsoleTitleW`/`SetConsoleTitleW` (`uac/win32.py`, `cli/handlers.py`), clarified `sanitize_elevated_python_env` and `-I` isolation, and documented Authenticode signing status in `docs/winget-releasing.md`.
+
+### Architecture, Tooling & Provenance
+
+- **Unified OperationKind Registry & Parameter Schemas:** Consolidated `_APPLY_KIND_ORDER`, `_SNAPSHOT_FIELD_BY_TYPE`, `PreApplySnapshots`, and `_snapshot_compensation_batches` into `operations/registry_spec.py` (raising `TypeError` on unregistered snapshot types); extracted declarative parameter schemas into `tweaks/param_schemas.py` with `ProfileValidationError` in `load_profile`.
+- **Layering & Subprocess Consolidation:** Moved `TWEAK_ID_ALIASES` / `resolve_tweak_id` into `models/aliases.py` so `state.py` no longer imports `tweaks`, routed `registry_wsl.py`, `hyperv_firewall.py`, and `wsl/audit.py` through `run_subprocess_bounded`, and added narrow capability ports (`backends/ports.py`) and contract tests (`tests/contracts/test_system_backend_contract.py`).
+- **Trusted Publishing & Provenance:** Removed upload targets from `Makefile`, removed stale `Dockerfile.windows`, updated `wb --version` with the supported build floor, updated `docs/uac-security-review.md` and `docs/winget-releasing.md`, and added `actions/attest-build-provenance` in `.github/workflows/ci.yml`.
+
 ## [0.19.1] - 2026-11-19
 
 ### Fixed
