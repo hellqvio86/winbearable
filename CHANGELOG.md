@@ -2,6 +2,16 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.22.0] - 2026-11-19
+
+### Added & Hardened
+
+- **Windows State-Store DACL & Backup Retention (`state.py`, `backends/win32_acl.py`):** Added protected Windows SDDL/DACL enforcement (`SYSTEM`, `BUILTIN\Administrators`, current user SID) and permissive-ACE refusal (`Everyone`/`Users`/`Authenticated Users`) alongside `os.lstat`/`os.fstat` file-identity checks on state open; made backup retention protect `PARTIALLY_ROLLED_BACK` and all snapshot-referenced backup files; added `StateStore.inspect_health()` surfaced in `wb doctor`.
+- **Crash-Consistency Harness & E2E Workflows:** Added deterministic checkpoint fault-injection, disk-full (`ENOSPC`), corrupt-state `.bak` fallback, and unattempted-target safety tests in `tests/test_crash_consistency_harness.py`, plus API surface stability and E2E CLI workflow tests in `tests/test_api_stability_and_workflows.py`.
+- **Operation Registry, Capability Ports & Canonical Identity:** Added import-time `validate_operation_registry()` in `operations/registry_spec.py`, narrowed `IcaclsOperationAdapter` to `AclPort`, and normalized `/` -> `\` in `registry_value_id` / `registry_key_id`.
+- **Bounded Subprocess Streams, Secret Redaction & Hyper-V Schema:** Upgraded `run_subprocess_bounded()` to bound stdout/stderr pipe reads in flight, added secret/username redaction in `winbearable.log`, and tightened `_parse_ps_setting_json()` in `hyperv_firewall.py` to reject unexpected keys and non-JSON noise.
+- **Docs & Windows Verification:** Added `docs/architecture.md` and updated `docs/verify-matrix.md` with local Windows 11 Build `26300` (`Python 3.15.2`) integration test verification (`7 passed`).
+
 ## [0.21.0] - 2026-11-19
 
 ### Added

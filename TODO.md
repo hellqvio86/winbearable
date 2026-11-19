@@ -1,252 +1,374 @@
-# winbearable — critical review, pass 3 (architecture · security · maintainability · maturity) → agent TODO
+# Winbearable v0.21.0 — Critical Engineering Review
+**Scope:** software architecture, security, maintainability, operational maturity, Windows correctness  
+**Review date:** 2026-11-19  
+**Input:** `winbearable-main(6).zip`  
+**Audience:** implementation agents. One task per PR unless explicitly coupled. Do not mark a task complete without tests and evidence.
 
-Reviewed: `winbearable-main_4044eb.zip`, `__version__ = "0.19.0"` (2026-11-19). Earlier passes: `todo-v0.10.0.md`, `todo-v0.12.1.md` (IDs `R-/S-/B-/C-/CI-/D-/N-` refer to those).
+## Executive verdict
 
-**Method.** (1) re-ran my earlier repros against this tree; (2) re-verified every pass-2 item in code; (3) built the import graph and measured interface sizes; (4) **mutation-tested** ten security/transaction-critical lines (§6); (5) read the new code paths (`engine/compensation.py`, `engine/rollback.py`, `uac/*`, `operations/path_policy.py`, `engine/params.py`, `state.py`, CI, Makefile).
+**The sword is sharper, but this is not yet a mature, independently verified Windows administration product.** The repository shows serious engineering effort: typed models, operation adapters, explicit transaction phases, a journal/state machine, immutable catalogs, strict mypy configuration, extensive tests, pinned GitHub Actions, and threat-model documentation. The major weakness is the gap between the sophistication of the safety claims and the evidence that those controls are exercised on supported Windows systems.
 
-**Gates:** `ruff check` ✔, `ruff format --check` ✔, `mypy src` strict ✔ (107 files), `pytest` → **209 passed, 7 skipped, 93 % coverage**, ~25 k LOC of production code, 11 k LOC of tests. Green again — but see §6: 4 of 9 mutants survived.
+The most important architectural concern is not that the code lacks layers; it is that some abstractions are too broad and parallel registries make correctness depend on manual synchronization. The most important maturity concern is that CI runs tests only on Ubuntu while the product's real behavior is Windows-specific. A high coverage percentage on Linux cannot establish correctness of registry, ACL, UAC, services, WSL, firewall, or native command behavior.
 
-**Confidence tags:** `REPRODUCED` (ran here) · `MUTATED` (mutation survived) · `CODE` (evident from source) · `NEEDS-WINDOWS` (reasoned from Win32/CPython semantics; confirm on a real box) · `NEEDS-SOURCE`.
+### Review evidence and limitations
 
-**Rules for agents:** one item = one PR; failing test first; follow `AGENTS.md`; each item has **Done when**; don't bump `__version__` per commit (see MAT-01); no new tweak IDs (catalog freeze).
+- Package version: `0.21.0`; Python requirement: `>=3.14`.
+- `SystemBackend` protocol contains **44 methods**, combining process, service, task, feature, Winget, WSL, audit policy, event log, firewall, ACL, Git, and power operations.
+- `engine/`, `backends/`, `operations/`, and `wsl/` are substantial packages; architecture is split, but the backend contract remains very wide.
+- `.github/workflows/ci.yml` test matrix is `ubuntu-latest` only (Python 3.14/3.15). No Windows runner executes the Windows integration marker in PR CI.
+- `docs/verify-matrix.md` contains detailed Windows verification claims, but the checked-in CI does not reproduce those checks automatically.
+- This review environment has Python 3.13.5. The project requires Python 3.14+, and obtaining 3.14 was blocked by unavailable network access. **The test suite was therefore not executed against the supported interpreter.** Do not interpret this review as a green test run.
+- Findings below are source-based unless explicitly stated. Windows-specific behavior needs confirmation on a clean supported Windows 11 host.
 
----
+## Implementation Status (`0.22.0`)
 
-## 0. Is the sword sharp yet?
-
-**Closer, and noticeably so.** Every P0/P1 from pass 2 that I could test is fixed (§1), the package split removed all package-level import cycles, and the project now enforces layering/subprocess/LOC rules with tests. What is still dull:
-
-1. **One transaction-safety hole remains** — a WSL variant of the "partial rollback can't be finished" bug I reported last time (**TRX-01, reproduced**).
-2. **The tests that guard the security controls are weaker than the coverage number suggests** — 4 of 9 mutants survived, including WSL conflict detection and the IoT/LTSC edition guard (**SEC-05**).
-3. **Architecture debt is now structural, not local**: a 43-method `SystemBackend` god-interface implemented three times, and four parallel hand-maintained registries that must be kept in sync or snapshots are silently dropped (**ARCH-01/02**).
-4. **Maturity signals are poor for what the tool does**: 29 releases in 6 days (10 on one day), published to PyPI and winget, no Windows CI, no provenance/signing, and a new `make publish-local` that bypasses CI trusted publishing (**MAT-01…04, SEC-03**).
-
-### Scorecard (my judgement, 1 = poor · 5 = production-grade)
-
-| Dimension | Score | Why | What moves it up |
-| --- | --- | --- | --- |
-| **Architecture** | **3.5 / 5** | Clean layering (no package cycles), adapter/strategy pattern for operations, write-ahead journal + state machine, immutable catalog. But god-interface ×3, duplicated registries, if-chain param handling, mixin-based file splitting. | ARCH-01, 02, 03, 05 |
-| **Security** | **3.5 / 5** | Unusually strong for a hobby-scale tool: abs-path executables, reparse checks, O_EXCL + handle verification, caller-SID, path allowlist, WinGet allowlist, fail-closed defaults. Gaps: coarse reparse rule, ineffective env sanitiser, untested controls, local publish path. | SEC-01…05 |
-| **Maintainability** | **3 / 5** | Strict typing, formatted, ceiling on module size, many tests. But stale Docker target, placeholder manifest on `main`, contradictory TODO/AGENTS docs, string-typed error protocol, tests organised by remediation round, size-driven splitting. | MAINT-01…05 |
-| **Maturity** | **2 / 5** | Self-declared "Beta" (accurate); one maintainer; no Windows PR CI; evidence for "Windows-verified" is not attached; release cadence far faster than any soak/compat policy. | MAT-01…05 |
+- **P0-01** (`AGENTS.md` Rule 4 exception): Paid `windows-latest` PR/push CI runners are forbidden by `AGENTS.md`; PR CI runs on `ubuntu-latest` (Python 3.14 & 3.15), while Windows integration tests (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py`) were executed locally on Windows 11 Build `26300` (`Python 3.15.2`, `7 passed`) and recorded in `docs/verify-matrix.md`.
+- **P0-02, P0-03** (`src/winbearable/backends/ports.py`, `src/winbearable/operations/icacls_adapter.py`, `src/winbearable/operations/base.py`, `src/winbearable/operations/registry_spec.py`, `src/winbearable/operations/adapters.py`): Narrowed `IcaclsOperationAdapter` to `AclPort`, added import-time `validate_operation_registry()` enforcing completeness and uniqueness across `OPERATION_KIND_SPECS` and `OPERATION_ADAPTER_MAP`.
+- **P0-04** (`tests/test_crash_consistency_harness.py`): Added deterministic checkpoint fault-injection, disk-full (`ENOSPC`), corrupt-state `.bak` fallback, unattempted-operation guard, and idempotent recovery tests.
+- **P0-05, P1-12, P2-08** (`src/winbearable/backends/win32_acl.py`, `src/winbearable/state.py`, `src/winbearable/cli/doctor.py`, `src/winbearable/log.py`): Added Windows SDDL/DACL protection & permissive-ACE refusal (`Everyone`/`Users`/`Authenticated Users`), `lstat`/`fstat` open checks, transaction-aware backup retention (`PARTIALLY_ROLLED_BACK` + snapshot backup refs), `StateStore.inspect_health()` in `wb doctor`, and secret/username redaction in `JsonLogFormatter`.
+- **P1-02, P1-04, P1-07, P1-08, P1-10, P1-11, P2-02, P2-05, P2-06, P2-07** (`src/winbearable/operations/identity.py`, `src/winbearable/backends/system_native_cmd.py`, `src/winbearable/hyperv_firewall.py`, `docs/architecture.md`, `docs/verify-matrix.md`, `tests/test_api_stability_and_workflows.py`): Canonicalized `/` -> `\` in registry identities, bounded child `stdout`/`stderr` pipes in flight, rejected unknown keys & non-JSON noise in `_parse_ps_setting_json()`, documented the 7-layer DAG & public API, and added API stability + E2E CLI workflow regression tests.
 
 ---
 
-## 1. Status of pass-2 findings (verified)
+# P0 — Release blockers / safety-critical
 
-| ID | Finding | Status | Evidence |
-| --- | --- | --- | --- |
-| N-01 | Partial rollback not idempotent (registry) | **FIXED** for registry/files; **WSL variant remains → TRX-01** | repro3: recover now reports 1 registry conflict (was ~27); but new WSL "probe failed" errors |
-| N-02 | Rollback ordering / non-committed targets | **FIXED** | `rollback.py:130-135` refuses while incomplete runs exist; `--to` non-committed ⇒ `ValueError` |
-| N-03 | Explicit `wslconfig_path` + `PermissionError` strands `APPLYING` | not re-tested (code moved to `engine/phases.py`) — re-verify when touching TRX-01 |
-| N-04 | Bare executables / `shutil.which` | **FIXED** | `which(..., path=trusted_dirs)`; no bare `*.exe` literals outside dry-run display dicts; lint tests added |
-| N-05 | Elevation as a different admin account | **FIXED (design)** | `--uac-caller-sid`, cross-SID user-scope refusal (`NEEDS-WINDOWS` to confirm) |
-| N-06 | UAC output channel | **MOSTLY FIXED** | writer errors no longer mask exit code (`cli/handlers.py:466-471`); handle-path verification added. Still hidden window/no progress (SEC-02) |
-| N-07 | ACL preservation / `icacls /save` per write | **FIXED** | `ReplaceFileW` in `backends/win32_fs.py`, fail-closed |
-| N-08 | Elevated guard vs user-scope VS Code | **FIXED** | `ext_skipped_elevated` handling in `engine/apply.py` |
-| N-09 | Winget hash | **CHANGED, still broken** | placeholder `PENDING_RELEASE_BUILD_SHA256` on `main` → MAINT-02 |
-| N-10 | wsl.exe decode / English markers | **FIXED** | `WB_RC=` sentinel in `wsl/config.py:102-111` |
-| N-11 | Unsupported registry types silently `None` | not re-audited |
-| N-12 | Prune deletes unreferenced dirs | not re-audited (state.py refactored) |
-| CI-04 | No Windows CI | **OPEN** → MAT-03 |
-| CI-02 | No provenance / signing | **OPEN** → MAT-04 |
-| CI-06 | Per-module coverage floors | **PARTIAL** — Win32/security modules raised, still no per-module gate |
+## P0-01 — Add real Windows CI for supported platform behavior
+**Problem:** The CI workflow runs tests on Ubuntu only. The product modifies Windows registry, services, scheduled tasks, ACLs, firewall policy, WSL configuration, and invokes Win32 APIs. Linux fakes cannot validate ctypes signatures, access-denied semantics, command output encodings, filesystem replacement behavior, or actual OS policy interactions.
 
----
+**Implement**
+- Add `windows-latest` CI jobs for every supported Python version that the project claims to support.
+- Run safe Windows integration tests on every PR; keep destructive/irreversible tests separately gated and never run them on shared runners.
+- Run the exact commands documented in `docs/verify-matrix.md`; generate machine-readable results containing OS build, edition, Python version, WSL availability, and test IDs.
+- Make release/publish jobs depend on successful Windows validation, not only Linux checks.
+- If GitHub-hosted Windows images cannot satisfy the minimum supported build, introduce a documented self-hosted validation workflow or narrow the support claim. Do not silently call manual tests CI coverage.
 
-## 2. Transaction / correctness
+**Done when**
+- A PR cannot merge with failing Windows integration tests.
+- Release cannot publish without the required Windows evidence.
+- The verification matrix links to reproducible CI artifacts and identifies tests that remain manual.
 
-### [x] TRX-01 · P1 · `REPRODUCED` — WSL rollback is not idempotent (verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `engine/compensation.py:187-246` (`_compensate_wsl`; probe at `:226-232`).
-- **Repro (adapt `/tmp/repro3.py`, §7):** apply a profile with WSL enabled; change one registry value externally; `rollback_runs` → one `restore_conflict`, and the first pass already restored `/etc/wsl.conf` (removed it, because it did not exist before). `recover_incomplete_runs` then reports `wsl distro 'X' probe failed during rollback: cat: /etc/wsl.conf: No such file or directory` **for every distro**, on top of the genuine conflict.
-- **Why:** when `post_sha256` is set the code runs `cat /etc/wsl.conf` and treats any non-zero exit as an error. A file that is *already absent because the first rollback removed it* is the desired end state, not a failure. The registry path got the "already at pre-state" rule; the WSL path didn't.
-- **Fix:** classify the probe with the existing `probe_distro_wsl_conf` (sentinel-based). `missing` + `existed is False` ⇒ already restored (success, skip); `missing` + `existed is True` ⇒ conflict; `error` ⇒ error. Compare by the same pre/post/current rule used for registry values. Also stop doing a separate raw `cat` in compensation.
-- **Done when:** the repro ends with exactly one conflict (the registry value), none for WSL; property test "compensate twice ⇒ same result" covers every snapshot type including WSL distro and `.wslconfig`.
+## P0-02 — Decompose the 44-method `SystemBackend` into capability interfaces
+**Problem:** `backends/system_protocol.py` defines one 44-method protocol spanning unrelated capabilities. This is a god-interface. Every adapter is coupled to a backend that conceptually must implement Winget, WSL, ACL, event-log, power, service, and process functionality whether it needs those capabilities or not. The in-memory backend must mirror a large surface, and tests can accidentally pass because irrelevant methods exist.
 
-### [x] TRX-02 · P2 · `CODE` — Interrupted recovery can skip in-flight operations (verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `engine/compensation.py:273-278`.
-- **Problem:** `"planned"` journal targets are included only when `run_record.state == APPLYING`. `recover` first writes `ROLLING_BACK` (`rollback.py:71`); if recovery itself is interrupted, the next `recover` sees `ROLLING_BACK`, excludes `"planned"` targets, and an operation that mutated just before the original crash is never compensated.
-- **Fix:** include `"planned"` for `APPLYING` **and** `ROLLING_BACK` (compensation is idempotent after TRX-01), or persist the original state in the record.
-- **Done when:** test: crash during apply → crash during recover → recover again restores the in-flight target.
+**Implement**
+- Define cohesive protocols such as `CommandRunner`, `ServiceManager`, `ScheduledTaskManager`, `FeatureManager`, `PackageManager`, `WslManager`, `AuditPolicyManager`, `FirewallManager`, `AclManager`, and `PowerManager`.
+- Inject only the capabilities each operation adapter actually uses.
+- Keep a small composition root/facade for CLI construction; avoid replacing one giant protocol with a generic service locator.
+- Add contract tests per capability and ensure native and in-memory implementations satisfy only the contracts they claim.
+- Migrate incrementally; preserve public behavior and avoid a flag-day rewrite.
 
-### [x] TRX-03 · P2 · `CODE` — Rollback outcome bookkeeping is done by substring-matching error strings (verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `engine/rollback.py:80,97,169` (`err.startswith("restore_conflict ")`, `entry.target_id in err or entry.tweak_id in err`).
-- **Problem:** a tweak id that is a substring of another (`hardening.x` vs `hardening.x_y`) mislabels journal entries; "conflict" vs "failure" classification depends on string prefixes produced in three different modules.
-- **Fix:** have `compensate_run_record` return structured results (`list[CompensationIssue(kind, target_id, tweak_id, message)]`); derive states and `rollback_outcome` from the kinds.
-- **Done when:** no `startswith("restore_conflict")` remains; test with overlapping ids.
+**Done when**
+- No operation adapter depends on the full `SystemBackend` unless it genuinely needs multiple capabilities.
+- Protocols are small enough to understand in isolation.
+- Contract tests prove parity for supported operations and error states.
 
----
+## P0-03 — Replace parallel operation metadata registries with one authoritative registry
+**Problem:** Operation behavior is represented in multiple hand-maintained structures (`OPERATION_ADAPTERS`, `OPERATION_ADAPTER_MAP`, snapshot type mapping, compensation batch specs, apply kind order, and related operation-kind metadata). A new operation can be added to one list but omitted from another, causing apply/snapshot/rollback behavior to diverge. Runtime checks catch some omissions late, but do not make registration atomic.
 
-## 3. Security
+**Implement**
+- Create one declarative `OperationKindSpec`/registration record per operation kind.
+- Include adapter, snapshot model/bucket, compensation handler, ordering/dependencies, identity strategy, reversibility, and capability requirements in that record.
+- Derive lookup maps, snapshot routing, compensation batches, and ordering from the authoritative registry.
+- Validate registry completeness at import/test time; reject duplicate kinds, duplicate snapshot ownership, missing compensation for reversible operations, and unknown operation kinds.
+- Keep truly exceptional operations explicit rather than hiding behavior in reflection.
 
-### [x] SEC-01 · P1 · `CODE` + `NEEDS-WINDOWS` — Reparse-point rule is too coarse (tag inspection in `win32_fs.py`, verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `backends/win32_fs.py:52-61` (any `FILE_ATTRIBUTE_REPARSE_POINT` ⇒ refuse), used by `operations/path_policy.py:106,130` (`_check_reparse_ancestors`: every ancestor of every target), `uac/elevation.py:77-85`, `uac/output.py`.
-- **Problem:** `REPARSE_POINT` is also set for OneDrive/cloud placeholders, `AppExecLink` aliases (Microsoft Store Python, `%LOCALAPPDATA%\Microsoft\WindowsApps`), dedup/WOF files, and for profile folders moved with a junction (common on home labs). The tool then fails closed with a "symlink" error that is wrong for the user, and the "fix" users will reach for is `--force`/allow flags or editing the check.
-- **Fix:** read the reparse **tag** (`FSCTL_GET_REPARSE_POINT` or `GetFileInformationByHandleEx`); refuse only `IO_REPARSE_TAG_SYMLINK` / `MOUNT_POINT` whose **final resolved target** leaves the allowed roots; allow cloud/AppExecLink tags explicitly with a message. Evaluate containment on `GetFinalPathNameByHandleW`, not on string ancestors.
-- **Done when:** fixtures for each tag; Windows transcript with (a) junctioned profile, (b) Store Python, (c) OneDrive placeholder; error messages name the tag.
+**Done when**
+- Adding a reversible operation requires one registration, not edits to several unrelated tuples/maps.
+- A deliberately incomplete registration fails a focused architecture test.
+- Existing operation ordering is unchanged unless a separately reviewed behavior change is intended.
 
-### [x] SEC-02 · P2 · `CODE` + `NEEDS-WINDOWS` — `sanitize_elevated_python_env` + `-I` + console title restore (verified in `tests/test_pass3_audit_and_security.py` and `docs/uac-security-review.md`)
-- **Where:** `uac/elevation.py:34-44`, called at `cli/handlers.py:446` — i.e. **inside the already-running elevated child**.
-- `PYTHONPATH`/`PYTHONSTARTUP`/`PYTHONHOME`/`PYTHONUSERBASE` are consumed at interpreter start-up; deleting them from `os.environ` afterwards only affects later subprocesses. The real defence is `-I`, which is only added on the `python -m winbearable` fallback (`elevation.py:104,133`), not for `wb.exe` shims. Also the elevated process receives the user's profile environment, so a same-user attacker controls these vars anyway (UAC is not a boundary against same-user code — your threat model already says so).
-- **Fix:** drop the function or rename/document it as "sanitise for child processes"; prefer launching `python.exe -I -m winbearable` for non-frozen installs; document the residual risk in `docs/threat-model.md` instead of implying mitigation.
-- **Also:** `SW_HIDE` + buffered output (`elevation.py:175`, `cli/handlers.py:439-471`) still gives no progress for up to 30 minutes; consider a visible console or streamed output.
-- **Done when:** a test asserts the elevation command line for non-frozen installs contains `-I`; docs state what is and isn't mitigated.
+## P0-04 — Prove transaction crash consistency across every mutation boundary
+**Problem:** This product's differentiator is safe apply/recovery. Existing transaction phases, journal, snapshots, and compensation are sophisticated, but correctness depends on checkpoint placement and idempotent recovery across every operation family. A passing unit suite is not sufficient evidence for abrupt process termination between a side effect and its journal update.
 
-### [x] SEC-03 · P1 · `CODE` — `make publish-local` bypasses CI trusted publishing (removed uploads from `Makefile`, verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `Makefile:62-65` (`publish: uv publish`, `publish-local: release-check publish winget-publish`); changelog 0.18.0 calls it "without GitHub Actions runners".
-- **Problem:** the CI `publish` job uses OIDC trusted publishing behind a protected `pypi` environment. The local path needs a long-lived PyPI token and a GitHub token on a developer machine, has no environment protection, no provenance, and ships whatever is in the working tree. It silently becomes the path of least resistance.
-- **Fix:** remove it or make it dry-run only (`uv build` + `winget validate`); keep publishing exclusively in CI with attestations (MAT-04).
-- **Done when:** no target in `Makefile` can upload to PyPI/GitHub Releases; `docs/winget-releasing.md` describes the CI-only flow.
+**Implement**
+- Build a fault-injection harness that can terminate execution after each durable journal write and each external mutation.
+- Exercise registry values/keys, files, WSL `.wslconfig`, distro `/etc/wsl.conf`, services, tasks, optional features, firewall, ACLs, packages, and irreversible actions.
+- For every operation define the exact sequence: snapshot → durable intent → mutation → read-back verification → durable outcome.
+- Verify recovery is idempotent when run repeatedly and never compensates an operation that was not attempted.
+- Verify recovery preserves third-party drift and reports conflicts rather than silently overwriting it.
+- Include disk-full, permission-denied, corrupt journal, stale backup, and process-kill scenarios.
 
-### [x] SEC-04 · P2 · `CODE` — Edition guard fails open on missing data (verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `engine/params.py:122-131` (`if not raw or raw == "unknown": return True`).
-- **Problem:** if edition detection fails (registry error, `Unknown`), every tweak is treated as edition-supported, including on IoT/LTSC/Server SKUs the project says it refuses (AGENTS invariant). Fail-closed is the posture used everywhere else.
-- **Fix:** unknown edition ⇒ `UNSUPPORTED_EDITION` (or `SKIPPED` with a clear detail) unless `--assume-edition` is given.
-- **Done when:** test with `edition="Unknown"` and `""` expects non-apply.
+**Done when**
+- A crash-point matrix exists and all reversible operation families have automated fault-injection coverage.
+- Every injected crash reaches a deterministic terminal state or a clear manual-recovery state.
+- Re-running recovery does not introduce additional changes.
 
-### [x] SEC-05 · P1 · `MUTATED` — Several security controls are not pinned by tests (M1/M4/M7/M8 killed in `tests/test_pass3_audit_and_security.py`)
-Surviving mutants: **M1** (drop forbidden-system-roots check in `validate_file_spec_path`), **M4** (drop the `wb-uac-` name check), **M7** (ignore WSL distro `restore_conflict`), **M8** (IoT/LTSC *substring* rule; the existing test only uses exact IDs).
-- **Fix:** add one targeted test per surviving mutant (inputs that only that rule rejects: e.g. a path under `%PROGRAMFILES%` that is *also* inside an allowlisted root via env override; an output path with a non-`wb-uac-` parent that is otherwise valid; a distro whose `/etc/wsl.conf` was edited after apply; `edition="Windows 11 IoT Enterprise LTSC"` and `"EnterpriseSNX"`), then adopt `mutmut`/`cosmic-ray` on `operations/path_policy.py`, `uac/`, `engine/compensation.py`, `engine/rollback.py`, `state.py` with a score gate (≥ 85 %).
-- **Done when:** the four mutants are killed; mutation score is reported in CI.
+## P0-05 — Harden state-store security descriptor and path lifecycle on Windows
+**Problem:** `StateStore._ensure_not_reparse()` rejects reparse points in the state path and ancestors, but the visible implementation only applies POSIX `chmod(0700)` to the parent directory. The default state contains rollback data, snapshots, backup ACLs, and transaction history. On Windows, relying on inherited directory ACLs is not an explicit confidentiality/integrity boundary.
 
----
+**Implement**
+- Create the state directory with a deliberate Windows DACL restricted to the current user and required system/admin principals.
+- Verify the owner and effective DACL on existing state directory, state file, lock files, and backup directory before reading or mutating.
+- Refuse unsafe ACLs or provide an explicit, documented repair command; do not silently weaken security.
+- Use handle-based checks where possible to reduce path replacement/TOCTOU exposure between validation and open/replace.
+- Ensure backups and lock sidecars receive the same protection.
+- Document behavior when the state path is redirected with `WINBEARABLE_STATE_PATH`.
 
-## 4. Architecture
-
-### ARCH-01 · P1 · `CODE` — `SystemBackend` is a 43-method god-interface implemented three times
-- **Where:** `backends/system_protocol.py` (43 methods), `system_memory.py` (43), `system_native.py` (+`system_native_apps.py`, `_sec.py`, `_cmd.py`; 45).
-- **Problem:** every new OS capability means editing the protocol + in-memory fake + native implementation (and usually a mixin). Interface-segregation is violated: the engine, audit and each adapter depend on far more than they use, so tests must fake everything. The file-size ceiling was met by *mixin inheritance* (`NativeSystemBackend(NativeAppMixin)`), which moves lines without reducing coupling.
-- **Fix:** split into capability ports matching the operation adapters — `ServicePort`, `TaskPort`, `FeaturePort`, `FirewallPort`, `AuditPolicyPort`, `AclPort`, `PackagePort`, `WslPort`, `ProcessPort`, `EnvironmentPort` — and let each `OperationAdapter` declare the one port it needs. Compose `NativeSystemBackend` from port implementations instead of mixins. Keep a thin façade only for the CLI.
-- **Done when:** each adapter's constructor/type signature names a single narrow port; `InMemory*` fakes shrink accordingly; no mixin inheritance in `backends/`.
-
-### [x] ARCH-02 · P1 · `CODE` — Four parallel registries unified into `operations/registry_spec.py` (verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `engine/apply.py:40` (`_APPLY_KIND_ORDER`), `operations/__init__.py` (`OPERATION_ADAPTERS`), `engine/compensation.py:64` (`_SNAPSHOT_FIELD_BY_TYPE`) and `:168` (`_snapshot_compensation_batches`), plus `PreApplySnapshots` fields.
-- **Problem:** `collect_pre_apply_snapshots` does `bucket_name = _SNAPSHOT_FIELD_BY_TYPE.get(type(snap)); if bucket_name is not None: …` (`compensation.py:109`). A new snapshot type that isn't added to the map is **silently dropped**, i.e. the operation runs with no rollback data. No test cross-checks the four registries.
-- **Fix:** one declarative `OperationKind` descriptor (kind, adapter, snapshot type, `RunRecord` field, apply order, compensation order) generating all four; raise on unknown snapshot type; add a test that every adapter/snapshot/field is registered exactly once.
-- **Done when:** adding a new kind touches one place; unknown snapshot ⇒ exception; consistency test exists.
-
-### [x] ARCH-03 · P2 · `CODE` — Parameterised tweaks moved to declarative `tweaks/param_schemas.py` (verified in `tests/test_pass3_audit_and_security.py`)
-- **Where:** `engine/params.py:267-330` (`resolve_tweak_params`).
-- **Problem:** behaviour of four tweaks lives in the engine by string ID (OCP violation); invalid parameters return the *unchanged* tweak (e.g. out-of-range `active_hours_*`, empty `directories`) so a profile author believes custom values were applied while defaults are; `defender_asr_audit` with a bad `mode` returns a tweak with **no registry specs** (`parameterized=True`) — applies nothing, silently.
-- **Fix:** put a `param_schema` + `apply_params(definition, params) -> definition` on `TweakDefinition`; validate in `load_profile` and fail with a precise error; no silent fallback.
-- **Done when:** invalid params produce a `ProfileValidationError`; the engine contains no tweak-ID literals.
-
-### [x] ARCH-04 · P2 · `CODE` — Layering leaks (`models/aliases.py`) and subprocess consolidation (`run_subprocess_bounded`, verified in `tests/test_catalog_lint.py` and `tests/test_pass3_audit_and_security.py`)
-- Import graph (no package cycles ✔) shows: `state → tweaks` (persistence depends on the catalog for alias migration — move alias table to `models`), `operations → wsl, hyperv_firewall` (adapters reach into feature modules), `audit → engine`, `tui → engine`.
-- Raw `subprocess` is still used outside `run_tool` in `hyperv_firewall.py:55,71`, `wsl/audit.py:63`, `backends/registry_wsl.py:59` (allow-listed by `tests/test_catalog_lint.py:372`). Three different timeout/kill/decode policies exist.
-- **Fix:** route all through `run_tool` (add a PowerShell-JSON helper there); move `hyperv_firewall` under `backends/`; make the allow-list empty.
-- **Done when:** the lint test's allow-list contains only `backends/system_native_cmd.py`.
-
-### ARCH-05 · P2 · `CODE` — Size-driven decomposition
-`tests/test_catalog_lint.py:347-369` enforces a 600-LOC ceiling; the code was split to satisfy it (`system_native_{apps,sec,cmd}.py`, `handlers_tools.py`, `service_task_feature_adapters.py`, `security_policy_adapters.py`, …). Splits follow size, not responsibility (e.g. `security_policy_adapters.py` mixes ICACLS and others). Replace the LOC rule with cohesion/coupling rules (max fan-out per module, no mixins, one adapter per module) once ARCH-01/02 land.
-
-### [x] ARCH-06 · P1 · `CODE` — Backend parity contract suite (`tests/contracts/test_system_backend_contract.py`)
-All behaviour that matters on Windows (`netsh`, `auditpol`, `dism`, `schtasks`, `icacls`, `wsl.exe` parsing, ctypes) is covered only through fakes; `tests/test_windows_integration.py` is skipped on Linux (7 skips). A fake and its native twin can diverge silently (the project's own earlier TODO listed such drifts).
-- **Fix:** write **contract tests** once (`tests/contracts/test_system_backend_contract.py`) and run them against both `InMemorySystemBackend` and `NativeSystemBackend` (Native only on Windows, read-only); capture real outputs as fixtures (including a Swedish run).
-- **Done when:** a Windows CI job runs the contract suite (MAT-03).
+**Done when**
+- Windows tests create permissive and hostile ACL fixtures and prove the store fails closed.
+- State, lock, and backup files are not readable/writable by unintended standard users.
+- Reparse-point and path-swap tests cover the open/write lifecycle, not just a preflight check.
 
 ---
 
-## 5. Maintainability
+# P1 — High-priority architecture, security, and reliability
 
-### [x] MAINT-01 · P2 · `CODE` — Removed stale `Dockerfile.windows` and `test-windows-docker` target
-`Dockerfile.windows` installs **Python 3.13.2** (project needs ≥ 3.14; `pip install -e .` fails), runs `pytest src/tests/test_windows_integration.py` (tests now live in `tests/`), and uses Server Core LTSC 2022 — a SKU the tool explicitly refuses and which cannot run WSL/UAC flows. Delete it or rebuild it on a supported base with a CI smoke test.
+## P1-01 — Make backend composition explicit; remove hidden global construction
+**Problem:** `create_default_system_backend()` constructs the native backend directly, while adapters are held in module-level singleton tuples. This makes test substitution and alternate execution contexts harder, and couples import-time registration to runtime composition.
 
-### MAINT-02 · P1 · `CODE` — `main` ships a placeholder installer hash
-`packaging/winget/hellqvio86.winbearable.installer.yaml`: `InstallerSha256: PENDING_RELEASE_BUILD_SHA256` while `PackageVersion: 0.19.0`. `make winget-validate` fails on `main`. Keep manifests out of `main` (generate into the release artifact) or have a CI test that distinguishes "release-pending" from "released" and refuses to tag with a placeholder.
+**Implement**
+- Add a composition root that constructs registry/system capabilities, state store, adapter registry, and CLI services.
+- Pass dependencies explicitly through `ApplyContext`/phase boundaries.
+- Keep module-level immutable metadata only where it is genuinely static.
+- Avoid mutable global backend state and avoid service-locator patterns.
 
-### [x] MAINT-03 · P2 · `CODE` — Updated `docs/uac-security-review.md` and `docs/winget-releasing.md`
-`TODO.md` (472 lines) is titled `v0.18.0` and describes defects that this tree claims to have fixed; `AGENTS.md`, `docs/verify-matrix.md`, `docs/uac-security-review.md` (stale: no `-I`, no safe writer) and the changelog each assert verification status. Agents consuming them get conflicting instructions. Make **one** source of truth: generate `TODO.md` from the newest review, archive old ones under `docs/reviews/`, and add a test that `docs/*.md` version strings equal `__version__`.
+**Done when:** tests can construct two independent application instances with different backends/state stores without monkeypatching module globals.
 
-### MAINT-04 · P2 · `CODE` — Test suite organisation
-27 test files, several 600–730 LOC, named by remediation round (`test_recovery_and_concurrency.py`, `test_transaction_and_security_regressions.py`, `test_wsl_and_state_domain.py`); duplicated `FakeWinregModule`-style fakes (flagged in the repo's own TODO). Organise by unit under test (`tests/engine/`, `tests/operations/`, `tests/uac/`…), share fakes in `tests/fakes/`, mark slow/property tests.
+## P1-02 — Define and enforce dependency direction between domain, engine, adapters, and Win32
+**Problem:** The package split is clearer, but architecture can still regress as new features are added. Domain models should not depend on native backends; adapters should translate domain intent into backend calls; engine should orchestrate and not know Win32 details.
 
-### MAINT-05 · P2 · `CODE` — String-typed error protocol
-Error classification via prefixes (`"restore_conflict "`) across `compensation.py`, `rollback.py`, adapters (see TRX-03). Replace with typed results. Also `getattr`/duck-typing workarounds are gone (good) — keep it that way with a lint rule.
+**Implement**
+- Document an allowed import graph: `models` at the center; `engine` depends on models + adapter interfaces; adapters depend on models + capability protocols; native backends implement protocols; CLI is the outermost layer.
+- Add AST-based architecture tests for forbidden imports and dependency cycles.
+- Ensure `models` and profile/catalog definitions remain importable on non-Windows Python without loading Win32 libraries.
+- Treat compatibility re-export modules as temporary shims with deprecation plans.
+
+**Done when:** architecture tests fail on representative forbidden imports and the documented graph matches actual imports.
+
+## P1-03 — Reduce `ApplyContext` mutable state and make phase outputs explicit
+**Problem:** `ApplyContext` is a large mutable transaction bag shared across phases. This obscures which phase owns each field, makes invalid intermediate states representable, and increases coupling between plan/mutate/finalize/recovery logic.
+
+**Implement**
+- Group context into immutable planning result, mutation progress, and finalization result types.
+- Have phases accept typed input and return typed output rather than mutating dozens of shared fields.
+- Keep only intentionally mutable progress/journal state behind a narrow transaction object.
+- Encode required phase preconditions in types or explicit validators.
+
+**Done when:** phase functions have explicit contracts and cannot be called with structurally incomplete planning data without a clear validation failure.
+
+## P1-04 — Make operation identity canonical and collision-resistant
+**Problem:** Rollback and drift detection depend on operation identity strings and fingerprints. Any mismatch in path case normalization, registry view, aliases, or parameter normalization can cause duplicate snapshots or incorrect conflict decisions.
+
+**Implement**
+- Specify canonical identity rules for each target family.
+- Include all semantically relevant dimensions (registry hive/key/value/view; file path identity; WSL distro GUID; package ID + scope; ACL target; firewall policy identity).
+- Version the identity/fingerprint format in persisted state.
+- Add property-based tests for case, separators, Unicode, aliases, and equivalent paths.
+- Treat inability to canonicalize safely as an error, not as a best-effort identity.
+
+**Done when:** identities are stable across process restarts and state schema upgrades have explicit migration behavior.
+
+## P1-05 — Separate planning, mutation, and verification for every adapter
+**Problem:** Adapter lifecycle methods combine inspection, snapshots, apply, and compensation. Without a formal contract, some operations can report success based on command exit status rather than verifying the resulting OS state.
+
+**Implement**
+- Define a common lifecycle contract: `inspect`, `snapshot`, `apply`, `verify`, `compensate`, `verify_compensation`.
+- Make `verify` return typed evidence (observed value, source, timestamp, confidence/error state).
+- Require read-back verification for security-sensitive changes.
+- Distinguish "command succeeded" from "desired state achieved".
+- Ensure unsupported/unknown observations are not coerced to disabled/absent.
+
+**Done when:** all reversible adapter kinds implement the lifecycle or explicitly declare why a step is inapplicable; tests cover command-success-but-state-unchanged.
+
+## P1-06 — Remove mixin/large-module splitting that only moves complexity
+**Problem:** The backend and adapter packages have been decomposed into many files, but file count alone is not modularity. Re-export facades and implementation fragments can obscure ownership if the underlying class remains one large cohesive unit.
+
+**Implement**
+- Review native backend class composition and any mixin-based splits.
+- Prefer composition of focused capability implementations over multiple inheritance for unrelated OS facilities.
+- Keep each module organized around a stable responsibility and public contract, not a line-count target.
+- Remove compatibility re-exports once callers have migrated; document remaining stable public APIs.
+
+**Done when:** module boundaries correspond to independently testable responsibilities and no class uses mixins merely to evade module-size limits.
+
+## P1-07 — Make subprocess execution a dedicated security boundary
+**Problem:** Native command execution is security-critical and spread across multiple backend helpers and specialized wrappers. Different call sites must consistently enforce absolute executable paths, argument validation, environment policy, timeout, output bounds, encoding, and return-code interpretation.
+
+**Implement**
+- Centralize process creation in one `CommandRunner` implementation.
+- Define per-command policies for executable resolution, allowed arguments, environment variables, timeout, output limits, and expected return codes.
+- Ensure output bounds limit memory consumption while the child is running, not only after `communicate()` returns.
+- Never invoke shell parsing for untrusted input; audit every `shell=True`, PowerShell, `cmd.exe`, and script boundary.
+- Redact secrets and sensitive command arguments from logs and journal records.
+- Test noisy children, timeouts, invalid encodings, child-process trees, and poisoned environment variables.
+
+**Done when:** every subprocess launch flows through the policy boundary or has a documented, tested exception.
+
+## P1-08 — Treat PowerShell as a formal protocol boundary
+**Problem:** Hyper-V firewall is documented as the sole PowerShell JSON exception. That is a good constraint, but JSON shape, version drift, Constrained Language Mode, localized errors, and partial output need a strict protocol rather than ad hoc parsing.
+
+**Implement**
+- Version the request/response schema and validate every required field/type/range.
+- Separate PowerShell transport failure from cmdlet failure and semantic mismatch.
+- Bound stdout/stderr and reject extra/malformed JSON.
+- Test absent cmdlets, CLM, non-admin execution, partial JSON, invalid enum values, and OS build changes.
+- Keep PowerShell scripts static; pass data only through validated parameters/stdin.
+
+**Done when:** protocol compatibility tests cover supported Windows builds and every failure becomes a typed, actionable result.
+
+## P1-09 — Validate the full privilege boundary for UAC and user-scope operations
+**Problem:** UAC relaunch changes token, session, user profile, environment, and access to per-user installations. A process running as an elevated alternate administrator must not accidentally mutate the wrong user's VS Code extensions, package scope, or user configuration.
+
+**Implement**
+- Maintain an explicit operation privilege/scope policy.
+- Before elevation, split user-scope work from machine-scope work or refuse operations that cannot preserve the original user's identity.
+- Verify caller SID, elevated SID, profile path, session, and target user before user-scope changes.
+- Never run a user-writable launcher/script as administrator.
+- Add real Windows tests for same-user consent elevation and alternate-admin credentials.
+
+**Done when:** every operation declares required scope and elevation behavior; cross-SID user-scope actions are rejected with actionable diagnostics.
+
+## P1-10 — Add mutation tests for safety-critical guards
+**Problem:** Coverage measures execution, not whether assertions would detect a broken safety guard. The prior in-repository review ledger already identified surviving mutations in security-sensitive controls. Reconfirm these against v0.21.0 rather than assuming they remain fixed.
+
+**Implement**
+- Add mutation tests for WSL optimistic concurrency, WSL backup identity, supported build/edition checks, managed-device guard, executable path resolution, reparse-point refusal, and rollback drift conflict detection.
+- Prefer direct adversarial tests when mutation tooling is too noisy.
+- Ensure each guard test fails when the guard is deliberately disabled.
+- Report mutation score separately for safety-critical modules; do not chase a vanity global score.
+
+**Done when:** every listed guard has a demonstrated test that fails when its enforcement is removed.
+
+## P1-11 — Validate profile and tweak metadata as untrusted input at every entry point
+**Problem:** Profiles are external configuration and can contain paths, package identifiers, parameters, inherited profile references, and operation targets. Validation must not rely on the CLI being the only entry point.
+
+**Implement**
+- Define a single validation pipeline used by CLI, API/library calls, migration, and bundled profile loading.
+- Reject unknown keys, duplicate IDs, invalid enum values, unsafe paths, unsupported operations, and invalid parameter types before planning.
+- Add schema/property tests for deeply nested, oversized, cyclic, and adversarial profiles.
+- Preserve source locations and actionable error paths in diagnostics.
+
+**Done when:** invalid input cannot reach an adapter even when APIs are called directly.
+
+## P1-12 — Make backup retention transaction-aware and observable
+**Problem:** State history and backup directories are pruned independently of the user's understanding of recoverability. A backup referenced by an incomplete or retained run must never be removed, and cleanup failures must be visible.
+
+**Implement**
+- Define retention invariants for committed, rolled-back, incomplete, failed, and conflict-held runs.
+- Compute referenced backup paths from all retained run records before pruning.
+- Make cleanup atomic/retryable and emit structured warnings.
+- Add tests for orphan backups, missing backups, stale incomplete runs, and retention boundary cases.
+
+**Done when:** no retained/incomplete run can reference a pruned backup; `wb doctor` reports orphaned/missing backup artifacts.
 
 ---
 
-## 6. Test-strength evidence (mutation run)
+# P2 — Maintainability and product maturity
 
-Manual mutants applied to a scratch copy; full suite run after each (`pytest -x`):
+## P2-01 — Stop using coverage threshold as the primary quality signal
+**Problem:** The configured global coverage floor (`89%`) can hide low coverage in critical modules and says nothing about behavior correctness.
 
-| # | Mutant | Result |
-| --- | --- | --- |
-| M1 | `path_policy`: disable forbidden-system-roots rejection | **SURVIVED** |
-| M2 | `path_policy`: disable user-profile allowlist | killed |
-| M3 | `uac/output.py`: drop `O_EXCL` | killed |
-| M4 | `uac/output.py`: drop `wb-uac-` name check | **SURVIVED** |
-| M5 | `uac/output.py`: drop temp-dir containment | killed |
-| M6 | `rollback`: allow rollback with incomplete runs | killed |
-| M7 | `compensation`: ignore WSL distro `restore_conflict` | **SURVIVED** |
-| M8 | `params`: IoT/LTSC substring rule removed | **SURVIVED** |
-| M9 | `compensation`: skip distro GUID identity check | killed |
-| M10 | `state`: protect nothing in backup prune | pattern not found (code changed) |
+**Implement**
+- Add module-level floors for `uac`, `state`, `engine/compensation`, `engine/rollback`, `backends/win32_*`, and `wsl`.
+- Pair coverage with mutation/adversarial tests.
+- Exclude only genuinely unreachable platform branches with documented reasons.
+- Publish branch coverage and critical-module results.
 
-5/9 killed → **kill rate 56 %** on controls that carry the project's security claims. Turn M1/M4/M7/M8 into regression tests (SEC-05).
+**Done when:** critical safety modules cannot regress while overall coverage remains above the global threshold.
+
+## P2-02 — Make Windows verification evidence reproducible and time-bounded
+**Problem:** `docs/verify-matrix.md` records a host snapshot and detailed checks, but static prose can become stale after OS updates, Python changes, or code changes.
+
+**Implement**
+- Generate the matrix from structured test output.
+- Record commit SHA, package version, Windows build/edition, Python version, WSL version, and test IDs.
+- Add an expiry/revalidation policy for manual evidence.
+- Mark each feature as implemented, unit-tested, Windows-CI-tested, manually verified, or unsupported.
+
+**Done when:** no "Windows verified" claim exists without dated, commit-linked evidence.
+
+## P2-03 — Formalize supported OS and compatibility policy
+**Problem:** The project intentionally supports a narrow Windows 11 build/edition range. That can be valid, but it creates a high support burden and must be reflected consistently in docs, installers, error messages, and CI.
+
+**Implement**
+- Define support policy for Windows build, edition, Python runtime, WSL version, and architecture.
+- Explain why older Windows builds and IoT/LTSC/Server are excluded.
+- Add compatibility tests for just-below-minimum, supported minimum, and future builds.
+- Do not claim Python 3.15 support until it is tested on Windows.
+
+**Done when:** support matrix, runtime guard, package classifiers, Winget manifest, and CI agree.
+
+## P2-04 — Review release workflow and supply-chain trust end to end
+**Problem:** The repository has pinned actions, SBOM generation, checksums, and OIDC publishing, which are positive. Still, release integrity depends on tag/version/commit binding, artifact provenance, and whether local tooling can bypass intended gates.
+
+**Implement**
+- Ensure published artifacts are built from the exact reviewed tag commit.
+- Verify tag immutability/signature policy and package version consistency before publishing.
+- Generate and verify artifact attestations; bind digest, source repository, commit, workflow identity, and version.
+- Add a release consumer verification guide.
+- Rename `publish-local` to `release-check-local` (or similar): it performs local validation/build and does not publish. Avoid a misleading target name.
+
+**Done when:** a consumer can verify artifact digest and provenance back to the reviewed source commit; local target naming matches behavior.
+
+## P2-05 — Reconcile README, AGENTS, TODO, threat model, and verification matrix
+**Problem:** The archive contains a large historical TODO/review ledger. Historical findings and host-verification claims can become contradictory or stale as the code evolves.
+
+**Implement**
+- Move completed historical review items into a dated changelog/review archive.
+- Keep root `TODO.md` limited to current actionable work with owner/status/evidence.
+- Ensure `AGENTS.md` instructs agents to run supported Python version, Windows tests where required, and not to mark verification complete without evidence.
+- Cross-check security claims against actual enforcement and test coverage.
+- Add doc-link and consistency checks in CI.
+
+**Done when:** one canonical source describes current support, current risks, and current verification status.
+
+## P2-06 — Establish API stability and package boundary policy
+**Problem:** The package has CLI entry points and a minimal top-level API, but internal re-export facades and module imports can accidentally become de facto public API.
+
+**Implement**
+- Explicitly document supported Python import API and CLI compatibility guarantees.
+- Define which modules are private/internal.
+- Add API snapshot tests for `__all__`, CLI commands, JSON schemas, and persisted state schemas.
+- Require migration notes for breaking changes to profiles, state, and JSON output.
+
+**Done when:** release notes and compatibility tests identify intentional API changes.
+
+## P2-07 — Add end-to-end user workflow tests
+**Problem:** Unit and adapter tests are necessary but do not prove the user can safely complete a workflow from discovery through apply, verify, rollback, and recovery.
+
+**Implement**
+- Add deterministic scenarios for first run, already-compliant host, partial failure, policy-blocked host, managed host, WSL unavailable, package install failure, rollback conflict, and recovery.
+- Assert CLI exit codes, human output, JSON schema, state file, backups, and final observed system state.
+- Keep destructive actions mocked or isolated to disposable VMs.
+- Include upgrade from previous state/profile schema fixtures.
+
+**Done when:** documented workflows are executable regression tests and failures produce actionable diagnostics.
+
+## P2-08 — Improve operator observability without leaking sensitive data
+**Problem:** A tool that changes OS security posture needs an operator-grade explanation of what it observed, changed, skipped, could not verify, and restored.
+
+**Implement**
+- Use structured event IDs and stable error categories.
+- Include target, operation, precondition, outcome, verification, and recovery recommendation.
+- Redact user names, paths where sensitive, tokens, command secrets, and profile values.
+- Add `doctor` checks for state integrity, backup consistency, unsupported platform, missing native tools, and incomplete transactions.
+
+**Done when:** logs and JSON output explain failure/recovery without requiring stack traces or exposing secrets.
 
 ---
 
-## 7. Maturity
+# Required implementation order
 
-### MAT-01 · P1 · `CODE` — Release cadence outruns any soak or compatibility policy
-`CHANGELOG.md`: 29 releases between 2026-11-14 and 2026-11-19; ten on 2026-11-17 alone; 0.12.x→0.19.0 in two days with a JSON schema bump to `2.0`, a state schema migration, and API removals. Each version is published to PyPI/winget. There is no support/deprecation/compat statement beyond "`< 0.12` unsupported".
-- **Fix:** batch changes into releases (≥ 1 week soak for security-sensitive code, or pre-release tags `0.20.0rc1` on a `next` channel); publish `docs/support-policy.md` (state-file forward/backward compatibility, JSON schema stability, supported Windows builds).
-- **Done when:** version bumps happen only via a release PR; pre-releases are used for risky changes.
+1. **P0-01** Windows CI and evidence gate.
+2. **P0-04** Crash-consistency/fault-injection harness (establishes safety baseline).
+3. **P0-05** State-store ACL and path lifecycle.
+4. **P0-02 + P0-03** Backend capability decomposition and authoritative operation registration.
+5. **P1-01…P1-05** Composition, dependency rules, phase contracts, identity, lifecycle verification.
+6. **P1-07…P1-11** Process/elevation/input security.
+7. **P1-12 + P2** Retention, maturity, release, docs, and end-to-end tests.
 
-### [x] MAT-02 · P2 · `CODE` — Support matrix documented in `wb --version` (`cli/parser.py`)
-Only Windows 11 build ≥ 26300 is supported; everything else refuses. Document this prominently in the PyPI/winget descriptions and `wb --version`, and make the refusal message actionable; otherwise distributing to a wide audience generates "doesn't work" issues.
+Do not start with cosmetic refactoring. Keep each PR narrow, preserve transaction compatibility, and add regression tests before changing safety-critical behavior.
 
-### MAT-03 · P1 · `CODE` — No Windows test job on pull requests
-Only the release-time `publish-winget-asset` job uses `windows-latest`. Add a read-only Windows job (contract suite from ARCH-06 + `tests/test_windows_integration.py`), upload captured outputs as artifacts, and fail on parser drift. The "paid runner" rationale in `AGENTS.md` doesn't apply to public repos.
+# Agent execution contract
 
-### [x] MAT-04 · P1 · `CODE` — Added `actions/attest-build-provenance` in `.github/workflows/ci.yml` and Authenticode note in `docs/winget-releasing.md`
-Add `actions/attest-build-provenance` for wheel/sdist and the winget zip; publish SHA-256 in the release body; decide on Authenticode for `wb.exe` (it self-elevates; UAC shows "unknown publisher"); build once and publish those exact artifacts (SBOM from `dist/`).
-
-### MAT-05 · P2 · `CODE` — "Windows-verified" claims lack artifacts
-`docs/verify-matrix.md` states verification on build 26300 but includes no raw command output, build string, date or checksum. Attach transcripts (or CI artifacts from MAT-03) per claim.
-
----
-
-## 8. Suggested order
-
-1. **TRX-01**, TRX-02 (finish transaction safety)
-2. **SEC-05** (kill surviving mutants), SEC-03, MAINT-02
-3. **ARCH-02**, **ARCH-01** (biggest maintainability lever), ARCH-03
-4. SEC-01, SEC-02, SEC-04 (need a Windows host)
-5. MAT-03, ARCH-06, MAT-04, MAT-01
-6. TRX-03/MAINT-05, ARCH-04/05, MAINT-01/03/04, MAT-02/05
-
-## 9. Repro for TRX-01 (turn into a pytest)
-
-```python
-def test_wsl_rollback_is_idempotent_after_partial_failure(tmp_path):
-    from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
-    from winbearable.engine import apply_profile, recover_incomplete_runs, rollback_runs
-    from winbearable.profiles import load_profile
-    from winbearable.state import StateStore
-    import pytest
-
-    store = StateStore(tmp_path / "state.json")
-    reg = InMemoryRegistryBackend()
-    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
-    env = sysb.detect_environment(reg)
-    apply_profile(load_profile("user-only"), env, reg, sysb, store, dry_run=False, allow_simulated=True)
-
-    a = next(s for s in store.load_runs()[-1].registry_snapshots if s.post_existed)
-    reg.set_value(a.hive, a.key_path, a.value_name, 999, "REG_DWORD")  # one genuine conflict
-
-    with pytest.raises(Exception, match="restore_conflict"):
-        rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
-
-    rec = recover_incomplete_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
-    err = rec[0].error or ""
-    assert "probe failed during rollback" not in err  # currently one per distro
-    assert err.count("restore_conflict") == 1
-```
-
-## 10. Checked and sound (don't touch)
-
-Absolute-path executable resolution and trusted-dir `which`; `ReplaceFileW` atomic replace with fail-closed; sentinel-based `/etc/wsl.conf` probe; `O_EXCL` + `GetFinalPathNameByHandleW` verification for UAC output; caller-SID refusal of cross-SID user-scope operations; profile `include/extends` containment; winget allowlist (`TRUSTED_WINGET_BY_ID`); immutable catalog (`MappingProxyType`); `PARTIALLY_ROLLED_BACK` state with `--keep-conflicts`; rollback refuses while incomplete runs exist; no package-level import cycles; lint tests forbidding `subprocess/ctypes/winreg` in domain modules; CI gating of `workflow_dispatch` publish; locked release tooling; PyPI trusted publishing (OIDC) in CI.
-
-**Not reviewed:** `tui.py`, most of `wsl/lifecycle.py` (import/export/baseline), ~100 of the 123 tweaks' registry correctness, `audit/*` check logic, link validity of provenance URLs, and any real Windows behaviour (all `NEEDS-WINDOWS` items are reasoned, not observed).
+For every task:
+- Reproduce the issue or write a failing test first.
+- State exact files/modules changed and why.
+- Keep persisted state/profile/JSON schema compatibility unless the task explicitly includes migration.
+- Do not weaken fail-closed behavior to make tests pass.
+- Do not add broad exception swallowing, shell execution, hidden retries, or silent fallbacks.
+- Run Python 3.14+ lint, strict mypy, unit tests, and coverage.
+- Run Windows integration tests on the supported Windows build for any Win32, registry, ACL, UAC, WSL, service, task, firewall, package, or native-process change.
+- Report tests that could not run; never describe them as passed.
+- Update docs and verification evidence in the same PR when behavior or support claims change.
+- Mark a task complete only with test names, platform/runtime, and CI run or reproducible evidence.

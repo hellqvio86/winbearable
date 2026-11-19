@@ -70,6 +70,7 @@ def handle_doctor(
     blockers = build_doctor_blockers(env, reg_backend, security_findings)
     managed = is_managed_device(env)
     incomplete_runs = store.get_incomplete_runs()
+    state_health = store.inspect_health()
     raw_history = sys_backend.command_history
     last_outcome = sys_backend.last_outcome
     linux_info = wsl_info.get("linux", {}) if isinstance(wsl_info, dict) else {}
@@ -122,6 +123,10 @@ def handle_doctor(
         "sysctl_baseline_compliant": bool(linux_info.get("sysctl_baseline_applied")),
         "credential_hygiene": linux_info.get("credential_hygiene", {}),
         "incomplete_runs_count": len(incomplete_runs),
+        "state_valid": state_health["state_valid"],
+        "state_acl_ok": state_health["acl_ok"],
+        "missing_backup_files_count": len(state_health["missing_backup_files"]),
+        "orphaned_backup_dirs_count": len(state_health["orphaned_backup_dirs"]),
         "policy_blocked_tweaks": policy_blocked,
         "defender_pua_state": posture["defender_pua"]["state"],
         "smartscreen_state": posture["smartscreen"]["state"],
@@ -139,6 +144,7 @@ def handle_doctor(
         "defender_smartscreen_posture": posture,
         "vbs_credential_guard_posture": vbs_cg,
         "refugee_summary": refugee_summary,
+        "state_health": state_health,
         "incomplete_runs": [run.to_dict() for run in incomplete_runs],
         "command_history": list(raw_history)[-10:] if isinstance(raw_history, list) else [],
         "last_outcome": last_outcome.to_dict() if last_outcome is not None else None,

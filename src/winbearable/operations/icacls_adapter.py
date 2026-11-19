@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import AclPort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import (
     EnvironmentInfo,
     IcaclsSnapshot,
@@ -31,7 +31,7 @@ class IcaclsOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AclPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -61,7 +61,7 @@ class IcaclsOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AclPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[IcaclsSnapshot]:
@@ -89,7 +89,7 @@ class IcaclsOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AclPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -118,7 +118,7 @@ class IcaclsOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: AclPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -126,7 +126,7 @@ class IcaclsOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: AclPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
