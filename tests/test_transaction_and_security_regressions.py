@@ -49,6 +49,7 @@ from winbearable.operations.package_and_file_adapters import (
 from winbearable.operations.path_policy import validate_file_spec_path, validate_icacls_user_only_path
 from winbearable.profiles import ProfileValidationError, generate_init_profile_toml, load_profile
 from winbearable.state import StateStore, migrate_state_payload
+from winbearable.uac.elevation import UacElevationError, _uac_output_dir
 from winbearable.wsl.ini import merge_ini_preserving_comments
 
 
@@ -354,3 +355,14 @@ def test_init_toml_escaping_schemas_badge_and_state_migration(tmp_path: Path, mo
     )
     assert migrated["version"] == STATE_SCHEMA_VERSION
     assert migrated["runs"][0]["operation_journal"][0]["tweak_id"] == "hardening.restrict_blank_passwords"
+
+
+def test_uac_output_dir_inherits_temp_acl_and_cleans_up() -> None:
+    """_uac_output_dir creates wb-uac-* via os.mkdir (not 0o700 OWNER RIGHTS), rejects symlinks, and cleans up."""
+    with _uac_output_dir() as uac_dir:
+        assert uac_dir.is_dir()
+        assert uac_dir.name.startswith("wb-uac-")
+    assert not uac_dir.exists()
+
+    with pytest.raises(UacElevationError, match="reparse"), _uac_output_dir(reparse_check=lambda _p: True):
+        pass
