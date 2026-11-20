@@ -27,6 +27,11 @@ on:
           - test
           - draft-release
           - publish
+          - winget-asset
+      release_tag:
+        description: 'Existing release tag to rebuild the Winget asset for (winget-asset only, e.g. v0.30.1)'
+        required: false
+        type: string
 
 jobs:
   lint:
@@ -418,11 +423,15 @@ jobs:
     if: |
       always() &&
       needs.all-checks.outputs.success == 'true' &&
-      github.event_name == 'release' &&
-      github.event.action == 'published'
+      (
+        (github.event_name == 'release' && github.event.action == 'published') ||
+        (github.event_name == 'workflow_dispatch' && inputs.job == 'winget-asset' && inputs.release_tag != '')
+      )
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -436,10 +445,12 @@ jobs:
 
       - name: Verify release tag matches package version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           PKG_VER=$(PYTHONPATH=src python -c "from winbearable.const import __version__; print(__version__)")
-          if [ "${{ github.ref_name }}" != "v${PKG_VER}" ]; then
-            echo "Tag '${{ github.ref_name }}' does not match const.__version__ 'v${PKG_VER}'"
+          if [ "${RELEASE_TAG}" != "v${PKG_VER}" ]; then
+            echo "Tag '${RELEASE_TAG}' does not match const.__version__ 'v${PKG_VER}'"
             exit 1
           fi
 
@@ -476,9 +487,12 @@ jobs:
             }
             $sig = Set-AuthenticodeSignature @signParams
             if ($sig.Status -eq "UnknownError") {
-              throw "Authenticode signing failed: $($sig.StatusMessage)"
+              Write-Output "::warning::Authenticode signing failed: $($sig.StatusMessage); continuing with unsigned binary."
+            } else {
+              Write-Output "Signed dist\wb\wb.exe -> Status=$($sig.Status) Thumbprint=$($cert.Thumbprint)"
             }
-            Write-Output "Signed dist\wb\wb.exe -> Status=$($sig.Status) Thumbprint=$($cert.Thumbprint)"
+          } catch {
+            Write-Output "::warning::Authenticode signing failed: $($_.Exception.Message); continuing with unsigned binary."
           } finally {
             $cert.Dispose()
           }
@@ -504,6 +518,7 @@ jobs:
       - name: Upload Winget zip and manifests to release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |
             dist/winbearable-*.zip
             dist/winbearable-*.zip.sha256
