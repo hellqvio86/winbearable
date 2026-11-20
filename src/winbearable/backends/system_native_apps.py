@@ -18,6 +18,7 @@ class NativeAppMixin:
     _setup_candidates: tuple[str, ...]
     _winget_installed_cache: dict[str, bool]
     _winget_bulk_list_stdout: str | None = None
+    _vscode_extensions_cache: set[str] | None = None
     last_outcome: OperationOutcome | None
 
     _is_user_writable_binary = staticmethod(is_user_writable_binary)
@@ -63,6 +64,22 @@ class NativeAppMixin:
                 return not self.is_onedrive_installed()
         return False
 
+    @staticmethod
+    def _match_winget_id_in_bulk_table(bulk_out: str, package_id: str) -> bool:
+        """Match *package_id* strictly in a non-Name column when table separator is present."""
+        lines = bulk_out.splitlines()
+        has_separator = False
+        start_idx = 0
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and set(stripped) == {"-"}:
+                has_separator = True
+                start_idx = idx + 1
+                break
+        prefix = r"^.*?\s{2,}" if has_separator else r"^(?:.*?\s{2,})?"
+        id_pat = re.compile(rf"{prefix}{re.escape(package_id)}(?:\s{{2,}}|\s*$)", re.IGNORECASE)
+        return any(id_pat.match(line) for line in lines[start_idx:])
+
     def is_winget_package_installed(self, package_id: str) -> bool:
         if self._platform != "win32":
             return False
@@ -80,7 +97,7 @@ class NativeAppMixin:
                     bulk_out = bulk_res.stdout
                     self._winget_bulk_list_stdout = bulk_out
             if bulk_out is not None:
-                installed = bool(re.search(rf"(?m)(?:^|\s){re.escape(package_id)}(?:\s|$)", bulk_out, re.IGNORECASE))
+                installed = self._match_winget_id_in_bulk_table(bulk_out, package_id)
                 self._winget_installed_cache[cache_key] = installed
                 return installed
         res = self._run_native_cmd(
@@ -111,6 +128,7 @@ class NativeAppMixin:
             return False
         self._winget_installed_cache.pop(package_id.lower(), None)
         self._winget_bulk_list_stdout = None
+        self._vscode_extensions_cache = None
         res = self._run_native_cmd(
             [
                 self._resolve_winget_exe(),
@@ -152,6 +170,7 @@ class NativeAppMixin:
         code_cmd = self._guard_elevated_code_cmd()
         if code_cmd is None:
             return False
+        self._vscode_extensions_cache = None
         ext_res = self._run_native_cmd([code_cmd, "--install-extension", extension_id, "--force"], timeout=120.0)
         return ext_res.returncode == 0
 
@@ -160,6 +179,7 @@ class NativeAppMixin:
             return False
         self._winget_installed_cache.pop(package_id.lower(), None)
         self._winget_bulk_list_stdout = None
+        self._vscode_extensions_cache = None
         res = self._run_native_cmd(
             [
                 self._resolve_winget_exe(),
@@ -178,14 +198,19 @@ class NativeAppMixin:
     def is_vscode_extension_installed(self, extension_id: str) -> bool:
         if self._platform != "win32":
             return False
+        target = extension_id.lower()
+        cached: set[str] | None = getattr(self, "_vscode_extensions_cache", None)
+        if cached is not None:
+            return target in cached
         code_cmd = self._guard_elevated_code_cmd()
         if code_cmd is None:
             return False
         res = self._run_native_cmd([code_cmd, "--list-extensions"], timeout=30.0)
         if res.returncode != 0:
             return False
-        target = extension_id.lower()
-        return any(line.strip().lower() == target for line in res.stdout.splitlines())
+        installed_set = {line.strip().lower() for line in res.stdout.splitlines() if line.strip()}
+        self._vscode_extensions_cache = installed_set
+        return target in installed_set
 
     def uninstall_vscode_extension(self, extension_id: str) -> bool:
         if self._platform != "win32":
@@ -193,5 +218,6 @@ class NativeAppMixin:
         code_cmd = self._guard_elevated_code_cmd()
         if code_cmd is None:
             return False
+        self._vscode_extensions_cache = None
         res = self._run_native_cmd([code_cmd, "--uninstall-extension", extension_id], timeout=60.0)
         return res.returncode == 0

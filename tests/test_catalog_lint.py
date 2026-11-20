@@ -444,3 +444,23 @@ def test_ci_workflow_sbom_and_release_invariants() -> None:
     assert "workflow_dispatch" in ci_text
     assert "sbom.spdx.json" in ci_text
     assert "SHA256SUMS.txt" in ci_text
+
+
+def test_concrete_adapters_forbid_full_system_backend_and_python_floor_is_315() -> None:
+    """Concrete non-registry adapters must use narrow capability ports, and pyproject requires Python >=3.15."""
+    repo_root = Path(__file__).resolve().parent.parent
+    pyproject_text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'requires-python = ">=3.15"' in pyproject_text
+    assert 'target-version = "py315"' in pyproject_text
+
+    ops_dir = repo_root / "src" / "winbearable" / "operations"
+    concrete_files = (
+        "service_task_feature_adapters.py",
+        "security_policy_adapters.py",
+        "icacls_adapter.py",
+        "env_adapters.py",
+        "package_and_file_adapters.py",
+    )
+    for fname in concrete_files:
+        text = (ops_dir / fname).read_text(encoding="utf-8")
+        assert "SystemBackend" not in text, f"{fname} must use narrow capability ports, not SystemBackend"

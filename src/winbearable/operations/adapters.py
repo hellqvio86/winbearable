@@ -15,7 +15,7 @@ from .package_and_file_adapters import (
     WingetOperationAdapter,
 )
 from .registry_adapter import RegistryOperationAdapter
-from .registry_spec import validate_operation_registry
+from .registry_spec import APPLY_KIND_ORDER, validate_operation_registry
 from .system_adapters import (
     AuditpolOperationAdapter,
     FeatureOperationAdapter,
@@ -48,13 +48,19 @@ NON_REGISTRY_ADAPTERS: tuple[OperationAdapter, ...] = (
     OneDriveOperationAdapter(),
 )
 
+_ADAPTER_INSTANCES: dict[str, OperationAdapter] = {
+    adapter.kind: adapter
+    for adapter in (
+        RegistryOperationAdapter(),
+        *NON_REGISTRY_ADAPTERS,
+        HypervFirewallOperationAdapter(),
+    )
+}
 OPERATION_ADAPTERS: tuple[OperationAdapter, ...] = (
-    RegistryOperationAdapter(),
-    *NON_REGISTRY_ADAPTERS,
-    HypervFirewallOperationAdapter(),
+    *(_ADAPTER_INSTANCES[kind] for kind in APPLY_KIND_ORDER if kind in _ADAPTER_INSTANCES),
+    *(adapter for kind, adapter in _ADAPTER_INSTANCES.items() if kind not in APPLY_KIND_ORDER),
 )
-
-OPERATION_ADAPTER_MAP: dict[str, OperationAdapter] = {adapter.kind: adapter for adapter in OPERATION_ADAPTERS}
+OPERATION_ADAPTER_MAP: dict[str, OperationAdapter] = dict(_ADAPTER_INSTANCES)
 validate_operation_registry(adapter_kinds=set(OPERATION_ADAPTER_MAP))
 
 

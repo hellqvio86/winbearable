@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import GitAndPowerPort, ProcessAndOneDrivePort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import (
     EnvironmentInfo,
     FsutilSnapshot,
@@ -30,7 +30,7 @@ class FsutilOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -58,7 +58,7 @@ class FsutilOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[FsutilSnapshot]:
@@ -78,7 +78,7 @@ class FsutilOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -111,7 +111,7 @@ class FsutilOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: GitAndPowerPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -119,7 +119,7 @@ class FsutilOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -154,7 +154,7 @@ class PowercfgOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -180,7 +180,7 @@ class PowercfgOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[PowercfgSnapshot]:
@@ -198,7 +198,7 @@ class PowercfgOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -226,7 +226,7 @@ class PowercfgOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: GitAndPowerPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -234,7 +234,7 @@ class PowercfgOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -268,7 +268,7 @@ class GitConfigOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -298,7 +298,7 @@ class GitConfigOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[GitConfigSnapshot]:
@@ -317,7 +317,7 @@ class GitConfigOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         if not tweak.git_config_specs or not system.git_installed:
@@ -348,7 +348,7 @@ class GitConfigOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: GitAndPowerPort) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
 
@@ -356,7 +356,7 @@ class GitConfigOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: GitAndPowerPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -395,7 +395,7 @@ class ProcessStopOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -420,7 +420,7 @@ class ProcessStopOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[Any]:
@@ -431,7 +431,7 @@ class ProcessStopOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -461,14 +461,14 @@ class ProcessStopOperationAdapter:
                 ctx.journal_cb(entry)
         return entries
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: ProcessAndOneDrivePort) -> bool:
         return all(not system.is_process_running(p) for p in tweak.stop_processes)
 
     def compensate(
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,
@@ -487,7 +487,7 @@ class OneDriveOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         if not tweak.uninstall_onedrive:
             return [], [], []
@@ -509,7 +509,7 @@ class OneDriveOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[Any]:
@@ -520,7 +520,7 @@ class OneDriveOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         if not tweak.uninstall_onedrive:
@@ -546,7 +546,7 @@ class OneDriveOperationAdapter:
             ctx.journal_cb(entry)
         return [entry]
 
-    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: SystemBackend) -> bool:
+    def verify(self, tweak: TweakDefinition, registry: RegistryBackend, system: ProcessAndOneDrivePort) -> bool:
         if not tweak.uninstall_onedrive:
             return True
         return not system.is_onedrive_installed()
@@ -555,7 +555,7 @@ class OneDriveOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ProcessAndOneDrivePort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,

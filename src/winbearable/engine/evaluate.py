@@ -19,6 +19,7 @@ from ..models import (
     TweakStatus,
 )
 from ..operations import format_registry_op, identity, inspect_non_registry_operations
+from ..profiles import ProfileValidationError
 from ..tweaks import get_tweak
 from .params import (
     is_edition_supported,
@@ -266,6 +267,24 @@ def detect_tweak(
     )
 
 
+def validate_profile_spec(profile: ProfileSpec) -> None:
+    """Validate hand-constructed ProfileSpec tweak IDs and parameter shapes before evaluation."""
+    for tid, enabled in profile.tweaks.items():
+        if not isinstance(enabled, bool):
+            raise ProfileValidationError(f"Profile {profile.name!r}: tweak {tid!r} enabled flag must be boolean.")
+        try:
+            get_tweak(tid)
+        except KeyError as exc:
+            raise ProfileValidationError(f"Profile {profile.name!r}: unknown tweak ID {tid!r}.") from exc
+    for tid, param_map in profile.params.items():
+        try:
+            get_tweak(tid)
+        except KeyError as exc:
+            raise ProfileValidationError(f"Profile {profile.name!r}: unknown tweak ID in params: {tid!r}.") from exc
+        if not isinstance(param_map, dict):
+            raise ProfileValidationError(f"Profile {profile.name!r}: params for {tid!r} must be a mapping.")
+
+
 def evaluate_profile(
     profile: ProfileSpec,
     env: EnvironmentInfo,
@@ -279,6 +298,7 @@ def evaluate_profile(
     expand_fn: Callable[[str], Path] | None = None,
 ) -> list[TweakCheckResult]:
     """Evaluate all enabled (or explicitly selected) tweaks in a profile."""
+    validate_profile_spec(profile)
     results: list[TweakCheckResult] = []
     if only_ids is not None:
         candidate_ids = [tid for tid in profile.tweaks if tid in only_ids]

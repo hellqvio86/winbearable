@@ -9,6 +9,7 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
@@ -47,41 +48,16 @@ from .system_native_cmd import (
     run_tool as _run_tool_outcome,
 )
 from .system_native_sec import (
-    backup_acl,
-    get_auditpol_subcategory,
-    get_current_user_sid,
-    get_event_log_config,
+    NativeSecMixin,
     get_git_global_config,
-    is_dir_case_sensitive,
-    is_firewall_group_enabled,
-    is_sddl_restricted_to_sid,
-    is_ssh_acl_restricted,
-    restore_acl,
-    restrict_acl_to_current_user,
-    set_auditpol_subcategory,
-    set_dir_case_sensitive,
-    set_event_log_config,
-    set_firewall_group_enabled,
     set_git_global_config,
-)
-from .system_native_sec import (
-    backup_auditpol as _sec_backup_auditpol,
-)
-from .system_native_sec import (
-    export_firewall_policy as _sec_export_firewall_policy,
-)
-from .system_native_sec import (
-    import_firewall_policy as _sec_import_firewall_policy,
-)
-from .system_native_sec import (
-    restore_auditpol as _sec_restore_auditpol,
 )
 from .system_protocol import CommandResult, read_service_start_state
 from .win32_ctypes import get_win32_dll
 from .win32_fs import is_reparse_or_symlink
 
 
-class NativeSystemBackend(NativeAppMixin):
+class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
     """Native Windows/WSL system backend using ctypes, winreg, and direct Win32 executables."""
 
     is_simulated: bool = False
@@ -107,8 +83,19 @@ class NativeSystemBackend(NativeAppMixin):
         self._wsl2_fn: Callable[[], bool] = wsl2_fn or is_wsl2
         self._find_reg_fn: Callable[[], str | None] = find_reg_fn or find_wsl_reg_exe
         self._winget_installed_cache: dict[str, bool] = {}
-        self.last_outcome: OperationOutcome | None = None
+        self._git_global_config_cache: dict[str, str | None] = {}
+        self._wsl_env_cache: tuple[bool, str | None, list[str]] | None = None
+        self._outcome_local = threading.local()
+        self._state_lock = threading.Lock()
         self.command_history: list[dict[str, Any]] = []
+
+    @property
+    def last_outcome(self) -> OperationOutcome | None:
+        return getattr(self._outcome_local, "value", None)
+
+    @last_outcome.setter
+    def last_outcome(self, value: OperationOutcome | None) -> None:
+        self._outcome_local.value = value
 
     def _get_dll(self, name: str) -> Any | None:
         """Return a Win32 DLL handle via WinDLL or injected test override, or None when unavailable."""
@@ -131,16 +118,17 @@ class NativeSystemBackend(NativeAppMixin):
         return requested
 
     def _record_cmd_history(self, args: list[str], returncode: int, status: OperationStatus, stderr: str) -> None:
-        self.command_history.append(
-            {
-                "args": list(args),
-                "returncode": returncode,
-                "status": str(status),
-                "stderr_excerpt": stderr[:300],
-            }
-        )
-        if len(self.command_history) > 50:
-            self.command_history = self.command_history[-50:]
+        with self._state_lock:
+            self.command_history.append(
+                {
+                    "args": list(args),
+                    "returncode": returncode,
+                    "status": str(status),
+                    "stderr_excerpt": stderr[:300],
+                }
+            )
+            if len(self.command_history) > 50:
+                self.command_history = self.command_history[-50:]
 
     def _check_is_admin(self) -> bool:
         override = os.environ.get(ENV_ADMIN_OVERRIDE)
@@ -324,16 +312,23 @@ class NativeSystemBackend(NativeAppMixin):
                 wsl_distros = [distro_name]
 
         if is_win:
-            ver_res = self._run_native_cmd([self._sys32_exe("wsl.exe"), "--version"])
-            if ver_res.returncode == 0:
-                wsl_installed = True
-                for line in ver_res.stdout.splitlines():
-                    if ":" in line:
-                        wsl_version = line.split(":", 1)[1].strip()
-                        break
-            list_res = self._run_native_cmd([self._sys32_exe("wsl.exe"), "--list", "--quiet"])
-            if list_res.returncode == 0:
-                wsl_distros = [line.strip() for line in list_res.stdout.splitlines() if line.strip()]
+            cached_wsl = None if self._has_custom_popen else self._wsl_env_cache
+            if cached_wsl is not None:
+                wsl_installed, wsl_version, cached_distros = cached_wsl
+                wsl_distros = list(cached_distros)
+            else:
+                ver_res = self._run_native_cmd([self._sys32_exe("wsl.exe"), "--version"])
+                if ver_res.returncode == 0:
+                    wsl_installed = True
+                    for line in ver_res.stdout.splitlines():
+                        if ":" in line:
+                            wsl_version = line.split(":", 1)[1].strip()
+                            break
+                list_res = self._run_native_cmd([self._sys32_exe("wsl.exe"), "--list", "--quiet"])
+                if list_res.returncode == 0:
+                    wsl_distros = [line.strip() for line in list_res.stdout.splitlines() if line.strip()]
+                if not self._has_custom_popen:
+                    self._wsl_env_cache = (wsl_installed, wsl_version, list(wsl_distros))
 
         os_label = "Windows" if is_win else ("Linux (WSL2 -> Windows host)" if wsl_interop_audit else platform.system())
 
@@ -504,6 +499,9 @@ class NativeSystemBackend(NativeAppMixin):
         return force_res.returncode == 0 and not self.is_process_running(process_name)
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
+        mutating_ops = {"--install", "--import", "--set-default", "--manage", "--update", "--unregister"}
+        if input_text is not None or any(arg in mutating_ops for arg in args):
+            self._wsl_env_cache = None
         long_ops = {"--install", "--export", "--import"}
         timeout = 600.0 if any(arg in long_ops for arg in args) else 60.0
         return self._run_native_cmd([self._sys32_exe("wsl.exe"), *args], input_text=input_text, timeout=timeout)
@@ -517,47 +515,6 @@ class NativeSystemBackend(NativeAppMixin):
     _resolve_winget_exe = staticmethod(resolve_winget_exe)
     _resolve_code_cmd = staticmethod(resolve_code_cmd)
     _resolve_git_exe = staticmethod(resolve_git_exe)
-
-    def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
-        return get_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid)
-
-    def set_auditpol_subcategory(self, subcategory_guid: str, success: bool, failure: bool) -> bool:
-        return set_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid, success, failure)
-
-    def backup_auditpol(self, output_csv: Path) -> bool:
-        return _sec_backup_auditpol(self._run_native_cmd, self._platform, output_csv)
-
-    def restore_auditpol(self, input_csv: Path) -> bool:
-        return _sec_restore_auditpol(self._run_native_cmd, self._platform, input_csv)
-
-    def get_event_log_config(self, channel: str) -> tuple[bool | None, int | None]:
-        return get_event_log_config(self._run_native_cmd, self._platform, channel)
-
-    def set_event_log_config(
-        self,
-        channel: str,
-        enabled: bool | None = None,
-        max_size_bytes: int | None = None,
-    ) -> bool:
-        return set_event_log_config(self._run_native_cmd, self._platform, channel, enabled, max_size_bytes)
-
-    def is_firewall_group_enabled(self, registry: RegistryBackend, group_resource_id: str) -> bool | None:
-        return is_firewall_group_enabled(registry, group_resource_id)
-
-    def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
-        return set_firewall_group_enabled(self._run_native_cmd, self._platform, group_resource_id, enabled)
-
-    def export_firewall_policy(self, output_wfw: Path) -> bool:
-        return _sec_export_firewall_policy(self._run_native_cmd, self._platform, output_wfw)
-
-    def import_firewall_policy(self, input_wfw: Path) -> bool:
-        return _sec_import_firewall_policy(self._run_native_cmd, self._platform, input_wfw)
-
-    def is_dir_case_sensitive(self, directory: str) -> bool | None:
-        return is_dir_case_sensitive(self._run_native_cmd, self._platform, directory, self._get_dll("kernel32"))
-
-    def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
-        return set_dir_case_sensitive(self._run_native_cmd, self._platform, directory, enabled)
 
     def is_hibernate_enabled(self, registry: RegistryBackend) -> bool | None:
         val = registry.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled")
@@ -573,26 +530,16 @@ class NativeSystemBackend(NativeAppMixin):
         return res.returncode == 0
 
     def get_git_global_config(self, key: str) -> str | None:
-        return get_git_global_config(self._run_native_cmd, key, self._resolve_git_exe, is_admin=self._check_is_admin())
+        cache_key = key.strip().lower()
+        if not self._has_custom_popen and cache_key in self._git_global_config_cache:
+            return self._git_global_config_cache[cache_key]
+        val = get_git_global_config(self._run_native_cmd, key, self._resolve_git_exe, is_admin=self._check_is_admin())
+        if not self._has_custom_popen:
+            self._git_global_config_cache[cache_key] = val
+        return val
 
     def set_git_global_config(self, key: str, value: str | None) -> bool:
+        self._git_global_config_cache.pop(key.strip().lower(), None)
         return set_git_global_config(
             self._run_native_cmd, key, value, self._resolve_git_exe, is_admin=self._check_is_admin()
         )
-
-    def _get_current_user_sid(self) -> str | None:
-        return get_current_user_sid(self._run_native_cmd, self._platform)
-
-    _is_sddl_restricted_to_sid = staticmethod(is_sddl_restricted_to_sid)
-
-    def is_ssh_acl_restricted(self, path_str: str) -> bool:
-        return is_ssh_acl_restricted(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)
-
-    def backup_acl(self, path_str: str, backup_file: Path) -> bool:
-        return backup_acl(self._run_native_cmd, self._platform, path_str, backup_file)
-
-    def restore_acl(self, path_str: str, backup_file: Path) -> bool:
-        return restore_acl(self._run_native_cmd, self._platform, path_str, backup_file)
-
-    def restrict_acl_to_current_user(self, path_str: str) -> bool:
-        return restrict_acl_to_current_user(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)

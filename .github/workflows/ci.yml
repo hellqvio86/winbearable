@@ -48,7 +48,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Verify uv.lock is up-to-date
         run: uv lock --check
@@ -78,7 +78,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.14", "3.15"]
+        python-version: ["3.15", "3.15t"]
 
     steps:
       - name: Checkout code
@@ -104,11 +104,11 @@ jobs:
         run: uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
 
       - name: Generate coverage badge
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.15'
         run: uv run python bin/generate_badge.py
 
       - name: Upload coverage report and badge
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.15'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-badge
@@ -194,7 +194,7 @@ jobs:
         if: steps.check_version.outputs.changed == 'true'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Build package
         if: steps.check_version.outputs.changed == 'true'
@@ -284,7 +284,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Verify release tag matches package version
         shell: bash
@@ -365,7 +365,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Verify release tag matches package version
         shell: bash
