@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from winbearable.models.enums import (
     AuditDimension,
@@ -249,3 +249,13 @@ class TweakCheckResult:
             "outcome": self.outcome.to_dict() if self.outcome is not None else None,
             "registry_changes": [change.to_dict() for change in self.registry_changes],
         }
+
+
+@dataclass(frozen=True)
+class CompensationIssue:
+    """Structured compensation outcome for rollback/recovery classification."""
+
+    kind: Literal["conflict", "error"]
+    target_id: str | None
+    tweak_id: str | None
+    message: str

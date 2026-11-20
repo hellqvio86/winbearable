@@ -12,6 +12,7 @@ from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
 from ..models import (
+    CompensationIssue,
     EnvironmentInfo,
     OperationJournalEntry,
     OperationOutcome,
@@ -119,8 +120,18 @@ class OperationAdapter(Protocol):
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        """Conflict-aware rollback for this operation kind; returns error strings (empty on success)."""
+    ) -> list[CompensationIssue]:
+        """Conflict-aware rollback for this operation kind; returns typed issues (empty on success)."""
+
+
+def conflict_issue(target_id: str | None, message: str) -> CompensationIssue:
+    """Construct a typed conflict CompensationIssue."""
+    return CompensationIssue(kind="conflict", target_id=target_id, tweak_id=None, message=message)
+
+
+def error_issue(target_id: str | None, message: str) -> CompensationIssue:
+    """Construct a typed error CompensationIssue."""
+    return CompensationIssue(kind="error", target_id=target_id, tweak_id=None, message=message)
 
 
 def require_adapter(registry: dict[str, OperationAdapter], kind: str) -> OperationAdapter:

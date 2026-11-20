@@ -11,6 +11,7 @@ from ..backends.ports import EnvironmentPort, PackagePort
 from ..backends.registry import RegistryBackend
 from ..hyperv_firewall import get_wsl_hyperv_firewall_setting, set_wsl_hyperv_firewall_setting
 from ..models import (
+    CompensationIssue,
     EnvironmentInfo,
     FileSnapshot,
     HypervFirewallSnapshot,
@@ -22,7 +23,7 @@ from ..models import (
     WinbearableError,
 )
 from ..packages import TRUSTED_WINGET_BY_ID
-from .base import OperationApplyContext, now_iso, raise_system_error
+from .base import OperationApplyContext, conflict_issue, error_issue, now_iso, raise_system_error
 from .identity import file_id, hyperv_firewall_id, vscode_ext_id, winget_id
 from .mergers import (
     MAX_FILE_SNAPSHOT_BYTES,
@@ -313,10 +314,10 @@ class WingetOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
+    ) -> list[CompensationIssue]:
         if skip_package_uninstall:
             return []
-        errors: list[str] = []
+        issues: list[CompensationIssue] = []
         for item in reversed(snapshots):
             if not isinstance(item, tuple) or len(item) != 2:
                 continue
@@ -325,12 +326,12 @@ class WingetOperationAdapter:
                 if not system.uninstall_vscode_extension(target_name) or system.is_vscode_extension_installed(
                     target_name
                 ):
-                    errors.append(f"vscode_extension {target_name}")
+                    issues.append(error_issue(vscode_ext_id(target_name), f"vscode_extension {target_name}"))
             elif kind_tag == "winget_package" and (
                 not system.uninstall_winget_package(target_name) or system.is_winget_package_installed(target_name)
             ):
-                errors.append(f"winget {target_name}")
-        return errors
+                issues.append(error_issue(winget_id(target_name), f"winget {target_name}"))
+        return issues
 
 
 class FileConfigOperationAdapter:
@@ -460,12 +461,13 @@ class FileConfigOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, FileSnapshot):
                 continue
-            if attempted_targets is not None and file_id(snap.path) not in attempted_targets:
+            tid = file_id(snap.path)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             try:
                 cur_path = validate_file_spec_path(snap.path)
@@ -475,12 +477,12 @@ class FileConfigOperationAdapter:
                     if matches_pre and cur_sha != snap.post_sha256:
                         continue
                     if cur_sha != snap.post_sha256:
-                        errors.append(f"restore_conflict file {snap.path}")
+                        issues.append(conflict_issue(tid, f"restore_conflict file {snap.path}"))
                         continue
                 restore_file_snapshot(snap)
             except (OSError, ValueError, WinbearableError) as exc:
-                errors.append(f"file {snap.path}: {exc}")
-        return errors
+                issues.append(error_issue(tid, f"file {snap.path}: {exc}"))
+        return issues
 
 
 class HypervFirewallOperationAdapter:
@@ -529,12 +531,13 @@ class HypervFirewallOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, HypervFirewallSnapshot) or snap.previous_enabled is None:
                 continue
-            if attempted_targets is not None and hyperv_firewall_id(snap.vm_creator_id) not in attempted_targets:
+            tid = hyperv_firewall_id(snap.vm_creator_id)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and snap.post_enabled is not None:
                 live = get_wsl_hyperv_firewall_setting()
@@ -555,7 +558,7 @@ class HypervFirewallOperationAdapter:
                     if matches_pre and not matches_post:
                         continue
                     if not matches_post:
-                        errors.append(f"restore_conflict hyperv_firewall {hyperv_firewall_id(snap.vm_creator_id)}")
+                        issues.append(conflict_issue(tid, f"restore_conflict hyperv_firewall {tid}"))
                         continue
             hv_res = set_wsl_hyperv_firewall_setting(
                 enabled=snap.previous_enabled,
@@ -564,5 +567,5 @@ class HypervFirewallOperationAdapter:
                 dry_run=False,
             )
             if hv_res.get("returncode", 1) != 0:
-                errors.append(f"hyperv_firewall restore {snap.vm_creator_id}: {hv_res.get('error')}")
-        return errors
+                issues.append(error_issue(tid, f"hyperv_firewall restore {snap.vm_creator_id}: {hv_res.get('error')}"))
+        return issues

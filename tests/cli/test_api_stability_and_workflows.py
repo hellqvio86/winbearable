@@ -264,4 +264,4 @@ def test_bulk_winget_list_cache_and_write_invalidation() -> None:
         assert sysb.is_winget_package_installed("XP9CXNGPPJ97XX") is False
         assert len(calls) == 1
         assert sysb.uninstall_winget_package("Microsoft.VisualStudioCode") is True
-        assert sysb._winget_bulk_list_stdout is None  # type: ignore[attr-defined]
+        assert sysb._inventory_cache.get("winget_bulk", "") == (False, None)

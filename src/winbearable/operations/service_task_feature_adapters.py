@@ -8,6 +8,7 @@ from typing import Any
 from ..backends.ports import FeaturePort, ServicePort, TaskPort
 from ..backends.registry import RegistryBackend
 from ..models import (
+    CompensationIssue,
     EnvironmentInfo,
     OperationJournalEntry,
     OperationStatus,
@@ -18,7 +19,7 @@ from ..models import (
     TweakDefinition,
     WinbearableError,
 )
-from .base import OperationApplyContext, now_iso, raise_system_error
+from .base import OperationApplyContext, conflict_issue, error_issue, now_iso, raise_system_error
 from .identity import feature_id, service_id, task_id
 
 
@@ -178,16 +179,20 @@ class ServiceOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, ServiceSnapshot):
                 continue
-            if attempted_targets is not None and service_id(snap.service_name) not in attempted_targets:
+            tid = service_id(snap.service_name)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if snap.previous_start_type is None:
-                errors.append(
-                    f"service {snap.service_name}: missing/unreadable previous Start type; refusing to delete"
+                issues.append(
+                    error_issue(
+                        tid,
+                        f"service {snap.service_name}: missing/unreadable previous Start type; refusing to delete",
+                    )
                 )
                 continue
             if not force and snap.post_start_type is not None:
@@ -195,11 +200,11 @@ class ServiceOperationAdapter:
                 if cur_start == snap.previous_start_type and cur_start != snap.post_start_type:
                     continue
                 if cur_start != snap.post_start_type:
-                    errors.append(f"restore_conflict service {snap.service_name}")
+                    issues.append(conflict_issue(tid, f"restore_conflict service {snap.service_name}"))
                     continue
             if not system.set_service_start_type(registry, snap.service_name, snap.previous_start_type):
-                errors.append(f"service {snap.service_name}")
-        return errors
+                issues.append(error_issue(tid, f"service {snap.service_name}"))
+        return issues
 
 
 class TaskOperationAdapter:
@@ -307,23 +312,24 @@ class TaskOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, ScheduledTaskSnapshot) or snap.previous_enabled is None:
                 continue
-            if attempted_targets is not None and task_id(snap.task_path) not in attempted_targets:
+            tid = task_id(snap.task_path)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and snap.post_enabled is not None:
                 cur_enabled = system.is_scheduled_task_enabled(snap.task_path)
                 if cur_enabled == snap.previous_enabled and cur_enabled != snap.post_enabled:
                     continue
                 if cur_enabled != snap.post_enabled:
-                    errors.append(f"restore_conflict scheduled_task {snap.task_path}")
+                    issues.append(conflict_issue(tid, f"restore_conflict scheduled_task {snap.task_path}"))
                     continue
             if not system.set_scheduled_task_enabled(snap.task_path, snap.previous_enabled):
-                errors.append(f"task {snap.task_path}")
-        return errors
+                issues.append(error_issue(tid, f"task {snap.task_path}"))
+        return issues
 
 
 class FeatureOperationAdapter:
@@ -431,20 +437,21 @@ class FeatureOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, OptionalFeatureSnapshot) or snap.previous_enabled is None:
                 continue
-            if attempted_targets is not None and feature_id(snap.feature_name) not in attempted_targets:
+            tid = feature_id(snap.feature_name)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and snap.post_enabled is not None:
                 cur_enabled = system.is_optional_feature_enabled(snap.feature_name)
                 if cur_enabled == snap.previous_enabled and cur_enabled != snap.post_enabled:
                     continue
                 if cur_enabled != snap.post_enabled:
-                    errors.append(f"restore_conflict optional_feature {snap.feature_name}")
+                    issues.append(conflict_issue(tid, f"restore_conflict optional_feature {snap.feature_name}"))
                     continue
             if not system.set_optional_feature_enabled(snap.feature_name, snap.previous_enabled):
-                errors.append(f"feature {snap.feature_name}")
-        return errors
+                issues.append(error_issue(tid, f"feature {snap.feature_name}"))
+        return issues

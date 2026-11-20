@@ -98,6 +98,9 @@ def execute_tweak_mutations(
                 exc_info=True,
                 extra={"event": "tweak.mutation_error", "tweak_id": tweak.tweak_id, "error": str(exc)},
             )
+            if adapter.kind == "registry":
+                status = OperationStatus.ACCESS_DENIED if isinstance(exc, PermissionError) else OperationStatus.UNKNOWN
+                raise TweakMutationError(OperationOutcome(status=status, message=str(exc))) from exc
             raise TweakMutationError(capture_failure_outcome(system, str(exc))) from exc
 
     ext_skipped_elevated = any(e.operation_type == "vscode_extension" and e.outcome == "skipped" for e in entries)

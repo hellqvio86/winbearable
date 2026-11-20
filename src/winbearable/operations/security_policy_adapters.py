@@ -9,6 +9,7 @@ from ..backends.ports import AuditPolicyPort, FirewallPort
 from ..backends.registry import RegistryBackend
 from ..models import (
     AuditpolSnapshot,
+    CompensationIssue,
     EnvironmentInfo,
     FirewallGroupSnapshot,
     OperationJournalEntry,
@@ -16,7 +17,7 @@ from ..models import (
     TweakDefinition,
     WevtutilSnapshot,
 )
-from .base import OperationApplyContext, now_iso, raise_system_error
+from .base import OperationApplyContext, conflict_issue, error_issue, now_iso, raise_system_error
 from .icacls_adapter import IcaclsOperationAdapter as IcaclsOperationAdapter
 from .identity import auditpol_id, firewall_group_id, wevtutil_id
 
@@ -147,12 +148,13 @@ class AuditpolOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, AuditpolSnapshot):
                 continue
-            if attempted_targets is not None and auditpol_id(snap.subcategory_guid) not in attempted_targets:
+            tid = auditpol_id(snap.subcategory_guid)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and snap.post_setting is not None:
                 cur = system.get_auditpol_subcategory(snap.subcategory_guid)
@@ -160,21 +162,21 @@ class AuditpolOperationAdapter:
                     if cur.lower() == snap.previous_setting.lower() and cur.lower() != snap.post_setting.lower():
                         continue
                     if cur.lower() != snap.post_setting.lower():
-                        errors.append(f"restore_conflict auditpol {snap.subcategory_guid}")
+                        issues.append(conflict_issue(tid, f"restore_conflict auditpol {snap.subcategory_guid}"))
                         continue
             if snap.previous_setting is not None:
                 low = snap.previous_setting.lower()
                 ok = system.set_auditpol_subcategory(snap.subcategory_guid, "success" in low, "failure" in low)
                 if not ok:
-                    errors.append(f"auditpol {snap.subcategory_guid}")
+                    issues.append(error_issue(tid, f"auditpol {snap.subcategory_guid}"))
             elif (
                 restore_full_policy
                 and snap.backup_csv_path
                 and Path(snap.backup_csv_path).is_file()
                 and not system.restore_auditpol(Path(snap.backup_csv_path))
             ):
-                errors.append(f"auditpol restore {snap.subcategory_guid}")
-        return errors
+                issues.append(error_issue(tid, f"auditpol restore {snap.subcategory_guid}"))
+        return issues
 
 
 class WevtutilOperationAdapter:
@@ -296,12 +298,13 @@ class WevtutilOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, WevtutilSnapshot):
                 continue
-            if attempted_targets is not None and wevtutil_id(snap.channel) not in attempted_targets:
+            tid = wevtutil_id(snap.channel)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and (snap.post_enabled is not None or snap.post_max_size_bytes is not None):
                 cur_en, cur_sz = system.get_event_log_config(snap.channel)
@@ -310,7 +313,7 @@ class WevtutilOperationAdapter:
                 if (snap.post_enabled is not None and cur_en != snap.post_enabled) or (
                     snap.post_max_size_bytes is not None and cur_sz != snap.post_max_size_bytes
                 ):
-                    errors.append(f"restore_conflict wevtutil {snap.channel}")
+                    issues.append(conflict_issue(tid, f"restore_conflict wevtutil {snap.channel}"))
                     continue
             if (
                 snap.previous_enabled is not None or snap.previous_max_size_bytes is not None
@@ -319,8 +322,8 @@ class WevtutilOperationAdapter:
                 enabled=snap.previous_enabled,
                 max_size_bytes=snap.previous_max_size_bytes,
             ):
-                errors.append(f"wevtutil {snap.channel}")
-        return errors
+                issues.append(error_issue(tid, f"wevtutil {snap.channel}"))
+        return issues
 
 
 class FirewallGroupOperationAdapter:
@@ -440,28 +443,29 @@ class FirewallGroupOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, FirewallGroupSnapshot):
                 continue
-            if attempted_targets is not None and firewall_group_id(snap.group_resource_id) not in attempted_targets:
+            tid = firewall_group_id(snap.group_resource_id)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and snap.post_enabled is not None:
                 cur_fw = system.is_firewall_group_enabled(registry, snap.group_resource_id)
                 if cur_fw == snap.previous_enabled and cur_fw != snap.post_enabled:
                     continue
                 if cur_fw != snap.post_enabled:
-                    errors.append(f"restore_conflict firewall_group {snap.group_resource_id}")
+                    issues.append(conflict_issue(tid, f"restore_conflict firewall_group {snap.group_resource_id}"))
                     continue
             if snap.previous_enabled is not None:
                 if not system.set_firewall_group_enabled(snap.group_resource_id, snap.previous_enabled):
-                    errors.append(f"firewall_group {snap.group_resource_id}")
+                    issues.append(error_issue(tid, f"firewall_group {snap.group_resource_id}"))
             elif (
                 restore_full_policy
                 and snap.export_wfw_path
                 and Path(snap.export_wfw_path).is_file()
                 and not system.import_firewall_policy(Path(snap.export_wfw_path))
             ):
-                errors.append(f"firewall_policy restore {snap.group_resource_id}")
-        return errors
+                issues.append(error_issue(tid, f"firewall_policy restore {snap.group_resource_id}"))
+        return issues

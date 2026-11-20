@@ -33,9 +33,11 @@ from winbearable.engine.compensation import PreApplySnapshots
 from winbearable.models import (
     OperationJournalEntry,
     PermissionDeniedError,
+    ProfileSpec,
     RegistryValueSnapshot,
     RunRecord,
     TransactionState,
+    WslConfigSpec,
     WslDistroSnapshot,
 )
 from winbearable.operations import OPERATION_ADAPTERS
@@ -341,7 +343,7 @@ def test_operation_kind_spec_consistency_and_invalid_profile_params(tmp_path: Pa
 
 def test_layering_and_makefile_trusted_publish_invariants() -> None:
     """state.py does not import tweaks, and Makefile has no upload publish target."""
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     state_tree = ast.parse((repo_root / "src" / "winbearable" / "state.py").read_text(encoding="utf-8"))
     for node in ast.walk(state_tree):
         if isinstance(node, ast.ImportFrom) and node.module:
@@ -353,3 +355,81 @@ def test_layering_and_makefile_trusted_publish_invariants() -> None:
     makefile_text = (repo_root / "Makefile").read_text(encoding="utf-8")
     assert "uv publish" not in makefile_text
     assert "publish_winget.py" not in makefile_text
+
+
+def test_wslconfig_external_edit_triggers_restore_conflict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """External edit to .wslconfig after apply triggers restore_conflict wslconfig on rollback."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wslcfg = tmp_path / ".wslconfig"
+    wslcfg.write_text("[wsl2]\nmemory=4GB\n", encoding="utf-8")
+
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    env = sysb.detect_environment(reg)
+    store = StateStore(tmp_path / "state.json")
+    profile = ProfileSpec(
+        name="wsl-conflict",
+        description="WSL config conflict test",
+        tweaks={},
+        wsl=WslConfigSpec(enabled=True, mode="balanced"),
+    )
+
+    summary = apply_profile(
+        profile,
+        env,
+        reg,
+        sysb,
+        store,
+        dry_run=False,
+        allow_simulated=True,
+        wslconfig_path=wslcfg,
+    )
+    assert summary.failed_ids == ()
+    assert wslcfg.is_file()
+
+    # External edit after apply
+    wslcfg.write_text("[wsl2]\nmemory=12GB\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="restore_conflict wslconfig"):
+        rollback_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+    assert "memory=12GB" in wslcfg.read_text(encoding="utf-8")
+
+
+def test_explicit_wslconfig_permission_error_does_not_strand_applying_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PermissionError with explicit wslconfig_path compensates and never leaves an APPLYING run."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wslcfg = tmp_path / ".wslconfig"
+
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    env = sysb.detect_environment(reg)
+    store = StateStore(tmp_path / "state.json")
+    profile = ProfileSpec(
+        name="wsl-perm",
+        description="WSL permission error test",
+        tweaks={"explorer.show_file_extensions": True},
+        wsl=WslConfigSpec(enabled=True, mode="balanced"),
+    )
+
+    with (
+        patch("winbearable.engine.phases.apply_wslconfig_target", side_effect=PermissionError("denied")),
+        pytest.raises(PermissionError, match="denied"),
+    ):
+        apply_profile(
+            profile,
+            env,
+            reg,
+            sysb,
+            store,
+            dry_run=False,
+            allow_simulated=True,
+            wslconfig_path=wslcfg,
+        )
+
+    assert store.get_incomplete_runs() == []
+    runs = store.load_runs()
+    assert runs[-1].state == TransactionState.ROLLED_BACK

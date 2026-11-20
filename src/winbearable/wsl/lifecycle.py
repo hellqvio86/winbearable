@@ -7,7 +7,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from ..backends.system import SystemBackend
+from ..backends.ports import WslPort
 from ..const import DEFAULT_WSL_DISTRO
 from .audit import is_windows_credential_helper
 from .ini import WslOperationError, validate_dotfiles_repo, validate_wsl_distro_name
@@ -26,7 +26,7 @@ kernel.unprivileged_bpf_disabled = 1
 
 
 def install_wsl_distro(
-    system: SystemBackend,
+    system: WslPort,
     distro: str = DEFAULT_WSL_DISTRO,
     web_download: bool = False,
     dry_run: bool = True,
@@ -59,7 +59,7 @@ def install_wsl_distro(
 
 
 def set_default_wsl_distro(
-    system: SystemBackend,
+    system: WslPort,
     distro: str = DEFAULT_WSL_DISTRO,
     dry_run: bool = True,
 ) -> dict[str, Any]:
@@ -79,7 +79,7 @@ def set_default_wsl_distro(
 
 
 def export_wsl_distro(
-    system: SystemBackend,
+    system: WslPort,
     distro: str,
     output_file: Path,
     dry_run: bool = True,
@@ -132,7 +132,7 @@ def export_wsl_distro(
     }
 
 
-def update_wsl(system: SystemBackend, dry_run: bool = True) -> dict[str, Any]:
+def update_wsl(system: WslPort, dry_run: bool = True) -> dict[str, Any]:
     """Run `wsl.exe --update` and `wsl.exe --set-default-version 2` (dry-run by default)."""
     cmds = [["--update"], ["--set-default-version", "2"]]
     returncode = 0
@@ -150,7 +150,7 @@ def update_wsl(system: SystemBackend, dry_run: bool = True) -> dict[str, Any]:
 
 
 def set_wsl_distro_sparse(
-    system: SystemBackend,
+    system: WslPort,
     distro: str,
     sparse: bool = True,
     dry_run: bool = True,
@@ -172,7 +172,7 @@ def set_wsl_distro_sparse(
 
 
 def import_wsl_distro(
-    system: SystemBackend,
+    system: WslPort,
     distro: str,
     install_dir: Path,
     tarball_file: Path,
@@ -195,7 +195,7 @@ def import_wsl_distro(
     }
 
 
-def detect_wsl_package_manager(system: SystemBackend, distro: str) -> str:
+def detect_wsl_package_manager(system: WslPort, distro: str) -> str:
     """Detect the primary Linux package manager inside a WSL distro."""
     validate_wsl_distro_name(distro)
     probe = (
@@ -212,7 +212,7 @@ def detect_wsl_package_manager(system: SystemBackend, distro: str) -> str:
 
 
 def apply_wsl_linux_baseline(
-    system: SystemBackend,
+    system: WslPort,
     distro: str = DEFAULT_WSL_DISTRO,
     dotfiles_repo: str | None = None,
     dev_packages: bool = False,

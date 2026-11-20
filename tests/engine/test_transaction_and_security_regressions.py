@@ -55,7 +55,7 @@ from winbearable.wsl.ini import merge_ini_preserving_comments
 
 def test_winget_manifest_sha256_updater(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """update_installer_manifest_sha256 updates InstallerSha256 and rejects invalid hashes."""
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     monkeypatch.syspath_prepend(str(repo_root / "bin"))
     spec = importlib.util.spec_from_file_location("build_winget", repo_root / "bin" / "build_winget.py")
     assert spec is not None and spec.loader is not None
@@ -323,7 +323,7 @@ def test_init_toml_escaping_schemas_badge_and_state_migration(tmp_path: Path, mo
         assert cmd_name in JSON_SCHEMAS
         assert len(JSON_SCHEMAS[cmd_name]["properties"]) >= 2
 
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     monkeypatch.syspath_prepend(str(repo_root / "bin"))
     spec = importlib.util.spec_from_file_location("generate_badge", repo_root / "bin" / "generate_badge.py")
     assert spec is not None and spec.loader is not None

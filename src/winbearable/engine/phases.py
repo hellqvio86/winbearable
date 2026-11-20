@@ -152,6 +152,7 @@ class PlanPhase:
             return ctx
 
         if drifted_indices or (profile.wsl.enabled and env.wsl_installed):
+            system.invalidate_all()
             snaps = collect_pre_apply_snapshots(
                 evaluations,
                 registry,
@@ -236,6 +237,7 @@ class MutateTweaksPhase:
                     expand_fn=expand_fn,
                     journal_cb=ctx.record_journal_entry,
                 )
+                system.last_outcome = None
             except Exception as exc:
                 err_msg = str(exc)
                 outcome = (

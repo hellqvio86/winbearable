@@ -26,6 +26,8 @@ from winbearable.engine import (
     rollback_runs,
 )
 from winbearable.models import (
+    OperationOutcome,
+    OperationStatus,
     ProfileSpec,
     RiskLevel,
     TransactionState,
@@ -478,3 +480,65 @@ def test_irreversible_guard_and_graceful_process_stop(state_store: StateStore) -
     assert sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID)
     rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
     assert not (sys_b.is_vscode_extension_installed(VSCODE_WSL_EXTENSION_ID))
+
+
+def test_taskbar_disable_widgets_and_chat_excludes_ucpd_protected_taskbarda(state_store: StateStore) -> None:
+    """taskbar.disable_widgets_and_chat omits UCPD-protected TaskbarDa and converges/rolls back cleanly."""
+    tweak = get_tweak("taskbar.disable_widgets_and_chat")
+    value_names = {spec.value_name for spec in tweak.registry_specs}
+    assert "TaskbarDa" not in value_names
+    assert {"TaskbarMn", "ShowTaskViewButton"} <= value_names
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD)
+    env = sys_b.detect_environment(reg)
+    profile = ProfileSpec(
+        name="taskbar-test",
+        description="Taskbar widgets and chat test",
+        tweaks={"taskbar.disable_widgets_and_chat": True},
+    )
+
+    assert detect_tweak(tweak, env, reg, sys_b).status == TweakStatus.DRIFTED
+    summary = apply_profile(profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert summary.failed_ids == ()
+    assert "taskbar.disable_widgets_and_chat" in summary.applied_ids
+    assert detect_tweak(tweak, env, reg, sys_b).status == TweakStatus.APPLIED
+
+    rollback_runs(state_store, reg, sys_b, dry_run=False, allow_simulated=True)
+    assert detect_tweak(tweak, env, reg, sys_b).status == TweakStatus.DRIFTED
+
+
+def test_stale_last_outcome_does_not_leak_across_tweaks(
+    state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale system.last_outcome from an earlier tweak must not be attributed to a later tweak's failure."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(windows_build=MIN_SUPPORTED_BUILD, is_admin=True)
+    env = sys_b.detect_environment(reg)
+
+    sys_b.last_outcome = OperationOutcome(
+        status=OperationStatus.ACCESS_DENIED,
+        message="Refusing to execute user-writable 'code.cmd' while elevated.",
+        command=("code.cmd",),
+    )
+
+    def _deny_set_value(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(reg, "set_value", _deny_set_value)
+
+    profile = ProfileSpec(
+        name="stale-outcome-test",
+        description="Stale outcome isolation test",
+        tweaks={"taskbar.disable_widgets_and_chat": True},
+    )
+    summary = apply_profile(profile, env, reg, sys_b, state_store, dry_run=False, allow_simulated=True)
+    assert summary.failed_ids == ("taskbar.disable_widgets_and_chat",)
+
+    runs = state_store.load_runs()
+    last_run = runs[-1]
+    assert last_run.failure_outcomes
+    recorded_msg = str(last_run.failure_outcomes[0].get("message", ""))
+    assert "code.cmd" not in recorded_msg
+    assert "Refusing to execute user-writable" not in recorded_msg
+    assert "Access is denied" in recorded_msg

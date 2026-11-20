@@ -110,6 +110,8 @@ def test_security_and_version_docs_consistent() -> None:
     assert "Hyper-V" in sec_text and "hyperv_firewall.py" in sec_text
     minor_prefix = ".".join(__version__.split(".")[:2]) + ".x"
     assert minor_prefix in sec_text
+    todo_head = "\n".join((repo_root / "TODO.md").read_text(encoding="utf-8").splitlines()[:10])
+    assert __version__ in todo_head
     stale_hashes = {
         "7AA2A1B089EBBFFD8FACF468AB5F9131BFC027B61BEC4EC61633094CB48FDCC4",
         "F8147A672E30A49644960C69994FFCB2BA6A9F8B56B1E91C107DD256F8A9C705",
@@ -221,6 +223,7 @@ def test_architectural_layer_boundaries() -> None:
         "state": 4,
         "engine": 5,
         "audit": 5,
+        "settings": 5,
         "uac": 6,
         "tui": 6,
         "cli": 6,

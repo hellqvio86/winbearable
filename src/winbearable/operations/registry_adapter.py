@@ -11,6 +11,7 @@ from ..backends.registry import RegistryBackend, expand_registry_spec
 from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
 from ..models import (
+    CompensationIssue,
     EnvironmentInfo,
     OperationJournalEntry,
     OperationStatus,
@@ -21,7 +22,7 @@ from ..models import (
     TweakDefinition,
     WinbearableError,
 )
-from .base import OperationApplyContext, format_registry_op, now_iso
+from .base import OperationApplyContext, conflict_issue, error_issue, format_registry_op, now_iso
 from .identity import registry_key_id, registry_value_id
 
 
@@ -254,8 +255,8 @@ class RegistryOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if isinstance(snap, RegistryValueSnapshot):
                 vid = registry_value_id(snap.hive, snap.key_path, snap.value_name, snap.view)
@@ -281,11 +282,15 @@ class RegistryOperationAdapter:
                         if matches_pre and not matches_post:
                             continue
                         if not matches_post:
-                            errors.append(f"restore_conflict registry {snap.full_key_path} [{snap.display_value_name}]")
+                            issues.append(
+                                conflict_issue(
+                                    vid, f"restore_conflict registry {snap.full_key_path} [{snap.display_value_name}]"
+                                )
+                            )
                             continue
                     registry.restore_snapshot(snap)
                 except Exception as exc:
-                    errors.append(f"registry {snap.full_key_path} [{snap.display_value_name}]: {exc}")
+                    issues.append(error_issue(vid, f"registry {snap.full_key_path} [{snap.display_value_name}]: {exc}"))
             elif isinstance(snap, RegistryKeySnapshot):
                 kid = registry_key_id(snap.hive, snap.key_path, snap.view)
                 if attempted_targets is not None and kid not in attempted_targets:
@@ -296,9 +301,11 @@ class RegistryOperationAdapter:
                         if cur_exists == snap.existed and cur_exists != snap.post_existed:
                             continue
                         if cur_exists != snap.post_existed:
-                            errors.append(f"restore_conflict registry_key {snap.hive}\\{snap.key_path}")
+                            issues.append(
+                                conflict_issue(kid, f"restore_conflict registry_key {snap.hive}\\{snap.key_path}")
+                            )
                             continue
                     registry.restore_key_snapshot(snap)
                 except Exception as exc:
-                    errors.append(f"registry_key {snap.hive}\\{snap.key_path}: {exc}")
-        return errors
+                    issues.append(error_issue(kid, f"registry_key {snap.hive}\\{snap.key_path}: {exc}"))
+        return issues

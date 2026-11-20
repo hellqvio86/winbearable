@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..backends.ports import EnvironmentPort, OutcomePort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..const import DEFENDER_FEATURES_KEY, HIVE_HKLM, UNSUPPORTED_IOT_LTSC_EDITION_IDS
 from ..models import (
     AuditDimension,
@@ -44,7 +44,7 @@ class TweakMutationError(RuntimeError):
         self.outcome = outcome
 
 
-def format_op_failure(system: SystemBackend, fallback_msg: str) -> str:
+def format_op_failure(system: OutcomePort, fallback_msg: str) -> str:
     outcome = system.last_outcome
     if outcome is not None and not outcome.ok:
         detail = outcome.message.strip() if outcome.message else fallback_msg
@@ -56,7 +56,7 @@ def format_op_failure(system: SystemBackend, fallback_msg: str) -> str:
     return fallback_msg
 
 
-def capture_failure_outcome(system: SystemBackend, base_message: str) -> OperationOutcome:
+def capture_failure_outcome(system: OutcomePort, base_message: str) -> OperationOutcome:
     """Capture structured OperationOutcome from backend or synthesize UNKNOWN outcome."""
     raw = system.last_outcome
     if isinstance(raw, OperationOutcome) and not raw.ok:
@@ -302,7 +302,7 @@ def summarize_elevation_requirements(evaluations: list[TweakCheckResult]) -> dic
 
 def require_native_backends(
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: EnvironmentPort,
     allow_simulated: bool,
 ) -> None:
     """Refuse mutating operations against simulated backends unless allow_simulated is set."""

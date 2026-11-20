@@ -11,7 +11,6 @@ from ...const import (
     REG_DWORD,
 )
 from ...models import (
-    PolicyConflictPath,
     RegistrySpec,
     RiskLevel,
     TweakDefinition,
@@ -23,8 +22,11 @@ TWEAKS: dict[str, TweakDefinition] = {
     "taskbar.disable_widgets_and_chat": TweakDefinition(
         tweak_id="taskbar.disable_widgets_and_chat",
         category="taskbar",
-        title="Disable Taskbar Widgets, News Feed, Chat, and Task View",
-        description="Removes Widgets (TaskbarDa), Consumer Teams Chat (TaskbarMn), and Task View button.",
+        title="Disable Taskbar Chat and Task View",
+        description=(
+            "Removes Consumer Teams Chat (TaskbarMn) and Task View button. "
+            "TaskbarDa is protected by Windows UCPD; use taskbar.disable_widgets_machine for Widgets."
+        ),
         source_url="https://learn.microsoft.com/en-us/windows/configuration/taskbar/",
         risk=RiskLevel.LOW,
         requires_admin=False,
@@ -32,22 +34,6 @@ TWEAKS: dict[str, TweakDefinition] = {
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
         registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKCU,
-                key_path=r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                value_name="TaskbarDa",
-                value_data=0,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-                policy_checks=(
-                    PolicyConflictPath(
-                        hive=HIVE_HKLM,
-                        key_path=r"SOFTWARE\Policies\Microsoft\Dsh",
-                        value_name="AllowNewsAndInterests",
-                        enforced_value=1,
-                    ),
-                ),
-            ),
             RegistrySpec(
                 hive=HIVE_HKCU,
                 key_path=r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
@@ -181,12 +167,12 @@ TWEAKS: dict[str, TweakDefinition] = {
 
 PROVENANCE: dict[str, TweakProvenance] = {
     "taskbar.disable_widgets_and_chat": provenance_entry(
-        "Removes Widgets and Chat/Copilot taskbar clutter.",
-        "Microsoft Windows Explorer\\Advanced TaskbarDa / TaskbarMn documentation",
+        "Removes Chat and Task View taskbar clutter (TaskbarDa is UCPD-protected; use disable_widgets_machine).",
+        "Microsoft Windows Explorer\\Advanced TaskbarMn / ShowTaskViewButton documentation",
         "Low risk: HKCU taskbar UI toggles.",
-        "Hides Widgets and Chat icons from the taskbar.",
+        "Hides Chat and Task View icons from the taskbar.",
         "registry_value",
-        "Verified HKCU Explorer\\Advanced TaskbarDa=0 and TaskbarMn=0.",
+        "Verified HKCU Explorer\\Advanced TaskbarMn=0 and ShowTaskViewButton=0.",
     ),
     "taskbar.align_left": provenance_entry(
         "Aligns the Windows 11 taskbar icons to the left.",

@@ -8,6 +8,7 @@ from typing import Any
 from ..backends.ports import AclPort
 from ..backends.registry import RegistryBackend
 from ..models import (
+    CompensationIssue,
     EnvironmentInfo,
     IcaclsSnapshot,
     OperationJournalEntry,
@@ -17,7 +18,7 @@ from ..models import (
     TweakDefinition,
     WinbearableError,
 )
-from .base import OperationApplyContext, now_iso, raise_system_error
+from .base import OperationApplyContext, conflict_issue, error_issue, now_iso, raise_system_error
 from .identity import icacls_id
 from .path_policy import validate_icacls_user_only_path
 
@@ -132,23 +133,24 @@ class IcaclsOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, IcaclsSnapshot):
                 continue
-            if attempted_targets is not None and icacls_id(snap.path_template) not in attempted_targets:
+            tid = icacls_id(snap.path_template)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not snap.backup_acl_path or not Path(snap.backup_acl_path).is_file():
-                errors.append(f"icacls restore {snap.path_template}: missing ACL backup")
+                issues.append(error_issue(tid, f"icacls restore {snap.path_template}: missing ACL backup"))
             else:
                 try:
                     resolved_target = str(validate_icacls_user_only_path(snap.path_template))
                 except (PermissionDeniedError, ValueError) as exc:
-                    errors.append(f"icacls restore {snap.path_template}: {exc}")
+                    issues.append(error_issue(tid, f"icacls restore {snap.path_template}: {exc}"))
                     continue
                 if not force and not system.is_ssh_acl_restricted(resolved_target):
-                    errors.append(f"restore_conflict icacls {snap.path_template}")
+                    issues.append(conflict_issue(tid, f"restore_conflict icacls {snap.path_template}"))
                 elif not system.restore_acl(resolved_target, Path(snap.backup_acl_path)):
-                    errors.append(f"icacls restore {snap.path_template}")
-        return errors
+                    issues.append(error_issue(tid, f"icacls restore {snap.path_template}"))
+        return issues

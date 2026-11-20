@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from typing import Any
@@ -9,9 +10,12 @@ from typing import Any
 from ..const import (
     BITLOCKER_STATUS_KEY,
     DEFENDER_KEY,
+    ENV_BUILD_OVERRIDE,
     HIVE_HKLM,
+    NT_CURRENT_VERSION_KEY,
 )
 from ..models import (
+    EnvironmentInfo,
     ObservationConfidence,
     ObservationState,
     PostureObservation,
@@ -500,3 +504,59 @@ def collect_posture_observations(
         "edr": edr_bool,
     }
     return observations, flags
+
+
+def build_environment_info(
+    *,
+    registry: RegistryBackend,
+    os_label: str,
+    is_win: bool,
+    can_audit_windows: bool,
+    is_admin: bool,
+    wsl_installed: bool,
+    wsl_version: str | None,
+    wsl_distros: list[str],
+    run_cmd: Callable[[list[str]], CommandResult] | None,
+) -> EnvironmentInfo:
+    """Assemble EnvironmentInfo from registry metadata and posture observations."""
+    build_override = os.environ.get(ENV_BUILD_OVERRIDE)
+    ok_b, build_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
+    if build_override is not None and build_override.isdigit():
+        windows_build = int(build_override)
+    elif ok_b and build_val and isinstance(build_val[0], (int, str)) and str(build_val[0]).isdigit():
+        windows_build = int(build_val[0])
+    else:
+        windows_build = 0
+
+    ok_d, disp_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "DisplayVersion")
+    display_version = str(disp_val[0]) if ok_d and disp_val and disp_val[0] is not None else "Unknown"
+
+    ok_e, edition_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "EditionID")
+    edition = str(edition_val[0]) if ok_e and edition_val and edition_val[0] is not None else "Unknown"
+
+    observations, flags = collect_posture_observations(
+        registry=registry,
+        is_windows=can_audit_windows,
+        edition=edition,
+        run_cmd=run_cmd,
+    )
+    return EnvironmentInfo(
+        os_name=os_label,
+        is_windows=is_win,
+        host_auditable=can_audit_windows,
+        windows_build=windows_build,
+        display_version=display_version,
+        edition=edition,
+        is_admin=is_admin,
+        domain_joined=flags["domain_joined"],
+        entra_joined=flags["entra_joined"],
+        mdm_enrolled=flags["mdm_enrolled"],
+        defender_enabled=flags["defender_enabled"],
+        secure_boot_enabled=flags["secure_boot_enabled"],
+        wsl_installed=wsl_installed,
+        wsl_version=wsl_version,
+        wsl_distros=tuple(wsl_distros),
+        bitlocker_protected=flags["bitlocker_protected"],
+        applocker_configured=flags["applocker_configured"],
+        observations=observations,
+    )

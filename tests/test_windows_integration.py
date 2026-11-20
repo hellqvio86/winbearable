@@ -80,7 +80,9 @@ def readonly_native_system() -> NativeSystemBackend:
     return NativeSystemBackend()
 
 
-def test_readonly_native_system_and_doctor_contract(readonly_native_system: NativeSystemBackend) -> None:
+def test_readonly_native_system_and_doctor_contract(
+    readonly_native_system: NativeSystemBackend, tmp_path: Path
+) -> None:
     """Verify real Windows environment detection, process check, and `wb doctor --json` contract."""
     reg = WinregBackend()
     sys_b = readonly_native_system
@@ -93,7 +95,12 @@ def test_readonly_native_system_and_doctor_contract(readonly_native_system: Nati
 
     buf = io.StringIO()
     with redirect_stdout(buf):
-        code = run_cli(["doctor", "--json"], registry=reg, system=sys_b)
+        code = run_cli(
+            ["doctor", "--json"],
+            registry=reg,
+            system=sys_b,
+            state_store=StateStore(tmp_path / "state.json"),
+        )
     assert code == 0
     payload: dict[str, Any] = json.loads(buf.getvalue())
     assert "environment" in payload

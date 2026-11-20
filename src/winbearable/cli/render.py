@@ -13,6 +13,7 @@ from typing import Any
 
 from ..const import EXIT_BLOCKED, EXIT_ERROR, EXIT_PENDING_CHANGES, EXIT_SUCCESS, JSON_SCHEMA_VERSION
 from ..engine import ApplySummary
+from ..log import sanitize_for_terminal
 from ..models import EnvironmentInfo, TweakStatus, UnsupportedPlatformError
 from ..tweaks import TWEAK_CATALOG, resolve_tweak_id
 
@@ -69,12 +70,26 @@ def colorize(text: str, *codes: str, enabled: bool) -> str:
     return f"{''.join(codes)}{text}{_ANSI_RESET}"
 
 
-def compute_sync_state(results: Sequence[Any], failed_ids: Sequence[str] = ()) -> tuple[bool, list[str]]:
-    """Compute whether a profile evaluation/apply is in sync and list reasons if not."""
+_SKIPPED_STATUSES = frozenset(
+    {
+        TweakStatus.SKIPPED_MANAGED,
+        TweakStatus.UNSUPPORTED_BUILD,
+        TweakStatus.UNSUPPORTED_EDITION,
+    }
+)
+
+
+def build_sync_payload(results: Sequence[Any], failed_ids: Sequence[str] = ()) -> dict[str, Any]:
+    """Build structured sync/applicability fields for CLI JSON output."""
     error_cnt = max(len(failed_ids), sum(1 for r in results if r.status == TweakStatus.ERROR))
     drifted_cnt = sum(1 for r in results if r.status == TweakStatus.DRIFTED)
     blocked_cnt = sum(1 for r in results if r.status == TweakStatus.BLOCKED_BY_POLICY)
     admin_cnt = sum(1 for r in results if r.status == TweakStatus.REQUIRES_ADMIN)
+    unsup_build_cnt = sum(1 for r in results if r.status == TweakStatus.UNSUPPORTED_BUILD)
+    unsup_ed_cnt = sum(1 for r in results if r.status == TweakStatus.UNSUPPORTED_EDITION)
+    managed_cnt = sum(1 for r in results if r.status == TweakStatus.SKIPPED_MANAGED)
+    skipped_cnt = unsup_build_cnt + unsup_ed_cnt + managed_cnt
+    applicable_cnt = max(0, len(results) - skipped_cnt)
 
     reasons: list[str] = []
     if error_cnt:
@@ -85,7 +100,32 @@ def compute_sync_state(results: Sequence[Any], failed_ids: Sequence[str] = ()) -
         reasons.append(f"{blocked_cnt} blocked by policy")
     if admin_cnt:
         reasons.append(f"{admin_cnt} needs admin")
-    return (not reasons, reasons)
+
+    skipped_reasons: list[str] = []
+    if unsup_build_cnt:
+        skipped_reasons.append(f"{unsup_build_cnt} unsupported build")
+    if unsup_ed_cnt:
+        skipped_reasons.append(f"{unsup_ed_cnt} unsupported edition")
+    if managed_cnt:
+        skipped_reasons.append(f"{managed_cnt} skipped (managed)")
+
+    if applicable_cnt == 0 and not reasons:
+        reasons.append("no applicable tweaks evaluated")
+
+    in_sync = applicable_cnt > 0 and not reasons
+    return {
+        "in_sync": in_sync,
+        "sync_reasons": reasons,
+        "applicable": applicable_cnt,
+        "skipped": skipped_cnt,
+        "skipped_reasons": skipped_reasons,
+    }
+
+
+def compute_sync_state(results: Sequence[Any], failed_ids: Sequence[str] = ()) -> tuple[bool, list[str]]:
+    """Compute whether a profile evaluation/apply is in sync and list reasons if not."""
+    payload = build_sync_payload(results, failed_ids)
+    return (bool(payload["in_sync"]), list(payload["sync_reasons"]))
 
 
 def format_sync_status_line(
@@ -142,8 +182,9 @@ def print_json(payload: dict[str, Any]) -> None:
 
 
 def escape_md_cell(text: str) -> str:
-    """Escape Markdown table delimiters and newlines in user/system values."""
-    return text.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    """Escape Markdown table delimiters, newlines, and terminal control sequences."""
+    cleaned = text.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    return sanitize_for_terminal(cleaned)
 
 
 def format_consequences(item: Any) -> str:
@@ -393,6 +434,11 @@ JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "failed_ids": {"type": "array", "items": {"type": "string"}},
             "results": {"type": "array", "items": {"type": "object"}},
             "wsl_result": {"type": ["object", "null"]},
+            "in_sync": {"type": "boolean"},
+            "sync_reasons": {"type": "array", "items": {"type": "string"}},
+            "applicable": {"type": "integer", "minimum": 0},
+            "skipped": {"type": "integer", "minimum": 0},
+            "skipped_reasons": {"type": "array", "items": {"type": "string"}},
         },
     },
     "status": {
@@ -405,6 +451,11 @@ JSON_SCHEMAS: dict[str, dict[str, Any]] = {
             "profile": {"type": "string"},
             "environment": {"type": "object"},
             "results": {"type": "array", "items": {"type": "object"}},
+            "in_sync": {"type": "boolean"},
+            "sync_reasons": {"type": "array", "items": {"type": "string"}},
+            "applicable": {"type": "integer", "minimum": 0},
+            "skipped": {"type": "integer", "minimum": 0},
+            "skipped_reasons": {"type": "array", "items": {"type": "string"}},
         },
     },
     "doctor": {

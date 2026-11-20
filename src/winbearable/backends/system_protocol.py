@@ -183,6 +183,9 @@ class SystemBackend(Protocol):
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
         """Restrict directory/file ACL to current user via icacls.exe."""
 
+    def invalidate_all(self) -> None:
+        """Invalidate any cached system inventory state."""
+
 
 def read_service_start_state(registry: RegistryBackend, service_name: str) -> tuple[str, int | None]:
     """Distinguish 'absent' service key, 'unreadable' Start value, and 'present' Start int."""

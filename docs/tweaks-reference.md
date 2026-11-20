@@ -119,7 +119,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `start.disable_settings_suggestions` | `start` | No | `low` | — | `corp-safe`, `privacy` | Disable Suggested Content in Windows Settings |
 | `start.disable_welcome_and_tips` | `start` | No | `low` | — | `corp-safe`, `privacy` | Disable 'Finish Setting Up Your Device' & Welcome Nags |
 | `taskbar.align_left` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort` | Align Taskbar Icons Left |
-| `taskbar.disable_widgets_and_chat` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Taskbar Widgets, News Feed, Chat, and Task View |
+| `taskbar.disable_widgets_and_chat` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Taskbar Chat and Task View |
 | `taskbar.disable_widgets_machine` | `taskbar` | Yes | `low` | — | `privacy` | Disable Widgets / News & Interests (Machine Policy) |
 | `taskbar.enable_end_task` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort` | Enable 'End Task' on Taskbar Right-Click |
 | `taskbar.never_combine` | `taskbar` | No | `low` | — | `corp-safe`, `dev-comfort` | Never Combine Taskbar Buttons |

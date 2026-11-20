@@ -110,10 +110,24 @@ class ProcessAndOneDrivePort(Protocol):
     def uninstall_onedrive_client(self) -> bool: ...
 
 
+class OutcomePort(Protocol):
+    """Port for reading structured OperationOutcome from a backend."""
+
+    last_outcome: OperationOutcome | None
+
+
 class WslPort(Protocol):
     """Port for WSL2 command execution."""
 
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult: ...
+
+
+class WslHostPort(WslPort, Protocol):
+    """Port for WSL2 host config planning/application (command exec + host RAM)."""
+
+    is_simulated: bool
+
+    def get_total_memory_bytes(self) -> int: ...
 
 
 class GitAndPowerPort(Protocol):

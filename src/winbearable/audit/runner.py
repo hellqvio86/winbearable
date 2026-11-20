@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..backends.ports import EnvironmentPort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..const import HIVE_HKLM, MIN_SUPPORTED_BUILD, WSL_POLICIES_KEY
 from ..engine import is_edition_supported, is_iot_or_ltsc_edition, is_tamper_protection_enabled
 from ..models import EnvironmentInfo, ObservationConfidence, ObservationState, PostureObservation
@@ -38,7 +38,7 @@ from .win32_checks import (
 def run_security_audit(
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: EnvironmentPort,
     category_filter: str | None = None,
     wsl_audit_data: dict[str, Any] | None = None,
 ) -> list[AuditFinding]:

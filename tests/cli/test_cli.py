@@ -474,3 +474,44 @@ def test_cli_colors_emojis_and_final_sync_status(
     status_payload = json.loads(out_json)
     assert status_payload["in_sync"] is True
     assert status_payload["sync_reasons"] == []
+
+
+def test_escape_md_cell_strips_terminal_controls() -> None:
+    """escape_md_cell strips C0/C1 terminal control sequences while preserving tabs."""
+    out = _escape_md_cell("a\x1b[2J\x1b]0;pwned\x07\x9b31m\t| b")
+    assert "\\|" in out
+    assert "\t" in out
+    assert not any(ord(c) < 32 and c not in "\t" or 0x7F <= ord(c) <= 0x9F for c in out)
+
+
+def test_all_unsupported_profile_is_not_in_sync(
+    onedrive_registry, system, state_store, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An all-unsupported or all-skipped profile must never report in_sync=True (SEM-01)."""
+    system.windows_build = 19045
+    prof_path = tmp_path / "unsupported.toml"
+    prof_path.write_text('name = "unsup"\n[tweaks]\n"explorer.show_file_extensions" = true\n', encoding="utf-8")
+
+    code_json = run_cli(
+        argv=["status", "--profile", str(prof_path), "--json"],
+        registry=onedrive_registry,
+        system=system,
+        state_store=state_store,
+    )
+    out_json = capsys.readouterr().out
+    payload = json.loads(out_json)
+    assert payload["in_sync"] is not True
+    assert payload["applicable"] == 0
+    assert payload["skipped"] == 1
+    assert payload["skipped_reasons"]
+    assert payload["sync_reasons"]
+    assert code_json in {0, 2, 3}
+
+    run_cli(
+        argv=["status", "--profile", str(prof_path)],
+        registry=onedrive_registry,
+        system=system,
+        state_store=state_store,
+    )
+    out_human = capsys.readouterr().out
+    assert "IN SYNC" not in out_human

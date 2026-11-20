@@ -116,6 +116,42 @@ wb --version
 
 ---
 
+## 🎨 CLI in Action
+
+```ansi
+$ wb doctor
+\u001b[1;36mwinbearable v0.27.0 — Doctor Report\u001b[0m
+OS: Windows (Build 26300, Display: 26H2, Edition: Professional)
+Admin: False | Domain: absent (medium) | Entra: disabled (high) | MDM: enabled (medium)
+Defender: enabled (high) | Secure Boot: enabled (medium) | BitLocker: enabled (low)
+WSL Installed: True (Version: 3.0.5.0, Distros: Ubuntu, docker-desktop, AlmaLinux-10)
+Security Posture: 4/48 (8.3%, confidence=partial)
+Comfort & Privacy Preferences: Privacy 2/24 | Usability 7/40 | Developer 5/11
+Defender PUA: enabled (confidence=partial, source=local) | SmartScreen: unset (confidence=unknown, managed_by_wb=False)
+VBS/HVCI/Credential Guard: vbs=enabled | hvci=enabled | credential_guard=unset (opt-in only)
+Linux Refugee Summary: build_supported=True | enterprise_leftovers=True | policy_blocked=4 | mirrored=True | hyperv_fw_avail=True
+```
+
+```ansi
+$ wb plan --profile user-only
+\u001b[1;36m# 🔍 winbearable — DRY-RUN PLAN (no changes written)\u001b[0m
+Profile: `user-only`
+Plan Digest: `1fa85b10f2f4bb1d`
+
+| Status | Tweak ID | Risk | Admin | Consequences | Operations & Transitions |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `\u001b[32mapplied\u001b[0m` | `apps.install_vscode` | `\u001b[32mlow\u001b[0m` | no | reversible | [winget_package] Microsoft.VisualStudioCode (scope=user): installed -> installed |
+| `\u001b[33mdrifted\u001b[0m` | `search.disable_bing` | `\u001b[32mlow\u001b[0m` | no | reversible | [registry] HKCU\...\Explorer [DisableSearchBoxSuggestions]: <absent> -> 1 |
+| `\u001b[33mdrifted\u001b[0m` | `explorer.classic_context_menu` | `\u001b[32mlow\u001b[0m` | no | reversible, EXPLORER RESTART | [registry] HKCU\...\InprocServer32 [(Default)]: <absent> -> '' |
+| `\u001b[33mdrifted\u001b[0m` | `hardening.disable_wsh_user` | `\u001b[33mmedium\u001b[0m` | no | reversible | [registry] HKCU\...\Windows Script Host\Settings [Enabled]: <absent> -> 0 |
+
+Summary: 13 to apply / applied, 4 already applied, 13 drifted, 0 failed, 0 skipped (needs admin), 0 blocked by policy
+💡 Run with `--apply` to execute these changes (registry backups and rollback state will be recorded).
+\u001b[1;33m⚠️ Sync Status: OUT OF SYNC (13 drifted)\u001b[0m
+```
+
+---
+
 ## 🚀 Zero-to-Bash Bootstrap (Fresh Windows 11 -> Linux Shell Fast)
 
 If you are a Linux person staring at a fresh Windows 11 desktop without Python or `uv` installed yet, **do not open Edge, do not open the Microsoft Store, and do not click through GUI installers.**
@@ -227,7 +263,6 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 | `start.disable_recommendations` | Disables Windows tips & tricks suggestions | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SubscribedContent-338389Enabled` | `REG_DWORD` | `0` |
 | `start.disable_recommendations` | Disables post-install promo notifications ("Windows Welcome") | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SoftLandingEnabled` | `REG_DWORD` | `0` |
 | `start.disable_recommendations` | Disables Windows 11 Start menu "Recommended" feed ads | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Start_IrisRecommendations` | `REG_DWORD` | `0` |
-| `taskbar.disable_widgets_and_chat` | Removes the MSN News/Weather Widgets button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarDa` | `REG_DWORD` | `0` |
 | `taskbar.disable_widgets_and_chat` | Removes the Microsoft Teams Chat icon from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarMn` | `REG_DWORD` | `0` |
 | `taskbar.disable_widgets_and_chat` | Hides the Task View (virtual desktops) button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowTaskViewButton` | `REG_DWORD` | `0` |
 | `explorer.classic_context_menu` | Restores full Windows 10 right-click menu (no "Show more options") | No | `HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32` | `(Default)` | `REG_SZ` | `""` |
@@ -346,6 +381,35 @@ When running inside **WSL2**, you can audit your live Windows host and see which
 
 ---
 
+## Settings, Common Flags & Environment Variables
+
+Configure persistent defaults in `~/.config/winbearable/settings.toml` (or `settings.json`):
+
+```toml
+default_profile = "paranoid"
+debug = true
+```
+
+Precedence (highest to lowest): **CLI flag** → **environment variable** → **settings file** → **built-in default** (`user-only`, `debug = false`).
+
+| Option / Flag | Environment Variable | Description |
+| :--- | :--- | :--- |
+| `--profile PROFILE` | `WINBEARABLE_PROFILE` | Default profile for `status`, `plan`, `apply`, and `tui` (default: `user-only`). |
+| `--debug` | `WINBEARABLE_DEBUG` | Enable `DEBUG` stderr logs and full tracebacks (`1`/`true`/`yes`/`on`). |
+| — | `WINBEARABLE_SETTINGS` | Override path to `settings.toml` or `settings.json`. |
+| — | `WINBEARABLE_STATE_PATH` | Override path to `state.json`. |
+| `--log-format {json,text}` | `WINBEARABLE_LOG_FORMAT` | `stderr` log format (default: `json`). |
+| `--log-file PATH` | `WINBEARABLE_LOG_PATH` | Append rotating JSONL logs to a file. |
+| `--no-color` / `--no-emoji` | `NO_COLOR` / `NO_EMOJI` | Disable ANSI colors or emoji output. |
+| `--apply` | — | Mutate the system (all commands are dry-run without `--apply`). |
+| `--allow-managed` | — | Allow machine-scope tweaks on domain/Entra/MDM-managed devices. |
+| `--elevate` | — | Trigger a UAC prompt if not already running as Administrator. |
+| `--json` | — | Emit machine-readable JSON output. |
+
+See [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md) for the complete reference of all subcommands, flags, and environment variables.
+
+---
+
 ## Windows Build & Edition Support Policy
 
 We don't like Windows enough to maintain legacy workarounds or embedded/IoT quirks. **Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT and LTSC are strictly unsupported.**
@@ -383,6 +447,8 @@ make release-check # lint + test + TruffleHog + Trivy
 
 ## Documentation
 
+- [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md)
+- [Support & Compatibility Policy](docs/support-policy.md)
 - [Project Roadmap & TODO](TODO.md)
 - [Per-Tweak Catalog Reference](docs/tweaks-reference.md)
 - [Frequently Asked Questions (FAQ)](docs/faq.md)
@@ -391,6 +457,14 @@ make release-check # lint + test + TruffleHog + Trivy
 - [AI Agent Instructions (`AGENTS.md`)](AGENTS.md)
 - [Security Policy (`SECURITY.md`)](SECURITY.md)
 - [Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)
+
+### Verifying Release Provenance (`gh attestation verify`)
+
+Release archives (PyPI wheels/sdists and Winget zips) include GitHub build-provenance attestations:
+
+```bash
+gh attestation verify winbearable-0.27.0-win-x64.zip --owner hellqvio86
+```
 
 ---
 
