@@ -17,6 +17,7 @@ class EnvironmentPort(Protocol):
 
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo: ...
     def get_total_memory_bytes(self) -> int: ...
+    def invalidate_all(self) -> None: ...
 
 
 class ServicePort(Protocol):
@@ -145,21 +146,96 @@ class GitAndPowerPort(Protocol):
     def set_hibernate_enabled(self, registry: RegistryBackend, enabled: bool) -> bool: ...
 
 
-def assert_port_conformance(backend: Any) -> None:
-    """Verify at runtime/type-check time that *backend* provides all required port methods."""
-    required = (
-        "detect_environment",
-        "get_service_start_type",
-        "is_scheduled_task_enabled",
-        "is_optional_feature_enabled",
-        "is_firewall_group_enabled",
-        "get_auditpol_subcategory",
-        "is_ssh_acl_restricted",
-        "is_winget_package_installed",
-        "is_process_running",
-        "run_wsl_command",
-        "get_git_global_config",
-    )
-    missing = [name for name in required if not callable(getattr(backend, name, None))]
+_PORT_CONTRACTS: dict[str, tuple[tuple[str, bool], ...]] = {
+    "EnvironmentPort": (
+        ("is_simulated", False),
+        ("detect_environment", True),
+        ("invalidate_all", True),
+    ),
+    "ServicePort": (
+        ("last_outcome", False),
+        ("get_service_state", True),
+        ("get_service_start_type", True),
+        ("set_service_start_type", True),
+    ),
+    "TaskPort": (
+        ("last_outcome", False),
+        ("is_scheduled_task_enabled", True),
+        ("set_scheduled_task_enabled", True),
+    ),
+    "FeaturePort": (
+        ("last_outcome", False),
+        ("is_optional_feature_enabled", True),
+        ("set_optional_feature_enabled", True),
+    ),
+    "FirewallPort": (
+        ("last_outcome", False),
+        ("is_firewall_group_enabled", True),
+        ("set_firewall_group_enabled", True),
+        ("export_firewall_policy", True),
+        ("import_firewall_policy", True),
+    ),
+    "AuditPolicyPort": (
+        ("last_outcome", False),
+        ("get_auditpol_subcategory", True),
+        ("set_auditpol_subcategory", True),
+        ("backup_auditpol", True),
+        ("restore_auditpol", True),
+        ("get_event_log_config", True),
+        ("set_event_log_config", True),
+    ),
+    "AclPort": (
+        ("last_outcome", False),
+        ("is_ssh_acl_restricted", True),
+        ("backup_acl", True),
+        ("restore_acl", True),
+        ("restrict_acl_to_current_user", True),
+    ),
+    "PackagePort": (
+        ("last_outcome", False),
+        ("is_winget_package_installed", True),
+        ("install_winget_package", True),
+        ("uninstall_winget_package", True),
+        ("is_vscode_extension_installed", True),
+        ("install_vscode_extension", True),
+        ("uninstall_vscode_extension", True),
+    ),
+    "ProcessAndOneDrivePort": (
+        ("last_outcome", False),
+        ("is_process_running", True),
+        ("stop_process", True),
+        ("is_onedrive_installed", True),
+        ("uninstall_onedrive_client", True),
+    ),
+    "OutcomePort": (("last_outcome", False),),
+    "WslPort": (("run_wsl_command", True),),
+    "WslHostPort": (
+        ("run_wsl_command", True),
+        ("is_simulated", False),
+        ("get_total_memory_bytes", True),
+    ),
+    "GitAndPowerPort": (
+        ("last_outcome", False),
+        ("git_installed", False),
+        ("get_git_global_config", True),
+        ("set_git_global_config", True),
+        ("is_dir_case_sensitive", True),
+        ("set_dir_case_sensitive", True),
+        ("is_hibernate_enabled", True),
+        ("set_hibernate_enabled", True),
+    ),
+}
+
+
+def assert_port_conformance(backend: Any, *, port: str | None = None) -> None:
+    """Verify at runtime that *backend* satisfies all declared capability ports (or a specific *port*)."""
+    targets = {port: _PORT_CONTRACTS[port]} if port is not None else _PORT_CONTRACTS
+    missing: list[str] = []
+    for port_name, members in targets.items():
+        for member_name, must_be_callable in members:
+            if not hasattr(backend, member_name):
+                missing.append(f"{port_name}.{member_name}")
+            elif must_be_callable and not callable(getattr(backend, member_name, None)):
+                missing.append(f"{port_name}.{member_name}()")
     if missing:
-        raise TypeError(f"Backend {type(backend).__name__} missing port methods: {missing}")
+        raise TypeError(f"Backend {type(backend).__name__} missing port members: {missing}")

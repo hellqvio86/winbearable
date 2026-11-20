@@ -15,16 +15,23 @@ This matrix tracks how every non-registry identifier in `winbearable` is verifie
 | **Hyper-V Firewall** (`wb wsl firewall`, `chk.hyperv_firewall`) | `Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'` | 26300 | Sole PowerShell JSON boundary; unavailable under ConstrainedLanguage mode |
 
 ## Running Host Snapshot Capture
-Run the env-gated Windows integration suite locally before releases (GitHub Actions PR CI intentionally uses `ubuntu-latest` only; `windows-latest` is reserved for release Winget asset builds):
+Run the env-gated Windows integration suite locally before releases (`windows-latest` CI runs `windows-contracts` with contract, unit, and read-only integration tests, and `publish-winget-asset` runs on release):
 ```powershell
 $env:WINBEARABLE_RUN_WINDOWS_INTEGRATION = "1"
 uv run pytest tests/test_windows_integration.py -v
 ```
 Revalidation policy: re-run `tests/test_windows_integration.py` on every minor release or after any change to Win32 `ctypes`, `winreg`, ACLs, UAC, WSL, services, tasks, or native subprocess wrappers.
 
-## Verification Ledger (Implemented / Unit-Tested / Windows-Verified)
+## Verification Ledger (`0.28.0`)
 
-Host verified (2026-11-19, `0.22.0`): **Windows 11 Build `26300` (`Professional`, `Python 3.15.2`, `wsl_installed=True`, `7 passed` in `tests/test_windows_integration.py`)**.
+Current release baseline (`0.28.0`):
+- **CI `windows-contracts` (`windows-latest`):** runs `tests/contracts`, `tests/test_windows_integration.py` (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`), `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, and `tests/test_architecture_invariants.py`.
+- **Crash-consistency harness (`tests/engine/test_crash_consistency_harness.py`):** verifies baseline restoration across all 12 reversible operation kinds in `OPERATION_KIND_SPECS`.
+- **UAC elevation trust (`src/winbearable/uac/elevation.py`):** `assess_elevation_target_trust` classifies system-protected vs user-writable elevation targets and is unit-tested in `tests/uac/test_uac_and_locale_security.py`.
+
+## Historical Verification Ledger (`0.22.0`)
+
+Historical host snapshot (2026-11-19, `0.22.0`): **Windows 11 Build `26300` (`Professional`, `Python 3.15.2`, `wsl_installed=True`, `7 passed` in `tests/test_windows_integration.py`)**.
 
 | Item | Implemented | Unit-Tested (WSL2 Linux) | Windows-Verified (`win32`, Build `26300`, `Python 3.15.2`) |
 | --- | --- | --- | --- |

@@ -172,10 +172,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run contract & read-only Windows integration tests
+      - name: Run contract, unit & read-only Windows integration tests
         env:
           WINBEARABLE_RUN_WINDOWS_INTEGRATION: "1"
-        run: uv run pytest tests/contracts tests/test_windows_integration.py -q --no-cov
+        run: uv run pytest tests/contracts tests/test_windows_integration.py tests/audit tests/backends tests/cli tests/engine tests/operations tests/uac tests/wsl tests/test_catalog_lint.py tests/test_architecture_invariants.py -q --no-cov
 
   all-checks:
     name: All Checks Passed

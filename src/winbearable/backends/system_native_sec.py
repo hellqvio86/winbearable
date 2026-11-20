@@ -10,7 +10,7 @@ import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..const import HIVE_HKLM
 from .registry import RegistryBackend
@@ -389,19 +389,30 @@ def restrict_acl_to_current_user(
     return res.returncode == 0
 
 
+class _SecBackendHost(Protocol):
+    """Narrow host protocol required by NativeSecService."""
+
+    _platform: str
+
+    def _run_native_cmd(
+        self, args: list[str], input_text: str | None = None, timeout: float = 120.0
+    ) -> CommandResult: ...
+    def _get_dll(self, name: str) -> Any | None: ...
+    def _get_current_user_sid(self) -> str | None: ...
+
+
 class NativeSecService:
     """Composed service delegating auditpol, wevtutil, firewall, fsutil, and ACL operations for NativeSystemBackend."""
 
-    def __init__(self, backend: Any) -> None:
+    def __init__(self, backend: _SecBackendHost) -> None:
         self._backend = backend
 
     @property
     def _platform(self) -> str:
-        return str(self._backend._platform)
+        return self._backend._platform
 
     def _run_native_cmd(self, args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
-        res: CommandResult = self._backend._run_native_cmd(args, input_text=input_text, timeout=timeout)
-        return res
+        return self._backend._run_native_cmd(args, input_text=input_text, timeout=timeout)
 
     def _get_dll(self, name: str) -> Any | None:
         return self._backend._get_dll(name)

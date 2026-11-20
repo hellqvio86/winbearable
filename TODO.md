@@ -1,186 +1,420 @@
-# winbearable — critical review, pass 4 (architecture · security · maintainability · maturity) → agent TODO
+# Winbearable v0.28.0 — Critical Engineering Review Status
 
-Reviewed: `winbearable-main_74e0d9.zip`, updated for `__version__ = "0.27.0"` (2026-11-20). Earlier passes are archived as `todo-v0.10.0.md`, `todo-v0.12.1.md`, `todo-v0.19.0.md` (IDs `R-/S-/N-/TRX-/SEC-/ARCH-/MAINT-/MAT-` refer to those).
-Note: an upload for 0.21.0 arrived just before this one; this review supersedes it and covers 0.19.0 → 0.26.0.
+**Scope:** software architecture, security, maintainability, correctness, testing, and release maturity.  
+**Review basis:** `winbearable-main(7).zip` (`0.27.0`), updated for `0.28.0` remediation PR.  
+**Audience:** implementation agents and maintainers.  
+**Review posture:** findings below are based on source inspection; Windows CI (`windows-contracts`) runs contract, unit, and read-only integration tests on `windows-latest`.
 
-**Method (same as last pass):** extract + diff against the previous tree; run all gates; re-run my three repros; **13 mutants** against security/transaction-critical lines; verify every pass-3 item in code; read new code (`backends/win32_acl.py`, caches in `backends/system_native*.py`, `cli/render.py`, `engine/evaluate.py`, crash-consistency harness, CI).
+## Executive assessment
 
-**Gates:** `ruff check` ✔ · `ruff format --check` ✔ (169 files) · `mypy src` strict ✔ (113 files) · `pytest` → **240 passed, 7 skipped** (+ property tests, see ENV-01) · coverage **92 %** · ~26.7 k LOC src, ~12.5 k LOC tests.
+Winbearable has moved beyond a hobby-script architecture. The project now has a documented dependency DAG, typed domain models, operation adapters, capability protocols, transaction journaling, recovery/rollback, bounded subprocess execution, build provenance, mutation checks, and a Windows CI job. Those are meaningful engineering improvements.
 
-**Confidence tags:** `REPRODUCED` (ran here) · `MUTATED` (mutation survived) · `CODE` · `NEEDS-WINDOWS` (reasoned, confirm on a real box) · `NEEDS-VERIFY`.
-**Rules for agents:** one item = one PR; failing test first; follow `AGENTS.md`; each item has **Done when**; don't bump `__version__` per commit (MAT-01); no new tweak IDs.
+It is not yet architecturally cohesive or mature enough to treat its design documentation as proof of implementation quality. The most important remaining issue is the incomplete dependency-inversion boundary: capability ports exist, but the engine, CLI, WSL and audit layers still depend on the broad `SystemBackend` protocol. Some service composition also relies on `Any` and private backend members. The transaction tests are materially better than previous passes, but their fault-injection coverage is still representative rather than exhaustive across the operation registry.
 
----
+### Priority summary
 
-## 0. Is the katana sharp?
+| Priority | Count | Meaning |
+|---|---:|---|
+| P0 | 0 | No new unconditional critical vulnerability established from this static review |
+| P1 | 5 | Architectural or assurance gaps (`ARCH-01` partial, `ARCH-02`/`ARCH-03`/`MAT-01`/`TRX-01` fixed in `0.28.0`) |
+| P2 | 7 | Maintainability, security-hardening, and maturity (`SEC-02` deferred pending signing cert; others addressed in `0.28.0`) |
+| P3 | 2 | Governance and documentation quality (reconciled in `0.28.0`) |
 
-**Much sharper — this is the first pass where I could not reproduce a transaction-safety bug.** All three of my repros now pass (failed apply ⇒ `rolled_back` and re-appliable; history kept; partial rollback ⇒ exactly **one** conflict, no WSL false positives). 12 of 13 mutants are killed. The ports migration, unified `OPERATION_KIND_SPECS`, declarative parameter schemas, reparse-tag inspection, fail-closed edition guard, build provenance attestation and the removal of upload paths from the `Makefile` all landed and check out.
+### `0.28.0` Remediation Status
 
-What is left is a different kind of edge — not "does it corrupt state" but "can you trust what it tells you and how it ships":
+| ID | Status | Notes |
+|---|---|---|
+| `ARCH-01` | **PARTIAL** | `wsl/audit.py` and `engine/params.py` narrowed to `WslPort`/`EnvironmentPort`; AST lint forbids `SystemBackend` in `wsl/`, `audit/`, and `engine/params.py`. Remaining `engine/`/`cli/` composition boundaries retain `SystemBackend` for multi-adapter dispatch. |
+| `ARCH-02` | **FIXED** | `assert_port_conformance` validates all 13 ports in `ports.py`; `tests/contracts/test_system_backend_contract.py` adds negative fake + per-port behavioral contract tests. |
+| `ARCH-03` | **FIXED** | `NativeAppService` and `NativeSecService` use typed `_AppBackendHost`/`_SecBackendHost` protocols instead of `Any`. |
+| `MAT-01` | **FIXED** | `windows-contracts` in `.github/workflows/ci.yml` runs contracts, unit suites (`audit`, `backends`, `cli`, `engine`, `operations`, `uac`, `wsl`, lint/invariants), and `tests/test_windows_integration.py` on `windows-latest`. |
+| `TRX-01` | **FIXED** | `tests/engine/test_crash_consistency_harness.py` covers all 12 reversible operation kinds in `OPERATION_KIND_SPECS` (`test_crash_harness_covers_all_reversible_operation_kinds` + `test_crash_between_mutation_and_journal_flush_restores_baseline`). |
+| `SEC-01` | **FIXED** | `assess_elevation_target_trust` in `src/winbearable/uac/elevation.py` evaluates and logs system-protected vs user-writable targets; documented in `docs/uac-security-review.md` and unit-tested. |
+| `SEC-02` | **OPEN (DEFERRED)** | Authenticode code signing deferred until an EV/Open-Source signing certificate is provisioned. |
+| `TEST-01` | **FIXED** | `test_concurrent_inventory_cache_invalidation_and_history_safety` tests multi-threaded cache invalidation and command history boundedness. |
+| `MAINT-01` | **OPEN (ACCEPTED)** | `engine/phases.py` and `cli/handlers.py` are cohesive orchestration boundaries under the 600-LOC module cap. |
+| `MAINT-02` | **FIXED** | `restore_conflict` is absent from `src/` (already structured via `OperationIssue`). |
+| `MAT-02` / `MAT-03` / `MAT-04` | **FIXED** | `docs/verify-matrix.md` marks `0.22.0` historical and adds `0.28.0` ledger; `TODO.md` reconciled. |
+| `GOV-01` / `GOV-02` | **FIXED** | Support policy, `AGENTS.md`, `SECURITY.md`, `const.py`, and Winget manifests aligned to `0.28.0`. |
 
-1. **The new performance caches can make the tool lie about current state** (CACHE-01) — process-lifetime, no TTL, and the code path is bypassed in tests.
-2. **Terminal-escape injection** in the new coloured output (SEC-06, reproduced).
-3. **Mutation fixes were point fixes**: every mutant I listed last time is killed, but a sibling (`.wslconfig` conflict check) survives (TST-01). The crash-consistency harness has a weak oracle (TST-02).
-4. **Maturity gaps unchanged**: still no Windows job on PRs, still unsigned, still a placeholder hash on `main`, and nine more releases in two days (MAT-01/03).
-
-### Scorecard (my judgement; 1 = poor, 5 = production-grade) — movement since pass 3
-
-| Dimension | Pass 3 | Now | Why | What moves it up |
-| --- | --- | --- | --- | --- |
-| **Architecture** | 3.5 | **4.0** | Single `OperationKind` registry (raises on unregistered snapshot types), narrow capability ports used by all non-registry adapters, declarative param schemas, `state` no longer imports `tweaks`, all subprocess via `run_subprocess_bounded`, documented 7-layer DAG enforced by tests. Still: `SystemBackend` is a 43-method interface used wide by `engine`/`wsl`/`cli`; mixins remain. | ARCH-01 |
-| **Security** | 3.5 | **4.0** | Abs-path executables, `ReplaceFileW`, tag-aware reparse check, `O_EXCL` + handle verification, caller-SID, SDDL/SID-based ACL verification (`win32_acl.py`), fail-closed edition guard, trusted publishing + attestations. Gaps: SEC-06 escape injection, cache staleness, unsigned self-elevating binary. | SEC-06, CACHE-01, MAT-04 |
-| **Maintainability** | 3.0 | **3.5** | Stale Dockerfile gone; contracts directory; fewer registries; architecture doc. Still: placeholder manifest on `main`, review docs drifting, string-typed error classification persists under a new type, tests organised by remediation round. | MAINT-01…04 |
-| **Maturity** | 2.0 | **2.5** | Attestations, local-publish removed, real-Windows verification evidence started in `docs/verify-matrix.md`, API-stability tests. But 37 releases in 7 days, PR CI is Linux-only, unsigned, single maintainer. | MAT-01, MAT-02, MAT-03 |
-
----
-
-## 1. Status of pass-3 findings (verified)
-
-| ID | Finding | Status | Evidence |
-| --- | --- | --- | --- |
-| TRX-01 | WSL rollback not idempotent | **FIXED** | repro3: one conflict only; `compensation.py:207-222` uses `probe_distro_wsl_conf` + "already at pre-state" rule |
-| TRX-02 | Interrupted recovery skipped in-flight ops | **FIXED** | `compensation.py:313` includes `APPLYING` **and** `ROLLING_BACK` |
-| TRX-03 | Substring error classification | **PARTIAL** | `CompensationIssue` exists (`:244`) but `kind` is still derived by `err.startswith("restore_conflict ")` (`:260`) → MAINT-05 |
-| SEC-01 | Reparse rule too coarse | **FIXED (design)** | `get_reparse_tag` / `ALLOWED_REPARSE_TAGS` — `NEEDS-WINDOWS` to confirm with junctioned profile, OneDrive placeholder, Store Python |
-| SEC-02 | Env sanitiser ineffective / hidden window | **PARTIAL** | doc/comment now honest (`elevation.py:40-45`); `-I` used only for non-launcher targets (`:114`); `SW_HIDE` + buffered output remain (`elevation.py:221`) |
-| SEC-03 | `publish-local` bypassed CI | **FIXED** | `Makefile:58` (`publish-local`) is a dry-run verification only |
-| SEC-04 | Edition guard fail-open | **FIXED** | mutant M11 killed; `params.py:124-139` |
-| SEC-05 | Surviving mutants | **FIXED for M1/M4/M7/M8** (all killed) — but see TST-01 for siblings |
-| ARCH-01 | God-interface | **PARTIAL** | 11 capability ports in `backends/ports.py`, adapters narrowed; `SystemBackend` still 43 methods; `engine` (24 refs), `cli` (16), `wsl` (16) still take the whole backend; `NativeSystemBackend(NativeAppMixin, NativeSecMixin)` |
-| ARCH-02 | Four parallel registries | **FIXED** | `operations/registry_spec.py` (`OPERATION_KIND_SPECS`), `TypeError` on unregistered snapshot |
-| ARCH-03 | Param if-chain | **FIXED** | `tweaks/param_schemas.py` + `ProfileValidationError` |
-| ARCH-04 | Layering / raw subprocess | **FIXED** | `state→tweaks` removed (`models/aliases.py`); hyperv/wsl-audit/registry_wsl via `run_subprocess_bounded` |
-| ARCH-06 | Fakes without parity contract | **PARTIAL** | `tests/contracts/test_system_backend_contract.py` exists; runs against Native only on Windows, locally (MAT-03) |
-| MAINT-01 | Stale `Dockerfile.windows` | **FIXED** | removed |
-| MAINT-02 | Placeholder installer hash on `main` | **OPEN** | `InstallerSha256: PENDING_RELEASE_BUILD_SHA256` (0.26.0) |
-| MAINT-03 | Contradictory agent docs | **OPEN** | `TODO.md` is a maintainer self-review titled **v0.24.0**; repo is 0.26.0 |
-| MAINT-04 | Test organisation | **OPEN** | 30+ files, names by remediation round |
-| MAT-01 | Release cadence | **WORSE** | 0.18.0 → 0.26.0 = 9 releases in ~2 days (37 total since 2026-11-14) |
-| MAT-03 | No Windows PR CI | **OPEN** | `test` matrix is `os: [ubuntu-latest]` × `3.15`, `3.15t` |
-| MAT-04 | Provenance / signing | **PARTIAL** | `actions/attest-build-provenance` added for PyPI dist and winget zip; Authenticode still absent (documented in `docs/winget-releasing.md:40`) |
-| MAT-05 | Verification evidence | **PARTIAL** | `docs/verify-matrix.md` now includes a raw `od -c` capture for R-07; other rows still assertions |
+Do not interpret the absence of P0 findings as a security certification. This review did not execute the application on Windows or audit every tweak's actual registry/OS semantics.
 
 ---
 
-## 2. New findings
+# 1. P1 — High priority
 
-### CACHE-01 · P1 · `CODE` — Performance caches have no expiry, are bypassed in tests, and feed the precondition check
-- **Where:** `backends/system_native_apps.py:19-21,86-131,202-221` (winget list, VS Code extensions), `backends/system_native.py:85-87,315-331,533-542` (git global config, WSL env: `wsl --version`, `wsl --list`; `_has_custom_popen` branches at `:315` and `:534`), consumed by `engine/phases.py:169` ("Precondition drift detected before apply") via `collect_pre_apply_snapshots`/`compute_dry_run_fingerprints`, and by `tui.py:217,245` ("Refresh" calls `evaluate_profile` on the same backend).
-- **Problem:**
-  - Caches live for the whole backend lifetime and are invalidated only by this backend's own writes. If the user (or another tool) installs/uninstalls a package, edits global git config, or adds/removes a WSL distro, the next `evaluate_profile`, the **pre-apply drift fingerprint**, and the TUI "Refresh" still see the old state. The precondition-drift guard was added precisely to catch external changes between plan and apply — for these four kinds it compares cached against cached.
-  - Production-only branches: `cached_wsl = None if self._has_custom_popen else self._wsl_env_cache` and `not self._has_custom_popen and cache_key in self._git_global_config_cache`. Any test that injects a fake `Popen` **never exercises the cache path**, so cache bugs are structurally invisible to the suite.
-  - `getattr(self, "_vscode_extensions_cache", None)` re-introduces duck-typing the project removed elsewhere; plain `dict`s are mutated without a lock on a backend now advertised as free-threaded (`3.15t`).
-- **Fix:** add `SystemBackend.refresh()`/`invalidate_all()` and call it at the start of `evaluate_profile`, before the pre-apply precondition check, and on TUI refresh; add a short TTL (e.g. 30 s) as a safety net; make the caches an injectable collaborator (`InventoryCache`) so tests can enable them with a fake runner — remove `_has_custom_popen` branching; guard compound check-then-set with a lock.
-- **Done when:** test: install a package out-of-band between `plan` and `apply` ⇒ apply aborts with precondition drift; TUI refresh sees an externally added WSL distro; a test runs with caching **enabled** and a fake runner.
+## ARCH-01 — Finish the capability-port migration; stop injecting the god protocol everywhere
 
-### SEC-06 · P2 · `REPRODUCED` — Terminal escape sequences from system data reach the console unfiltered
-- **Where:** `cli/render.py:144-146` (`escape_md_cell` only escapes `|` and newlines), used for `before_state → after_state` and detail text at `render.py:185-197`; new coloured output (`render.py:19-70`) now makes ESC a normal part of the stream, so injected sequences are indistinguishable from legitimate colour.
-- **Repro:** `escape_md_cell("val\x1b[2J\x1b]0;pwned\x07 | x")` → `'val\x1b[2J\x1b]0;pwned\x07 \\| x'` (ESC/OSC survive). Before/after values come from registry strings, file/WSL content, winget output, and subprocess stderr — all writable by other local code or by a repo-controlled `.wslconfig`/git config.
-- **Impact:** a malicious value can clear/overwrite the table, change the window title, or print a forged `✅ Sync Status: IN SYNC` line in a tool whose purpose is to report security posture.
-- **Fix:** one `sanitize_for_terminal(text)` that strips/escapes C0/C1 control characters (keep `\t`), applied to **every** externally sourced string before printing (render, error messages, `--debug` log text format); keep JSON output as is (JSON escapes control chars).
-- **Done when:** test + hypothesis fuzz: no `\x1b`, `\x07`, `\x9b` or other control characters appear in rendered output for arbitrary input strings.
+**Evidence**
+- `src/winbearable/backends/system_protocol.py`: `SystemBackend` remains a broad protocol (approximately 200 lines) spanning environment detection, service/task/feature changes, firewall, audit policy, ACLs, packages, process management, WSL, Git, power, and cache invalidation.
+- Narrow ports exist in `src/winbearable/backends/ports.py` (`EnvironmentPort`, `ServicePort`, `TaskPort`, `FeaturePort`, `FirewallPort`, `AuditPolicyPort`, `AclPort`, `PackagePort`, `ProcessAndOneDrivePort`, `WslPort`, `GitAndPowerPort`).
+- `engine/*`, `wsl/*`, `cli/*`, and `audit/*` continue to annotate and accept `SystemBackend` directly. A repository search shows this coupling remains widespread.
+- `tests/test_catalog_lint.py` checks that selected non-registry adapter files avoid `SystemBackend`; it does not enforce capability-port usage throughout the application layers.
 
-### SEM-01 · P2 · `CODE` — `in_sync` can be `true` when nothing was actually evaluated
-- **Where:** `cli/render.py:72-118` (`compute_sync_state`), JSON fields `in_sync`/`sync_reasons`.
-- **Problem:** statuses `UNSUPPORTED_BUILD`, `UNSUPPORTED_EDITION`, `SKIPPED_MANAGED` count as "in sync" (reported only in a human suffix). A profile where every tweak is unsupported or managed yields `IN SYNC` / `"in_sync": true` — a false assurance for automation consuming `--json`.
-- **Fix:** add `applicable`, `skipped`, `skipped_reasons` to the JSON; define `in_sync` as `applicable > 0 and no drift/error/blocked`, and emit `null`/`false` plus a reason when `applicable == 0`. Document in the JSON schema.
-- **Done when:** test: all-unsupported profile ⇒ `in_sync` is not `true`.
+**Problem**
+The project has introduced Interface Segregation as a documented architectural rule without completing it at the composition boundary. Most high-level services still receive an object with far more authority than they need. This increases mock/fake complexity, makes accidental coupling easy, and weakens the claimed layered architecture. A protocol split that is not reflected in constructor/function signatures is mostly documentation.
 
-### TST-01 · P1 · `MUTATED` — Mutation fixes target the listed mutants, not the control classes
-Last pass's four survivors are now killed by a test named `test_surviving_mutant_controls_*`, but a **sibling** survives: dropping the `.wslconfig` `restore_conflict` check (`engine/compensation.py:181-190`, check at `:187`, mutant **M10**) breaks no test, even though the equivalent WSL-distro check (M7) is now pinned. Result: 12/13 killed (92 %).
-- **Fix:** add the missing test (apply with a `.wslconfig`, modify it, roll back ⇒ `restore_conflict wslconfig`), then adopt `mutmut`/`cosmic-ray` on `operations/path_policy.py`, `uac/`, `engine/compensation.py`, `engine/rollback.py`, `state.py`, `backends/win32_acl.py` with a CI gate (≥ 90 % on these modules) so the next surviving mutant is found by tooling, not by a reviewer.
-- **Done when:** M10 killed; mutation score reported in CI for the listed modules.
+**Implementation**
+1. Build a capability map for every function/class in `engine`, `wsl`, `audit`, and `cli`: list the exact backend operations it invokes.
+2. Change signatures to the smallest required port or a narrowly composed use-case dependency. Avoid replacing one mega-protocol with a new aggregate protocol that simply renames it.
+3. Keep orchestration composition in one application/bootstrap layer; pass only the required capability to domain/application services.
+4. Remove `SystemBackend` imports from modules that do not need the full protocol.
+5. Add an AST architecture test that fails if `engine`, `wsl`, or `audit` imports/types against `SystemBackend`, except for explicitly documented composition boundaries.
+6. Retain one aggregate implementation type for native and in-memory backends if useful, but do not make consumers depend on it.
 
-### TST-02 · P2 · `CODE` — Crash-consistency harness has a weak oracle and narrow coverage
-- **Where:** `tests/test_crash_consistency_harness.py:35-112`.
-- **Problems:** crashes are injected only **after** `upsert_run` journal checkpoints (never between "mutation done" and "journal flushed", the actually dangerous window); a single registry-only tweak (`explorer.show_file_extensions`) although the docstring claims "OS operation families"; success is accepted as `ROLLED_BACK` **or** `PARTIALLY_ROLLED_BACK` and the test never compares registry/system state with the pre-apply baseline.
-- **Fix:** crash points inside each adapter (after snapshot, after mutate, before verify, before journal flush) across every operation kind via `OPERATION_KIND_SPECS`; assert `registry == baseline` and `system == baseline` after recovery; treat `PARTIALLY_ROLLED_BACK` as failure unless a conflict was injected.
-- **Done when:** parametrised over all registered kinds × crash points; baseline equality asserted.
+**Acceptance criteria**
+- Core engine use cases declare only required capabilities.
+- A focused fake can implement one capability without implementing unrelated package, ACL, process, and WSL methods.
+- Architecture tests enforce the dependency direction and allowed exceptions.
+- `mypy --strict` passes without `Any` or broad casts introduced to bypass the migration.
 
-### ENV-01 · P2 · `NEEDS-VERIFY` — Python ≥ 3.15 only, and property tests did not run for me
-`requires-python = ">=3.15"`; CI matrix `3.15` and `3.15t`. On my interpreter (CPython 3.15.0b4, GIL build) `hypothesis 6.170.15` installed an `abi3t` native module that cannot be imported (`ModuleNotFoundError: hypothesis._native`), so pytest aborts at start-up unless I disable the plugin. This may be an artefact of the beta I used, but it shows the lock/ABI selection for free-threaded vs GIL builds is brittle. I therefore could not run `tests/test_property_invariants.py` (all other 240 tests ran).
-- **Fix:** add a CI job on a **released** 3.15 GIL build that runs from a clean `uv sync --frozen` and prints the selected hypothesis wheel tag; document supported interpreters (GIL/FT) in `README`/`docs/architecture.md`; consider relaxing to `>=3.14` for PyPI users if no 3.15-only syntax is required beyond PEP 758.
-- **Done when:** CI shows property tests green on both builds; support statement published.
+## ARCH-02 — Make port conformance tests actually verify the port contracts
 
-### MAINT-05 · P2 · `CODE` — Error classification is still string-typed under a typed wrapper
-`engine/compensation.py:260` builds `CompensationIssue.kind` from `err.startswith("restore_conflict ")`; adapters still produce `"restore_conflict …"` strings. Make adapters/compensation raise or return typed issues (`ConflictIssue(target)`, `FailureIssue(target, cause)`) and delete the prefix convention.
-- **Done when:** `grep -rn 'startswith("restore_conflict' src` is empty.
+**Evidence**
+- `src/winbearable/backends/ports.py::assert_port_conformance()` manually checks only 11 method names.
+- Several protocol methods are not checked, including write and backup/restore methods. The function does not validate each declared port as a whole.
+- `tests/contracts/test_system_backend_contract.py` invokes this helper, so its name and docstring imply broader parity than the helper establishes.
+
+**Problem**
+A backend can pass the current runtime conformance check while missing methods that a consumer later calls. This creates false confidence in the native/fake parity boundary and allows protocol drift.
+
+**Implementation**
+1. Replace the hand-maintained partial method tuple with explicit per-port contract checks, or rely on static structural typing and add behavioral contract suites per port.
+2. Include read, write, backup, restore, and error/outcome behavior for every port.
+3. Run the same behavioral contract suite against `InMemorySystemBackend` on all platforms and `NativeSystemBackend` on Windows where safe.
+4. Make unsupported operations explicit; do not silently treat a missing method as a false/empty result.
+
+**Acceptance criteria**
+- Removing any required method from a fake causes a focused contract failure.
+- Every declared port has a corresponding contract test or an explicit reason why it is compile-time-only.
+- Contract test names and documentation accurately describe the coverage they provide.
+
+## ARCH-03 — Remove `Any` and private-backend reach-through from composed native services
+
+**Evidence**
+- `src/winbearable/backends/system_native_apps.py::NativeAppService.__init__()` accepts `backend: Any`.
+- `NativeAppService` reaches through `_backend` for private members such as `_platform`, `_setup_candidates`, `_inventory_cache`, `_run_native_cmd`, `_resolve_winget_exe`, `_resolve_code_cmd`, and `_check_is_admin`.
+- `NativeSystemBackend` constructs the service with `NativeAppService(self)` and similarly composes `NativeSecService`.
+
+**Problem**
+This is composition in file layout, but not in dependency design. The service is coupled to the concrete backend's private implementation and cannot be independently tested or reused without recreating that object shape. `Any` suppresses precisely the errors the port refactor is meant to prevent.
+
+**Implementation**
+1. Define a private, narrow protocol for the collaborators `NativeAppService` actually needs, or inject explicit callables/collaborators.
+2. Pass `InventoryCache`, command runner, executable resolvers, platform identity, and outcome storage explicitly where appropriate.
+3. Avoid exposing private methods solely to satisfy a helper service.
+4. Apply the same review to `NativeSecService` and any other composed service.
+5. Keep the public backend facade responsible for delegation, not hidden service-locator behavior.
+
+**Acceptance criteria**
+- No `Any`-typed backend dependency remains in native service constructors.
+- Native service unit tests can instantiate services with small typed fakes.
+- No helper service reaches into another object's private attributes outside a documented, tightly scoped internal boundary.
+
+## MAT-01 — Expand Windows CI beyond the small read-only integration subset
+
+**Evidence**
+- `.github/workflows/ci.yml` has a `windows-contracts` job on `windows-latest`.
+- That job runs `tests/contracts` and `tests/test_windows_integration.py`, not the complete test suite.
+- The main `test` matrix remains Ubuntu-only (`3.15` and `3.15t`).
+- `docs/verify-matrix.md` identifies the documented host verification as Windows 11 Build 26300 on version `0.22.0`, while the submitted source is `0.27.0`.
+
+**Problem**
+The new Windows job is a real improvement, but it does not establish that all Windows-specific branches, ACL operations, UAC paths, registry views, atomic file replacement, process handling, and backend adapters remain correct on every PR. The verification document's headline evidence is also several versions behind the reviewed package. A small read-only suite is not equivalent to validating the platform-specific application.
+
+**Implementation**
+1. Run the full safe unit/contract suite on `windows-latest` in addition to Linux.
+2. Separate tests into safe read-only, disposable HKCU/temp-directory mutation, and destructive/admin-required categories.
+3. Run safe and disposable categories in PR CI. Keep genuinely destructive/admin-required checks behind a separately documented manual or disposable-VM workflow.
+4. Ensure the Windows job is a required dependency of release jobs, not merely an optional side check.
+5. Update `docs/verify-matrix.md` with the exact tested commit/version, OS build, edition, Python build, command, and result. Mark older evidence as historical.
+
+**Acceptance criteria**
+- Every PR executes a meaningful Windows test suite.
+- Release cannot proceed if required Windows tests are skipped or fail.
+- Verification evidence identifies the reviewed commit/version and distinguishes CI from maintainer-local tests.
+
+## TRX-01 — Expand crash-consistency testing to every registered operation family
+
+**Evidence**
+- `tests/engine/test_crash_consistency_harness.py` now tests journal checkpoints and crashes between mutation and journal flush. This is a substantial improvement over the earlier checkpoint-only harness.
+- The mutation-before-journal-flush test currently parameterizes four representative operations: registry, Git config, and scheduled task examples (plus the selected registry cases), rather than every registered operation kind in `operations/registry_spec.py` / `OPERATION_KIND_SPECS`.
+- The checkpoint harness uses one primary registry tweak.
+
+**Problem**
+The transaction engine claims general rollback/recovery across many OS mutation families. Failure semantics differ for ACLs, firewall policy, auditpol, event logs, packages, WSL files, service/task/feature changes, process termination, and file replacement. Testing four examples does not establish the common lifecycle for all adapters. A successful rollback state alone is not enough; the external state must equal the expected baseline or a clearly recorded conflict must explain why it cannot.
+
+**Implementation**
+1. Derive the crash test matrix from the canonical operation registry rather than maintaining a hand-written list.
+2. For each reversible operation kind, inject failure at: after snapshot persistence, after mutation, before verification, after verification but before journal flush, and during compensation.
+3. Assert exact pre-state restoration for the in-memory implementation, including non-registry state and backup artifacts.
+4. For intentionally non-reversible operations, assert that the journal marks the limitation before mutation and that recovery never claims full rollback.
+5. Add real-Windows disposable tests for the highest-risk adapter families (ACL, file replacement, registry, WSL config, firewall/audit policy where safe).
+6. Distinguish expected conflict outcomes from unexplained partial rollback; do not accept `PARTIALLY_ROLLED_BACK` as generic test success.
+
+**Acceptance criteria**
+- Every registered operation kind is either covered or explicitly classified as non-reversible/not safely automatable.
+- Every crash point has a state oracle, not just a transaction-state assertion.
+- Recovery is idempotent and preserves out-of-band edits.
 
 ---
 
-## 3. Open items carried over (unchanged priority)
+# 2. P2 — Important improvements
 
-- **ARCH-01 (P1, remaining):** thread the ports through `engine`, `wsl`, `cli`, `audit` (they still annotate `SystemBackend`), remove mixin inheritance in `NativeSystemBackend`, and shrink `InMemorySystemBackend` accordingly.
-- **MAT-03 (P1):** add a **read-only** `windows-latest` PR job running `tests/contracts` + `tests/test_windows_integration.py` (the maintainer already runs them locally per `docs/verify-matrix.md` — turn that into a CI artifact). "Paid runner" rationale in `AGENTS.md` doesn't apply to public repos.
-- **MAT-04 (P1):** Authenticode/Trusted Signing for `wb.exe` (self-elevating binary currently shows "Unknown publisher"); attestations are in place, so add `gh attestation verify` instructions to the README.
-- **MAT-01 (P1):** adopt release trains: `next`/pre-release channel (`0.27.0rc1`), stable cut at most weekly; publish `docs/support-policy.md` (state/JSON/CLI compatibility, supported Windows builds, supported Python).
-- **MAINT-02 (P2):** stop committing manifests with placeholder hashes: generate them in the release job, or add a test that distinguishes "release-pending" from "released".
-- **MAINT-03 (P2):** replace the hand-written `TODO.md` (v0.24.0) with the newest review; add a test that its header version equals `__version__`; archive old reviews under `docs/reviews/`.
-- **MAINT-04 (P2):** organise `tests/` by unit (`engine/`, `operations/`, `uac/`, `backends/`), share fakes in `tests/fakes/`.
-- **SEC-02 (P2):** show the elevated console (or stream output) instead of `SW_HIDE` + buffer; use `-I` for launcher targets where possible.
-- **MAT-02 (P2):** single supported Windows build (≥ 26300): state it in PyPI/winget descriptions and make refusal messages actionable.
-- **N-03 (P2, from pass 2):** re-verify that an explicit `wslconfig_path` + `PermissionError` cannot strand an `APPLYING` run after the phases refactor (`engine/phases.py`); add the test.
+## SEC-01 — Add an explicit trust policy for self-elevation targets
+
+**Evidence**
+- `src/winbearable/uac/elevation.py::_validate_elevation_executable()` resolves the executable and rejects symlinks/reparse points in the target and its ancestors.
+- `resolve_elevation_target()` prefers a `wb.exe`/`winbearable.exe` launcher where available; launcher targets do not receive the `-I -m winbearable` argument path used for Python interpreter launches.
+- `docs/uac-security-review.md` correctly notes that UAC is not a security boundary against already-compromised same-user code.
+
+**Problem**
+Reparse-point rejection protects against one class of path substitution, but it does not establish whether the selected launcher or its containing directory is writable by an unprivileged principal. A self-elevating executable's trust assumptions should be explicit, especially for virtual-environment or user-installed launchers. This is not asserted as a standalone privilege-escalation vulnerability: the user still receives a UAC consent prompt, and same-user compromise is already outside the UAC boundary. The gap is that the executable trust model is not expressed as a verifiable policy.
+
+**Implementation**
+1. Document which launch targets are supported: installed signed binary, protected package environment, or developer-managed interpreter.
+2. Determine whether the target and parent directories are writable by untrusted principals; reject or clearly warn for unsafe launch contexts where appropriate.
+3. Record the resolved executable path and trust decision in debug diagnostics without leaking sensitive data.
+4. Add Windows tests for a protected install path, user-writable virtualenv path, reparse target, and replaced executable between resolution and launch where a deterministic test seam is possible.
+5. Keep the UAC threat-model statement explicit: elevation is consent-based and does not defend against malicious code already running as the caller.
+
+**Acceptance criteria**
+- The launcher trust policy is documented and testable.
+- Unsafe contexts fail closed or produce a clearly defined, intentional warning policy.
+- No unsupported claim that UAC protects against same-user malware appears in documentation.
+
+## SEC-02 — Complete Authenticode signing for the Windows executable
+
+**Evidence**
+- CI produces build provenance attestations for release artifacts.
+- `docs/winget-releasing.md` documents that the self-elevating executable is not Authenticode-signed / may show an unknown publisher.
+
+**Problem**
+Build provenance helps verify where an artifact came from; it does not provide the Windows publisher identity displayed by UAC. For software that intentionally requests administrator privileges, an unknown publisher is a significant trust and adoption weakness.
+
+**Implementation**
+1. Define a protected signing process using a managed signing service or hardware-backed certificate; do not store a private signing key in repository secrets as a raw exportable file.
+2. Sign the final executable after packaging and before hashing/attestation.
+3. Verify the Authenticode signature, publisher subject, timestamp, and digest in CI.
+4. Publish the certificate fingerprint and verification instructions.
+5. Keep signing optional for local developer builds but mandatory for official release artifacts once provisioned.
+
+**Acceptance criteria**
+- Official release `wb.exe` has a valid, timestamped Authenticode signature.
+- CI fails if signature verification or publisher identity validation fails.
+- SHA256 and provenance attestations refer to the signed final artifact.
+
+## TEST-01 — Add concurrency tests for cache invalidation and backend state
+
+**Evidence**
+- `InventoryCache` is thread-safe at the individual get/set/invalidate operation level.
+- `NativeSystemBackend` stores `command_history` as a shared mutable list and uses a thread-local `last_outcome`.
+- Native app and system services share cache state through the backend.
+- CI explicitly tests a free-threaded Python `3.15t` build.
+
+**Problem**
+A thread-safe cache does not automatically make compound read/modify/write workflows or the backend facade thread-safe. `command_history` writes, cache invalidation interleaved with reads, and service outcome propagation deserve explicit concurrency contracts—particularly because the project deliberately tests a free-threaded interpreter.
+
+**Implementation**
+1. Define whether one backend instance is safe for concurrent calls. If not, document and enforce single-thread ownership.
+2. If concurrent use is supported, protect shared mutable diagnostic state and compound cache operations.
+3. Add deterministic concurrent tests for cache invalidation racing with lookup, parallel command calls, and `last_outcome` isolation.
+4. Ensure a thread's operation outcome cannot be overwritten by another thread before the caller consumes it.
+5. Avoid locking around long-running subprocess execution unless required for a specific shared resource.
+
+**Acceptance criteria**
+- Concurrency semantics are documented.
+- Tests pass on both GIL and free-threaded CI jobs.
+- No cross-thread outcome contamination or corrupted command history is observed.
+
+## MAINT-01 — Reduce the size and responsibility count of orchestration modules
+
+**Evidence**
+- `engine/phases.py` is approximately 475 lines.
+- `engine/compensation.py` is approximately 399 lines.
+- `engine/evaluate.py` is approximately 330 lines.
+- `cli/handlers.py` and `cli/handlers_tools.py` are approximately 594 and 551 lines.
+
+**Problem**
+A module being large is not automatically a defect, and splitting solely to satisfy line counts is discouraged. However, these modules combine multiple workflows and policy decisions. As the number of operations and rollback rules grows, large orchestration modules become difficult to review for ordering, exception handling, and transaction invariants.
+
+**Implementation**
+1. Map each module's public responsibilities and identify independent use cases, not arbitrary line ranges.
+2. Separate transaction orchestration from phase-specific policy and output serialization.
+3. Separate CLI command parsing/dispatch from use-case execution and rendering.
+4. Keep transaction invariants in one explicit coordinator; do not distribute state transitions across many helper modules.
+5. Extract only where dependencies become narrower and tests become more focused.
+
+**Acceptance criteria**
+- Each extracted module has one clearly documented responsibility.
+- No circular imports or new global registries are introduced.
+- Public CLI/API behavior remains stable under existing contract tests.
+- A reviewer can trace apply, rollback, and recovery ordering without jumping across unrelated concerns.
+
+## MAINT-02 — Replace `Any`/string conventions with typed outcomes end-to-end
+
+**Evidence**
+- `CompensationIssue` exists, but `engine/compensation.py` still classifies some issue kinds from string prefixes such as `restore_conflict `.
+- Native app service composition accepts `Any` (ARCH-03).
+
+**Problem**
+Introducing typed wrappers while continuing to encode semantic state in strings leaves the system vulnerable to typo-driven classification bugs. A message is for humans; it should not be the source of truth for control flow.
+
+**Implementation**
+1. Return typed compensation results from adapters: conflict, unsupported, failed, and restored states with structured target identity and cause.
+2. Remove prefix parsing and string-based issue classification.
+3. Keep display messages as a derived field, never as the discriminant.
+4. Remove `Any` from internal service boundaries where a concrete protocol can be defined.
+
+**Acceptance criteria**
+- No `startswith("restore_conflict")` or equivalent message parsing remains in control flow.
+- Tests assert typed issue kinds and structured target identities.
+- Human-readable messages can change without changing program behavior.
+
+## MAT-02 — Define release cadence and compatibility policy
+
+**Evidence**
+- The changelog and existing review history show a high frequency of version increments over short periods.
+- The project exposes multiple compatibility surfaces: Python runtime, CLI commands, JSON output, profile schema, state schema, Windows build/edition floor, and Winget package manifests.
+- `pyproject.toml` currently requires Python `>=3.15` and advertises Beta status.
+
+**Problem**
+Fast iteration is acceptable for a young project, but users need to know which versions are supported and which interfaces are stable. Without a release policy, a version number does not communicate expected compatibility or maintenance commitment.
+
+**Implementation**
+1. Publish a concise support policy for Python versions, Windows builds/editions, supported install methods, and support window.
+2. Define compatibility guarantees separately for CLI flags, JSON schema, profile schema, state schema, and Python import API.
+3. Define stable vs prerelease release rules and minimum regression gates for each.
+4. Ensure changelog entries distinguish breaking changes, migrations, and behavior changes.
+
+**Acceptance criteria**
+- `docs/support-policy.md` is authoritative and linked from README/PyPI metadata.
+- Every public compatibility surface has a stated policy.
+- Release workflow checks the policy-relevant version/schema changes.
+
+## MAT-03 — Make the verification matrix a current evidence record, not a historical scrapbook
+
+**Evidence**
+- `docs/verify-matrix.md` headline host verification records version `0.22.0`; this archive is `0.27.0`.
+- The document includes useful command output, but its first-level summary does not establish that the current reviewed version received the same live-host verification.
+
+**Problem**
+A historical test result remains useful, but it cannot be presented as current evidence for later versions without a clear statement of what changed and what was revalidated. This matters especially for native Windows APIs and recovery behavior.
+
+**Implementation**
+1. Add a per-release verification record containing commit SHA, package version, Windows build/edition, Python version/build, test command, result, and operator/date.
+2. Mark older host results as historical and link them to the version they actually validate.
+3. Generate CI-backed rows from uploaded workflow artifacts where possible.
+4. For manual-only checks, include exact reproduction commands and distinguish observed output from expected output.
+
+**Acceptance criteria**
+- No old version's result is presented as verification of `0.27.0`.
+- Each claimed Windows-specific verification is traceable to a version/commit and command output.
+
+## MAT-04 — Establish an explicit risk and support boundary for the tweak catalog
+
+**Evidence**
+- `AGENTS.md` describes a catalog freeze and a limited supported Windows build/edition floor.
+- The source tree contains a large tweak catalog distributed across category modules.
+- This review did not independently validate the registry/OS semantics of every tweak.
+
+**Problem**
+The core product value is changing Windows configuration. A catalog can be structurally valid and still contain semantically incorrect, stale, or build-sensitive settings. Metadata lint and unit tests cannot fully establish that each tweak does what its description claims on supported Windows builds.
+
+**Implementation**
+1. Require each tweak to have a documented source of truth, supported build range, verification method, expected before/after state, rollback semantics, and risk rationale.
+2. Add a review cadence for high-risk and policy-sensitive tweaks.
+3. Track live verification per tweak or per shared behavior family, with evidence versioned against Windows builds.
+4. Add tests that detect duplicate/conflicting registry paths and contradictory operations across enabled profiles.
+5. Treat unknown or unverified state as unknown; do not convert failed inspection into an assumed default.
+
+**Acceptance criteria**
+- Every catalog entry has complete provenance and verification metadata.
+- High-risk entries have real-Windows evidence or are explicitly marked unverified/experimental.
+- Profile conflict detection catches contradictory operations targeting the same resource.
 
 ---
 
-## 4. Mutation results (13 mutants, full suite after each)
+# 3. P3 — Governance and repository hygiene
 
-| # | Mutant | Result |
-| --- | --- | --- |
-| M1 | `path_policy`: drop forbidden-system-roots rejection | killed |
-| M2 | `path_policy`: drop user-profile allowlist | killed |
-| M3 | `uac/output`: drop `O_EXCL` | killed |
-| M4 | `uac/output`: drop `wb-uac-` name check | killed |
-| M5 | `uac/output`: drop temp containment | killed |
-| M6 | `rollback`: allow rollback with incomplete runs | killed |
-| M7 | `compensation`: ignore WSL distro `restore_conflict` | killed |
-| M8 | `params`: IoT/LTSC substring rules removed | killed |
-| M9 | `compensation`: skip WSL distro GUID identity check | killed |
-| **M10** | `compensation`: ignore `.wslconfig` `restore_conflict` | **SURVIVED** |
-| M11 | `params`: unknown edition fails open | killed |
-| M12 | `state`: prune protects no incomplete-run backups | killed |
-| M13 | `handlers`: remove cross-SID refusal | killed |
+## GOV-01 — Reconcile the existing `TODO.md` with the current implementation
 
-Kill rate 12/13 (92 %), up from 5/9 (56 %). Property tests excluded (ENV-01).
+**Evidence**
+- The current `TODO.md` is a pass-4 review that still lists `CACHE-01`, `SEC-06`, and `SEM-01` as open findings.
+- Current code now invalidates inventory at `evaluate_profile()` (`engine/evaluate.py`) and before apply snapshot collection (`engine/phases.py`); tests cover out-of-band package changes (`tests/backends/test_perf_security_ports.py`).
+- Current CLI output uses `sanitize_for_terminal()` and `build_sync_payload()` computes `in_sync` with an applicable-count guard.
+- The `.wslconfig` external-edit conflict test now exists (`tests/operations/test_compensation_reparse_and_ports.py`).
+- The old review describes the prior native backend composition as mixins, while current `NativeSystemBackend` composes `NativeAppService` and `NativeSecService`.
+
+**Problem**
+The review ledger is not a reliable representation of current work. It mixes resolved findings with remaining work and includes historical architecture descriptions. Agents following it may re-implement fixes, waste effort, or make unsafe changes to already-correct behavior.
+
+**Implementation**
+1. Reproduce each open finding against the current commit before carrying it forward.
+2. Mark findings `FIXED`, `PARTIAL`, `OPEN`, `WONTFIX`, or `NEEDS-WINDOWS`, with exact source/test evidence.
+3. Remove obsolete descriptions (for example, mixin architecture where it no longer applies).
+4. Move completed historical review material into `docs/reviews/` and keep the active TODO concise.
+5. Add a lightweight check that the TODO header version matches `const.__version__`, but do not use that check as a substitute for correctness review.
+
+**Acceptance criteria**
+- Every open TODO item reproduces on the reviewed commit or is clearly marked as an unverified hypothesis.
+- No resolved item remains listed as open.
+- Historical evidence is retained without being confused with current status.
+
+## GOV-02 — Make agent instructions consistent with actual project gates
+
+**Evidence**
+- `AGENTS.md` specifies a large set of development and review requirements.
+- CI has concrete jobs for lint, tests, mutation checks, Windows contracts, and release gates.
+
+**Problem**
+Agent instructions become counterproductive when they prescribe checks that are not available in CI, or when CI silently provides a weaker guarantee than the instructions imply. The instructions should be executable policy, not aspirational prose.
+
+**Implementation**
+1. Map each mandatory instruction to a Make target, CI job, or explicit manual verification step.
+2. Remove duplicate rules and contradictory guidance.
+3. State which checks are required before merge and which are release-only/manual.
+4. Keep agent output requirements focused on reproducibility, tests, security, and reviewability rather than process ceremony.
+
+**Acceptance criteria**
+- Every mandatory automated instruction has a runnable command and CI equivalent.
+- Manual-only requirements are labeled and include exact evidence expectations.
 
 ---
 
-## 5. Suggested order
+# 4. Verified improvements — do not regress
 
-1. **CACHE-01**, **SEC-06** (both cheap, both about trusting the output)
-2. **TST-01** (M10 + mutation tooling), **TST-02**
-3. SEM-01, MAINT-05, N-03
-4. ARCH-01 (finish the port migration)
-5. **MAT-03**, MAT-04, MAT-01, MAINT-02/03, ENV-01
-6. SEC-02, MAT-02, MAINT-04
+The following improvements are visible in the submitted source and should be preserved:
 
-## 6. Repro / test sketches
+- `sanitize_for_terminal()` is applied to human-readable log output and CLI table cell rendering; the old terminal escape injection finding is no longer open on the inspected paths.
+- `build_sync_payload()` prevents an all-skipped profile from being reported as in sync with zero applicable tweaks.
+- `evaluate_profile()` invalidates inventory before evaluation, and apply invalidates again before snapshot/precondition collection; the previous cache finding is no longer accurate as written.
+- `.wslconfig` compensation checks the post-apply digest and detects external edits; a regression test exists.
+- The subprocess runner has a bounded communication/truncation path rather than truncating only after unbounded `communicate()` output accumulation.
+- The Windows workflow now runs contracts and the safe Windows integration test file; the previous claim that Windows CI is entirely absent is obsolete.
+- The crash-consistency harness now includes mutation-before-journal-flush cases; retain and expand this work rather than reverting to checkpoint-only testing.
+- Native system services use composition (`NativeAppService`, `NativeSecService`) rather than the older mixin description in the prior review.
 
-SEC-06:
-```python
-def test_escape_md_cell_strips_terminal_controls():
-    from winbearable.cli.render import escape_md_cell
+---
 
-    out = escape_md_cell("a\x1b[2J\x1b]0;pwned\x07\x9b31m | b")
-    assert not any(
-        ord(c) < 32 and c not in "\t" or 0x7F <= ord(c) <= 0x9F for c in out
-    )  # currently ESC, BEL, CSI survive
-```
+# 5. Verification limitations for this review
 
-CACHE-01:
-```python
-def test_precondition_check_sees_out_of_band_package_install(tmp_path):
-    # arrange NativeSystemBackend with a fake runner and caching ENABLED
-    # 1) plan with a profile containing apps.install_vscode (not installed)
-    # 2) fake runner now reports the package installed (out-of-band)
-    # 3) apply(expected_fingerprints=plan_fingerprints) must raise "Precondition drift detected"
-    ...
-```
+- The archive reports version `0.27.0` in `src/winbearable/const.py`.
+- The available runtime in this review environment is Python `3.13.5`; the project requires Python `>=3.15` and contains Python 3.15 syntax (for example, multi-exception syntax in `backends/system_native_cmd.py`).
+- `pytest` was attempted and failed during import with a Python-version `SyntaxError` before test collection. No test pass rate or coverage number is claimed.
+- No real Windows host was available in this review. UAC, ACLs, registry, WSL, atomic replacement, firewall, package management, and native subprocess behavior therefore require CI or maintainer-host evidence.
+- This review did not semantically audit every tweak's Windows registry behavior. Catalog-level correctness remains an explicit task above.
 
-TST-01 (M10): apply a profile with WSL enabled, edit the `.wslconfig` afterwards, `rollback_runs` ⇒ error contains `restore_conflict wslconfig`.
+# 6. Recommended implementation order
 
-## 7. Checked and sound (don't touch)
+1. **ARCH-01** — finish capability-port migration at the application boundary.
+2. **ARCH-02** — make conformance contracts complete and meaningful.
+3. **ARCH-03** — remove `Any` and private reach-through in composed services.
+4. **MAT-01** — run the safe full suite on Windows and update versioned evidence.
+5. **TRX-01** — expand crash testing across all operation kinds and crash boundaries.
+6. **SEC-01 / SEC-02** — formalize elevated executable trust and sign official Windows binaries.
+7. **TEST-01 / MAINT-01 / MAINT-02** — concurrency, orchestration cohesion, typed outcomes.
+8. **MAT-02 / MAT-03 / MAT-04** — support policy, verification records, catalog governance.
+9. **GOV-01 / GOV-02** — reconcile the review ledger and agent policy.
 
-Failed-apply compensation + journal states; `rollback` refusing while incomplete runs exist; idempotent `recover` for registry, files, `.wslconfig` and WSL distro files; sentinel-based `/etc/wsl.conf` probe; GUID-bound distro identity; `ReplaceFileW` atomic replace; `O_EXCL` + `GetFinalPathNameByHandleW` UAC output verification; caller-SID refusal; SDDL/SID-based private-ACL builder and verifier (NULL DACL, foreign SID rejection); bulk-winget column parsing restricted to identifier column; `OPERATION_KIND_SPECS` raising on unregistered snapshot types; declarative parameter schemas with `ProfileValidationError`; layered DAG enforced by tests with no package cycles; subprocess confined to `run_subprocess_bounded`; CI `all-checks` gating; build-provenance attestation; PyPI trusted publishing; `Makefile` upload targets removed.
-
-**Not reviewed:** `tui.py` beyond the refresh path, `wsl/lifecycle.py` import/export, ~100 of the 123 tweaks' registry correctness, `audit/*` check semantics, hypothesis-based property tests (could not run, ENV-01), and all real-Windows behaviour (`NEEDS-WINDOWS` items are reasoned, not observed).
+**Agent rule:** one finding per focused change. Add a failing regression test first where practical. Do not mark Windows-specific work complete based on Linux fakes alone. Record exact commands and observed results, and do not change package version except in a dedicated release change.

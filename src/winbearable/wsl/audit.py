@@ -9,9 +9,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import WslPort
 from ..backends.registry import RegistryBackend, is_wsl2
-from ..backends.system import NativeSystemBackend, SystemBackend
-from ..backends.system_native_cmd import run_subprocess_bounded
+from ..backends.system_native_cmd import resolve_git_exe, run_subprocess_bounded
 from ..const import DEFAULT_WSL_DISTRO
 from ..models import EnvironmentInfo
 from .config import lint_wsl_conf_lf, probe_distro_wsl_conf
@@ -57,7 +57,7 @@ def read_git_system_credential_helpers(git_config_path: Path | None = None) -> l
         sections = parse_ini_sections(git_config_path.read_text(encoding="utf-8", errors="replace"))
         helper = sections.get("credential", {}).get("helper", "").strip()
         return [helper] if helper else []
-    git_exe = NativeSystemBackend._resolve_git_exe()
+    git_exe = resolve_git_exe()
     if git_exe is None:
         return []
     try:
@@ -222,7 +222,7 @@ def audit_linux_side(
 
 
 def detect_default_wsl_distro(
-    system: SystemBackend | None,
+    system: WslPort | None,
     env: EnvironmentInfo,
 ) -> str | None:
     """Parse `wsl.exe --list --verbose` output to determine the active default distro (`*`)."""
@@ -250,7 +250,7 @@ _DISTRO_EOL_VERSIONS: dict[str, set[str]] = {
 }
 
 
-def deep_audit_wsl_distro(system: SystemBackend, distro: str) -> dict[str, Any]:
+def deep_audit_wsl_distro(system: WslPort, distro: str) -> dict[str, Any]:
     """Run read-only deep exposure checks inside a WSL2 distro via fixed-argv commands."""
     validate_wsl_distro_name(distro)
     issues: list[str] = []
@@ -322,7 +322,7 @@ def deep_audit_wsl_distro(system: SystemBackend, distro: str) -> dict[str, Any]:
 def audit_wsl(
     env: EnvironmentInfo,
     wslconfig_path: Path | None = None,
-    system: SystemBackend | None = None,
+    system: WslPort | None = None,
     registry: RegistryBackend | None = None,
     deep: bool = False,
 ) -> dict[str, Any]:

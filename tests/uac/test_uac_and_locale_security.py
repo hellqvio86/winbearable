@@ -60,6 +60,7 @@ from winbearable.uac import (
     set_console_title,
     write_uac_output_safe,
 )
+from winbearable.uac.elevation import assess_elevation_target_trust
 from winbearable.wsl import prepare_wsl_plan
 
 
@@ -679,3 +680,33 @@ def test_uac_isolated_python_elevated_code_guard_wsl_backup_dir_and_network_audi
         finding = _check_listening_ports(env, windll_override=_FakeWindll())
     assert "TCP4=1, TCP6=1, UDP4=1, UDP6=1" in finding.observation.evidence
     assert "445" in finding.observation.evidence and "5353" in finding.observation.evidence
+
+
+def test_assess_elevation_target_trust_classifies_system_vs_user_writable(tmp_path: Path) -> None:
+    """assess_elevation_target_trust distinguishes protected system roots from user-writable paths."""
+    pf_dir = tmp_path / "Program Files" / "WinBearable"
+    pf_dir.mkdir(parents=True)
+    pf_exe = pf_dir / "wb.exe"
+    pf_exe.write_bytes(b"")
+    env = {"ProgramFiles": str(tmp_path / "Program Files"), "SystemRoot": str(tmp_path / "Windows")}
+
+    trusted = assess_elevation_target_trust(pf_exe, env=env, writable_check=lambda _p: False)
+    assert trusted.in_trusted_system_location is True
+    assert trusted.user_writable_risk is False
+    assert trusted.reason == "system-protected directory"
+
+    writable_sys = assess_elevation_target_trust(pf_exe, env=env, writable_check=lambda _p: True)
+    assert writable_sys.in_trusted_system_location is True
+    assert writable_sys.user_writable_risk is True
+
+    venv_dir = tmp_path / "Users" / "dev" / ".venv" / "Scripts"
+    venv_dir.mkdir(parents=True)
+    venv_exe = venv_dir / "wb.exe"
+    venv_exe.write_bytes(b"")
+    user_dev = assess_elevation_target_trust(venv_exe, env=env, writable_check=lambda _p: True)
+    assert user_dev.in_trusted_system_location is False
+    assert user_dev.user_writable_risk is True
+
+    readonly_custom = assess_elevation_target_trust(venv_exe, env=env, writable_check=lambda _p: False)
+    assert readonly_custom.in_trusted_system_location is False
+    assert readonly_custom.user_writable_risk is False

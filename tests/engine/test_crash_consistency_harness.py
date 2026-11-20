@@ -19,7 +19,10 @@ from winbearable.models import (
     RunRecord,
     TransactionState,
 )
+from winbearable.operations import package_and_file_adapters
+from winbearable.operations.registry_spec import COMPENSATION_BATCH_SPECS
 from winbearable.state import StateStore, StateStoreError
+from winbearable.tweaks import get_tweak
 
 
 class _InjectedCrashError(RuntimeError):
@@ -114,34 +117,85 @@ def test_crash_at_each_checkpoint_recovers_idempotently(tmp_path: Path) -> None:
         assert second_pass == []
 
 
+_REVERSIBLE_CRASH_CASES: tuple[tuple[str, str, str, str], ...] = (
+    ("registry", "explorer.show_file_extensions", "reg", "set_value"),
+    ("service", "services.disable_diagtrack", "sysb", "set_service_start_type"),
+    ("scheduled_task", "telemetry.disable_scheduled_tasks", "sysb", "set_scheduled_task_enabled"),
+    ("optional_feature", "hardening.disable_smbv1", "sysb", "set_optional_feature_enabled"),
+    ("auditpol", "hardening.audit_core_subcategories", "sysb", "set_auditpol_subcategory"),
+    ("wevtutil", "hardening.event_log_sizes", "sysb", "set_event_log_config"),
+    ("firewall_group", "hardening.firewall_disable_risky_groups", "sysb", "set_firewall_group_enabled"),
+    ("fsutil_case_sensitive", "dev.case_sensitive_dirs", "sysb", "set_dir_case_sensitive"),
+    ("powercfg_hibernate", "power.hibernate_off", "sysb", "set_hibernate_enabled"),
+    ("git_config", "dev.git_sane_defaults", "sysb", "set_git_global_config"),
+    ("icacls_acl", "dev.fix_ssh_key_permissions", "sysb", "restrict_acl_to_current_user"),
+    ("file_config", "dev.vscode_settings_defaults", "file", "apply_file_spec"),
+)
+
+
+def test_crash_harness_covers_all_reversible_operation_kinds() -> None:
+    """Every reversible operation kind in OPERATION_KIND_SPECS has a crash-recovery test case."""
+    expected = {spec.kind for spec in COMPENSATION_BATCH_SPECS if spec.apply_order is not None}
+    covered = {kind for kind, _, _, _ in _REVERSIBLE_CRASH_CASES}
+    assert covered == expected
+
+
 @pytest.mark.parametrize(
-    ("tweak_id", "target_is_reg", "method_name"),
-    [
-        ("explorer.show_file_extensions", True, "set_value"),
-        ("services.disable_diagtrack", True, "set_value"),
-        ("dev.git_sane_defaults", False, "set_git_global_config"),
-        ("telemetry.disable_scheduled_tasks", False, "set_scheduled_task_enabled"),
-    ],
+    ("operation_kind", "tweak_id", "target_kind", "method_name"),
+    _REVERSIBLE_CRASH_CASES,
 )
 def test_crash_between_mutation_and_journal_flush_restores_baseline(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation_kind: str,
     tweak_id: str,
-    target_is_reg: bool,
+    target_kind: str,
     method_name: str,
 ) -> None:
     """Crashing immediately after a backend mutation restores exact pre-apply baseline."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    (ssh_dir / "id_ed25519").write_text("dummy-private-key", encoding="utf-8")
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+
     reg = InMemoryRegistryBackend()
     reg.set_value("HKLM", r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2)
+    reg.set_value("HKLM", r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled", 1)
     sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    for fw_group in (
+        "@FirewallAPI.dll,-28752",
+        "@FirewallAPI.dll,-28502",
+        "@FirewallAPI.dll,-32752",
+        "@%SystemRoot%\\system32\\firewallapi.dll,-37302",
+        "@FirewallAPI.dll,-28672",
+        "@FirewallAPI.dll,-33002",
+        "@FirewallAPI.dll,-36001",
+    ):
+        sysb.firewall_groups[fw_group] = True
+    for ap_spec in get_tweak("hardening.audit_core_subcategories").auditpol_specs:
+        sysb.auditpol_subcategories[ap_spec.subcategory_guid] = "No Auditing"
     env = sysb.detect_environment(reg)
     store = StateStore(state_path=tmp_path / "state.json")
     profile = ProfileSpec(name="mid-crash", description="mid-crash", tweaks={tweak_id: True})
 
+    vscode_settings = tmp_path / "appdata" / "Code" / "User" / "settings.json"
     baseline_reg = dict(reg._values)
     baseline_git = dict(sysb.git_global_config)
     baseline_tasks = dict(sysb.scheduled_tasks)
+    baseline_features = dict(sysb.optional_features)
+    baseline_auditpol = dict(sysb.auditpol_subcategories)
+    baseline_wevtutil = dict(sysb.event_log_configs)
+    baseline_firewall = dict(sysb.firewall_groups)
+    baseline_fsutil = dict(sysb.case_sensitive_dirs)
+    baseline_hibernate = sysb.hibernate_enabled
+    baseline_acls = set(sysb.restricted_acls)
+    baseline_vscode_exists = vscode_settings.exists()
 
-    target_obj = reg if target_is_reg else sysb
+    target_obj: object = reg if target_kind == "reg" else (package_and_file_adapters if target_kind == "file" else sysb)
     orig_fn = getattr(target_obj, method_name)
     crashed = {"done": False}
 
@@ -149,7 +203,7 @@ def test_crash_between_mutation_and_journal_flush_restores_baseline(
         res = orig_fn(*args, **kwargs)
         if not crashed["done"]:
             crashed["done"] = True
-            raise _InjectedCrashError("crash before journal flush")
+            raise _InjectedCrashError(f"crash before journal flush ({operation_kind})")
         return res
 
     with patch.object(target_obj, method_name, side_effect=_mutate_then_crash):
@@ -164,7 +218,7 @@ def test_crash_between_mutation_and_journal_flush_restores_baseline(
             allow_high_risk=True,
             allow_managed=True,
         )
-    assert tweak_id in summary.failed_ids
+    assert tweak_id in summary.failed_ids, f"{operation_kind} ({tweak_id}) did not fail at injected crash"
 
     if store.get_incomplete_runs():
         recovered = recover_incomplete_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
@@ -173,6 +227,14 @@ def test_crash_between_mutation_and_journal_flush_restores_baseline(
     assert dict(reg._values) == baseline_reg
     assert dict(sysb.git_global_config) == baseline_git
     assert dict(sysb.scheduled_tasks) == baseline_tasks
+    assert dict(sysb.optional_features) == baseline_features
+    assert dict(sysb.auditpol_subcategories) == baseline_auditpol
+    assert dict(sysb.event_log_configs) == baseline_wevtutil
+    assert dict(sysb.firewall_groups) == baseline_firewall
+    assert dict(sysb.case_sensitive_dirs) == baseline_fsutil
+    assert sysb.hibernate_enabled == baseline_hibernate
+    assert set(sysb.restricted_acls) == baseline_acls
+    assert vscode_settings.exists() == baseline_vscode_exists
 
 
 def test_fault_injection_disk_full_permission_denied_and_corrupt_state_recovery(tmp_path: Path) -> None:
