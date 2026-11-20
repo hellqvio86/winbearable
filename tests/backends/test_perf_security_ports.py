@@ -305,7 +305,12 @@ def test_precondition_check_sees_out_of_band_package_install(
     reg = InMemoryRegistryBackend()
     reg.set_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "EditionID", "Professional", REG_SZ)
     sysb = NativeSystemBackend(platform_override="win32", popen_factory=_fake_popen, inventory_cache=cache)
-    with patch.object(sysb, "_check_is_admin", return_value=False):
+    with (
+        patch.object(sysb, "_check_is_admin", return_value=False),
+        patch.object(sysb, "_resolve_git_exe", return_value="git.exe"),
+        patch.object(sysb, "_resolve_winget_exe", return_value="winget.exe"),
+        patch.object(sysb, "_resolve_code_cmd", return_value=r"C:\Program Files\Microsoft VS Code\bin\code.cmd"),
+    ):
         env = sysb.detect_environment(reg)
 
         # Verify caching works with fake runner on repeated back-to-back calls and expires on TTL
