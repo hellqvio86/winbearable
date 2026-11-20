@@ -156,12 +156,20 @@ def test_env_logging_configuration_and_subprocess_debug_log(
     configure_logging()
     try:
         get_logger("test_env").debug("hello env")
-        res = run_subprocess_bounded([sys.executable, "-c", "print('ok')"])
+        res = run_subprocess_bounded([sys.executable, "-c", "print('ok')", "--secret=TOPSECRET123"])
         assert res.returncode == 0
     finally:
         reset_logging()
 
     captured = capsys.readouterr()
     assert "DEBUG [winbearable.test_env] hello env" in captured.err
-    file_events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert any(e.get("event") == "subprocess.complete" and e.get("returncode") == 0 for e in file_events)
+    raw_log = log_path.read_text(encoding="utf-8")
+    assert "TOPSECRET123" not in raw_log
+    file_events = [json.loads(line) for line in raw_log.splitlines() if line.strip()]
+    assert any(
+        e.get("event") == "subprocess.complete" and e.get("returncode") == 0 and e.get("tool") == "python.exe"
+        for e in file_events
+    ) or any(
+        e.get("event") == "subprocess.complete" and e.get("returncode") == 0 and e.get("tool") == "python"
+        for e in file_events
+    )

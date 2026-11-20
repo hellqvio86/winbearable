@@ -1,6 +1,6 @@
-# winbearable — Critical Review TODO (v0.29.0 @ Python 3.15)
+# winbearable — Critical Review TODO (v0.29.1 @ Python 3.15)
 
-> **Target:** `winbearable` — **0.29.0** (remediating v0.28.0 review)
+> **Target:** `winbearable` — **0.29.1** (remediating v0.28.0 review)
 > **Runtime used for this review:** CPython **3.15.2**  
 > **Declared support:** `requires-python = ">=3.15"` · CI matrix `3.15` / `3.15t`  
 > **Catalog:** 123 tweaks · validation 0 · `mappingproxy` (immutable)  
