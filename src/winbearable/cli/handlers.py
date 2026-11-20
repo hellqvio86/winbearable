@@ -266,6 +266,11 @@ def run_cli(
             except ProfileValidationError as exc:
                 return _handle_cli_exception(args, exc, EXIT_ERROR)
             args.debug = bool(getattr(args, "debug", False)) or settings.debug
+            if hasattr(args, "apply"):
+                if getattr(args, "dry_run_flag", False):
+                    args.apply = False
+                elif settings.default_apply:
+                    args.apply = True
             if args.command in {"status", "plan", "apply", "tui"} and getattr(args, "profile", None) is None:
                 args.profile = settings.default_profile
             configure_logging(
