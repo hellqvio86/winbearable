@@ -33,6 +33,7 @@ from winbearable.models.errors import (
     WinbearableError,
 )
 from winbearable.models.results import (
+    CompensationIssue,
     EnvironmentInfo,
     OperationOutcome,
     PlannedOperation,
@@ -94,6 +95,7 @@ __all__ = [
     "AuditpolSnapshot",
     "AuditpolSpec",
     "CisControlMapping",
+    "CompensationIssue",
     "EnvironmentInfo",
     "ExternalDriftError",
     "FileSnapshot",

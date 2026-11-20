@@ -8,6 +8,7 @@ from typing import Any
 from ..backends.ports import GitAndPowerPort, ProcessAndOneDrivePort
 from ..backends.registry import RegistryBackend
 from ..models import (
+    CompensationIssue,
     EnvironmentInfo,
     FsutilSnapshot,
     GitConfigSnapshot,
@@ -16,7 +17,7 @@ from ..models import (
     PowercfgSnapshot,
     TweakDefinition,
 )
-from .base import OperationApplyContext, now_iso, raise_system_error
+from .base import OperationApplyContext, conflict_issue, error_issue, now_iso, raise_system_error
 from .identity import fsutil_id, git_config_id, powercfg_id
 from .path_policy import validate_icacls_user_only_path
 
@@ -125,12 +126,13 @@ class FsutilOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, FsutilSnapshot) or snap.previous_enabled is None:
                 continue
-            if attempted_targets is not None and fsutil_id(snap.directory) not in attempted_targets:
+            tid = fsutil_id(snap.directory)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             resolved_dir = str(validate_icacls_user_only_path(snap.directory))
             if not force and snap.post_enabled is not None:
@@ -138,11 +140,11 @@ class FsutilOperationAdapter:
                 if cur_cs == snap.previous_enabled and cur_cs != snap.post_enabled:
                     continue
                 if cur_cs != snap.post_enabled:
-                    errors.append(f"restore_conflict fsutil {resolved_dir}")
+                    issues.append(conflict_issue(tid, f"restore_conflict fsutil {resolved_dir}"))
                     continue
             if not system.set_dir_case_sensitive(resolved_dir, snap.previous_enabled):
-                errors.append(f"fsutil {resolved_dir}")
-        return errors
+                issues.append(error_issue(tid, f"fsutil {resolved_dir}"))
+        return issues
 
 
 class PowercfgOperationAdapter:
@@ -240,23 +242,24 @@ class PowercfgOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, PowercfgSnapshot) or snap.previous_enabled is None:
                 continue
-            if attempted_targets is not None and powercfg_id() not in attempted_targets:
+            tid = powercfg_id()
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and snap.post_enabled is not None:
                 cur_hib = system.is_hibernate_enabled(registry)
                 if cur_hib == snap.previous_enabled and cur_hib != snap.post_enabled:
                     continue
                 if cur_hib != snap.post_enabled:
-                    errors.append("restore_conflict powercfg hibernate")
+                    issues.append(conflict_issue(tid, "restore_conflict powercfg hibernate"))
                     continue
             if not system.set_hibernate_enabled(registry, snap.previous_enabled):
-                errors.append("powercfg hibernate")
-        return errors
+                issues.append(error_issue(tid, "powercfg hibernate"))
+        return issues
 
 
 class GitConfigOperationAdapter:
@@ -362,12 +365,13 @@ class GitConfigOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
-        errors: list[str] = []
+    ) -> list[CompensationIssue]:
+        issues: list[CompensationIssue] = []
         for snap in reversed(snapshots):
             if not isinstance(snap, GitConfigSnapshot):
                 continue
-            if attempted_targets is not None and git_config_id(snap.key) not in attempted_targets:
+            tid = git_config_id(snap.key)
+            if attempted_targets is not None and tid not in attempted_targets:
                 continue
             if not force and snap.post_existed is not None:
                 cur = system.get_git_global_config(snap.key)
@@ -376,14 +380,14 @@ class GitConfigOperationAdapter:
                 if matches_pre and not matches_post:
                     continue
                 if not matches_post:
-                    errors.append(f"restore_conflict git_config {snap.key}")
+                    issues.append(conflict_issue(tid, f"restore_conflict git_config {snap.key}"))
                     continue
             if snap.existed and snap.previous_value is not None:
                 if not system.set_git_global_config(snap.key, snap.previous_value):
-                    errors.append(f"git_config {snap.key}")
+                    issues.append(error_issue(tid, f"git_config {snap.key}"))
             elif not system.set_git_global_config(snap.key, None):
-                errors.append(f"git_config unset {snap.key}")
-        return errors
+                issues.append(error_issue(tid, f"git_config unset {snap.key}"))
+        return issues
 
 
 class ProcessStopOperationAdapter:
@@ -474,7 +478,7 @@ class ProcessStopOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
+    ) -> list[CompensationIssue]:
         return []
 
 
@@ -561,5 +565,5 @@ class OneDriveOperationAdapter:
         restore_full_policy: bool = False,
         skip_package_uninstall: bool = False,
         attempted_targets: set[str] | None = None,
-    ) -> list[str]:
+    ) -> list[CompensationIssue]:
         return []

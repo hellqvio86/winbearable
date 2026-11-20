@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
 from ..models import (
     AuditpolSnapshot,
+    CompensationIssue,
     FileSnapshot,
     FirewallGroupSnapshot,
     FsutilSnapshot,
@@ -169,8 +169,8 @@ def _compensate_wsl(
     registry: RegistryBackend,
     system: SystemBackend,
     force_rollback: bool,
-) -> list[str]:
-    errors: list[str] = []
+) -> list[CompensationIssue]:
+    issues: list[CompensationIssue] = []
     if run_record.wslconfig_path:
         try:
             target_cfg = validate_file_spec_path(run_record.wslconfig_path)
@@ -185,7 +185,14 @@ def _compensate_wsl(
                     pre_sha = hashlib.sha256(bak_path.read_bytes()).hexdigest()
                 matches_pre = (cur_sha is None) if run_record.wslconfig_existed is False else (cur_sha == pre_sha)
                 if not matches_pre and cur_sha != run_record.wslconfig_post_sha256:
-                    errors.append(f"restore_conflict wslconfig {run_record.wslconfig_path}")
+                    issues.append(
+                        CompensationIssue(
+                            kind="conflict",
+                            target_id="wslconfig",
+                            tweak_id="wsl",
+                            message=f"restore_conflict wslconfig {run_record.wslconfig_path}",
+                        )
+                    )
                     has_conflict = True
             if not has_conflict:
                 if run_record.wslconfig_existed is False:
@@ -193,32 +200,69 @@ def _compensate_wsl(
                 elif bak_path is not None and bak_path.is_file():
                     atomic_write_bytes(target_cfg, bak_path.read_bytes())
         except (OSError, ValueError, PermissionDeniedError) as exc:
-            errors.append(f"wslconfig {run_record.wslconfig_path}: {exc}")
+            issues.append(
+                CompensationIssue(
+                    kind="error",
+                    target_id="wslconfig",
+                    tweak_id="wsl",
+                    message=f"wslconfig {run_record.wslconfig_path}: {exc}",
+                )
+            )
 
     for d_snap in reversed(run_record.wsl_distro_snapshots):
+        distro_tid = f"wsl_distro:{d_snap.distro}"
         if d_snap.distro_guid is not None:
             cur_guid = get_wsl_distro_guid(d_snap.distro, registry)
             if cur_guid != d_snap.distro_guid:
-                errors.append(
-                    f"wsl distro '{d_snap.distro}' identity mismatch (expected {d_snap.distro_guid}, got {cur_guid})"
+                issues.append(
+                    CompensationIssue(
+                        kind="error",
+                        target_id=distro_tid,
+                        tweak_id="wsl",
+                        message=(
+                            f"wsl distro '{d_snap.distro}' identity mismatch "
+                            f"(expected {d_snap.distro_guid}, got {cur_guid})"
+                        ),
+                    )
                 )
                 continue
         if not force_rollback and d_snap.post_sha256 is not None:
             probe = probe_distro_wsl_conf(d_snap.distro, system)
             if probe.status == "error":
-                errors.append(f"wsl distro '{d_snap.distro}' probe failed during rollback: {probe.evidence}")
+                issues.append(
+                    CompensationIssue(
+                        kind="error",
+                        target_id=distro_tid,
+                        tweak_id="wsl",
+                        message=f"wsl distro '{d_snap.distro}' probe failed during rollback: {probe.evidence}",
+                    )
+                )
                 continue
             if probe.status == "missing":
                 if not d_snap.existed:
                     continue
-                errors.append(f"restore_conflict wsl_distro {d_snap.distro}")
+                issues.append(
+                    CompensationIssue(
+                        kind="conflict",
+                        target_id=distro_tid,
+                        tweak_id="wsl",
+                        message=f"restore_conflict wsl_distro {d_snap.distro}",
+                    )
+                )
                 continue
             cur_sha = hashlib.sha256(probe.content.encode("utf-8")).hexdigest()
             pre_sha = hashlib.sha256(d_snap.previous_content.encode("utf-8")).hexdigest() if d_snap.existed else None
             if cur_sha == pre_sha and cur_sha != d_snap.post_sha256:
                 continue
             if cur_sha != d_snap.post_sha256:
-                errors.append(f"restore_conflict wsl_distro {d_snap.distro}")
+                issues.append(
+                    CompensationIssue(
+                        kind="conflict",
+                        target_id=distro_tid,
+                        tweak_id="wsl",
+                        message=f"restore_conflict wsl_distro {d_snap.distro}",
+                    )
+                )
                 continue
         if d_snap.existed:
             stage_res = system.run_wsl_command(
@@ -226,52 +270,55 @@ def _compensate_wsl(
                 input_text=d_snap.previous_content,
             )
             if stage_res.returncode != 0:
-                errors.append(f"wsl distro '{d_snap.distro}' restore stage: {stage_res.stderr or stage_res.returncode}")
+                issues.append(
+                    CompensationIssue(
+                        kind="error",
+                        target_id=distro_tid,
+                        tweak_id="wsl",
+                        message=(
+                            f"wsl distro '{d_snap.distro}' restore stage: {stage_res.stderr or stage_res.returncode}"
+                        ),
+                    )
+                )
                 continue
             res = system.run_wsl_command(
                 ["-d", d_snap.distro, "-u", "root", "--", "mv", "-f", "/etc/wsl.conf.wb.tmp", "/etc/wsl.conf"]
             )
             if res.returncode != 0:
-                errors.append(f"wsl distro '{d_snap.distro}' restore: {res.stderr or res.returncode}")
+                issues.append(
+                    CompensationIssue(
+                        kind="error",
+                        target_id=distro_tid,
+                        tweak_id="wsl",
+                        message=f"wsl distro '{d_snap.distro}' restore: {res.stderr or res.returncode}",
+                    )
+                )
         else:
             res = system.run_wsl_command(["-d", d_snap.distro, "-u", "root", "--", "rm", "-f", "/etc/wsl.conf"])
             if res.returncode != 0:
-                errors.append(f"wsl distro '{d_snap.distro}' cleanup: {res.stderr or res.returncode}")
-    return errors
+                issues.append(
+                    CompensationIssue(
+                        kind="error",
+                        target_id=distro_tid,
+                        tweak_id="wsl",
+                        message=f"wsl distro '{d_snap.distro}' cleanup: {res.stderr or res.returncode}",
+                    )
+                )
+    return issues
 
 
-@dataclass(frozen=True)
-class CompensationIssue:
-    """Structured compensation outcome for rollback/recovery classification."""
-
-    kind: Literal["conflict", "error"]
-    target_id: str | None
-    tweak_id: str | None
-    message: str
-
-
-def _matches_identifier(text: str, identifier: str) -> bool:
-    if not identifier:
-        return False
-    return bool(re.search(rf"(?<![\w.]){re.escape(identifier)}(?![\w.])", text))
-
-
-def _classify_compensation_error(err: str, run_record: RunRecord) -> CompensationIssue:
-    kind: Literal["conflict", "error"] = "conflict" if err.startswith("restore_conflict ") else "error"
-    reg_match = re.match(r"^restore_conflict registry (HK[A-Z_]+)\\(.+?) \[(.+)\]$", err)
-    if reg_match:
-        hive, key_path, val_name = reg_match.groups()
-        norm_val = "" if val_name == "(Default)" else val_name
-        reg_tid = identity.registry_value_id(hive, key_path, norm_val)
-        for entry in run_record.operation_journal:
-            if entry.target_id.split("|")[0] == reg_tid.split("|")[0] and entry.target_id.endswith(
-                f"|{norm_val.lower()}"
-            ):
-                return CompensationIssue(kind=kind, target_id=entry.target_id, tweak_id=entry.tweak_id, message=err)
+def _enrich_issue_tweak_id(issue: CompensationIssue, run_record: RunRecord) -> CompensationIssue:
+    if issue.tweak_id is not None or issue.target_id is None:
+        return issue
     for entry in run_record.operation_journal:
-        if _matches_identifier(err, entry.target_id) or _matches_identifier(err, entry.tweak_id):
-            return CompensationIssue(kind=kind, target_id=entry.target_id, tweak_id=entry.tweak_id, message=err)
-    return CompensationIssue(kind=kind, target_id=None, tweak_id=None, message=err)
+        if entry.target_id == issue.target_id:
+            return CompensationIssue(
+                kind=issue.kind,
+                target_id=issue.target_id,
+                tweak_id=entry.tweak_id,
+                message=issue.message,
+            )
+    return issue
 
 
 def compensate_run_record_issues(
@@ -283,29 +330,9 @@ def compensate_run_record_issues(
     skip_package_uninstall: bool = False,
 ) -> list[CompensationIssue]:
     """Execute conflict-aware compensating rollback and return structured CompensationIssue items."""
-    errors = compensate_run_record(
-        run_record,
-        registry,
-        system,
-        restore_full_policy=restore_full_policy,
-        force_rollback=force_rollback,
-        skip_package_uninstall=skip_package_uninstall,
-    )
-    return [_classify_compensation_error(err, run_record) for err in errors]
-
-
-def compensate_run_record(
-    run_record: RunRecord,
-    registry: RegistryBackend,
-    system: SystemBackend,
-    restore_full_policy: bool = False,
-    force_rollback: bool = False,
-    skip_package_uninstall: bool = False,
-) -> list[str]:
-    """Execute conflict-aware compensating rollback for attempted operations in a RunRecord."""
-    errors: list[str] = []
+    raw_issues: list[CompensationIssue] = []
     if run_record.state == TransactionState.PLANNED and not run_record.completed_operations:
-        return errors
+        return raw_issues
 
     attempted_targets: set[str] | None = None
     if run_record.operation_journal:
@@ -314,7 +341,7 @@ def compensate_run_record(
             allowed_outcomes.add("planned")
         attempted_targets = {e.target_id for e in run_record.operation_journal if e.outcome in allowed_outcomes}
 
-    errors.extend(_compensate_wsl(run_record, registry, system, force_rollback))
+    raw_issues.extend(_compensate_wsl(run_record, registry, system, force_rollback))
 
     pkg_batches: list[tuple[str, str]] = [
         *[("winget_package", pkg_id) for pkg_id in run_record.installed_winget_packages],
@@ -322,7 +349,7 @@ def compensate_run_record(
     ]
     if pkg_batches:
         winget_adapter = get_operation_adapter("winget_package")
-        errors.extend(
+        raw_issues.extend(
             winget_adapter.compensate(
                 pkg_batches,
                 registry,
@@ -336,7 +363,7 @@ def compensate_run_record(
     for kind, batch in _snapshot_compensation_batches(run_record):
         if batch:
             adapter = get_operation_adapter(kind)
-            errors.extend(
+            raw_issues.extend(
                 adapter.compensate(
                     batch,
                     registry,
@@ -347,4 +374,26 @@ def compensate_run_record(
                     attempted_targets=attempted_targets,
                 )
             )
-    return errors
+    return [_enrich_issue_tweak_id(issue, run_record) for issue in raw_issues]
+
+
+def compensate_run_record(
+    run_record: RunRecord,
+    registry: RegistryBackend,
+    system: SystemBackend,
+    restore_full_policy: bool = False,
+    force_rollback: bool = False,
+    skip_package_uninstall: bool = False,
+) -> list[str]:
+    """Execute conflict-aware compensating rollback for attempted operations in a RunRecord."""
+    return [
+        issue.message
+        for issue in compensate_run_record_issues(
+            run_record,
+            registry,
+            system,
+            restore_full_policy=restore_full_policy,
+            force_rollback=force_rollback,
+            skip_package_uninstall=skip_package_uninstall,
+        )
+    ]
