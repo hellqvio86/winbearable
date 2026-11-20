@@ -24,6 +24,35 @@ from .win32_ctypes import get_win32_dll
 
 _logger = get_logger(__name__)
 
+_KNOWN_TOOL_NAMES: dict[str, str] = {
+    "auditpol.exe": "auditpol.exe",
+    "code.cmd": "code.cmd",
+    "dism.exe": "dism.exe",
+    "fsutil.exe": "fsutil.exe",
+    "git": "git",
+    "git.exe": "git.exe",
+    "icacls.exe": "icacls.exe",
+    "netsh.exe": "netsh.exe",
+    "powercfg.exe": "powercfg.exe",
+    "python": "python",
+    "python.exe": "python.exe",
+    "python3": "python3",
+    "reg.exe": "reg.exe",
+    "sc.exe": "sc.exe",
+    "schtasks.exe": "schtasks.exe",
+    "taskkill.exe": "taskkill.exe",
+    "wevtutil.exe": "wevtutil.exe",
+    "winget.exe": "winget.exe",
+    "wsl.exe": "wsl.exe",
+}
+
+
+def _safe_tool_name(args: list[str]) -> str:
+    """Return a static, non-sensitive tool label for structured logging."""
+    if not args:
+        return "subprocess"
+    return _KNOWN_TOOL_NAMES.get(Path(args[0]).name.lower(), "subprocess")
+
 
 def sys32_exe(exe_name: str, windll_override: Any = None) -> str:
     """Resolve a system binary from Win32 GetSystemDirectoryW (or %SystemRoot%\\System32 off-Windows)."""
@@ -311,24 +340,27 @@ def run_subprocess_bounded(
             stdout, stderr = out_holder[0], err_holder[0]
         else:
             stdout, stderr = proc.communicate(timeout=timeout)
+        tool_label = _safe_tool_name(args)
         _logger.debug(
             "Subprocess completed: %s (rc=%d)",
-            args[0] if args else "",
+            tool_label,
             proc.returncode,
             extra={
                 "event": "subprocess.complete",
-                "cmd": args[:4],
+                "tool": tool_label,
+                "arg_count": len(args),
                 "returncode": proc.returncode,
                 "stderr_len": len(stderr or ""),
             },
         )
         return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
     except subprocess.TimeoutExpired as exc:
+        tool_label = _safe_tool_name(args)
         _logger.warning(
             "Subprocess timed out after %.1fs: %s",
             timeout,
-            args[0] if args else "",
-            extra={"event": "subprocess.timeout", "cmd": args[:4], "timeout": timeout},
+            tool_label,
+            extra={"event": "subprocess.timeout", "tool": tool_label, "arg_count": len(args), "timeout": timeout},
         )
         terminate_process_tree(proc.pid, sys.platform)
         proc.kill()
