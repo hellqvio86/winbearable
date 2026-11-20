@@ -116,6 +116,42 @@ wb --version
 
 ---
 
+## 🎨 CLI in Action
+
+```ansi
+$ wb doctor
+\u001b[1;36mwinbearable v0.27.0 — Doctor Report\u001b[0m
+OS: Windows (Build 26300, Display: 26H2, Edition: Professional)
+Admin: False | Domain: absent (medium) | Entra: disabled (high) | MDM: enabled (medium)
+Defender: enabled (high) | Secure Boot: enabled (medium) | BitLocker: enabled (low)
+WSL Installed: True (Version: 3.0.5.0, Distros: Ubuntu, docker-desktop, AlmaLinux-10)
+Security Posture: 4/48 (8.3%, confidence=partial)
+Comfort & Privacy Preferences: Privacy 2/24 | Usability 7/40 | Developer 5/11
+Defender PUA: enabled (confidence=partial, source=local) | SmartScreen: unset (confidence=unknown, managed_by_wb=False)
+VBS/HVCI/Credential Guard: vbs=enabled | hvci=enabled | credential_guard=unset (opt-in only)
+Linux Refugee Summary: build_supported=True | enterprise_leftovers=True | policy_blocked=4 | mirrored=True | hyperv_fw_avail=True
+```
+
+```ansi
+$ wb plan --profile user-only
+\u001b[1;36m# 🔍 winbearable — DRY-RUN PLAN (no changes written)\u001b[0m
+Profile: `user-only`
+Plan Digest: `1fa85b10f2f4bb1d`
+
+| Status | Tweak ID | Risk | Admin | Consequences | Operations & Transitions |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `\u001b[32mapplied\u001b[0m` | `apps.install_vscode` | `\u001b[32mlow\u001b[0m` | no | reversible | [winget_package] Microsoft.VisualStudioCode (scope=user): installed -> installed |
+| `\u001b[33mdrifted\u001b[0m` | `search.disable_bing` | `\u001b[32mlow\u001b[0m` | no | reversible | [registry] HKCU\...\Explorer [DisableSearchBoxSuggestions]: <absent> -> 1 |
+| `\u001b[33mdrifted\u001b[0m` | `explorer.classic_context_menu` | `\u001b[32mlow\u001b[0m` | no | reversible, EXPLORER RESTART | [registry] HKCU\...\InprocServer32 [(Default)]: <absent> -> '' |
+| `\u001b[33mdrifted\u001b[0m` | `hardening.disable_wsh_user` | `\u001b[33mmedium\u001b[0m` | no | reversible | [registry] HKCU\...\Windows Script Host\Settings [Enabled]: <absent> -> 0 |
+
+Summary: 13 to apply / applied, 4 already applied, 13 drifted, 0 failed, 0 skipped (needs admin), 0 blocked by policy
+💡 Run with `--apply` to execute these changes (registry backups and rollback state will be recorded).
+\u001b[1;33m⚠️ Sync Status: OUT OF SYNC (13 drifted)\u001b[0m
+```
+
+---
+
 ## 🚀 Zero-to-Bash Bootstrap (Fresh Windows 11 -> Linux Shell Fast)
 
 If you are a Linux person staring at a fresh Windows 11 desktop without Python or `uv` installed yet, **do not open Edge, do not open the Microsoft Store, and do not click through GUI installers.**
