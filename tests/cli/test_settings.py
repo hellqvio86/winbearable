@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from winbearable.const import ENV_DEBUG, ENV_DEFAULT_PROFILE, ENV_SETTINGS_PATH
+from winbearable.const import ENV_DEBUG, ENV_DEFAULT_APPLY, ENV_DEFAULT_PROFILE, ENV_SETTINGS_PATH
 from winbearable.profiles import ProfileValidationError
 from winbearable.settings import UserSettings, load_settings, resolve_settings_path
 
@@ -138,4 +138,47 @@ def test_cli_uses_settings_and_env_precedence(
     assert rc_list == 0
     list_payload = json.loads(out_list)
     assert len(list_payload["tweaks"]) > 0
+    capsys.readouterr()
+
+
+def test_default_apply_setting_env_and_dry_run_banner(
+    cli_runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """default_apply / WINBEARABLE_APPLY enables apply by default; --dry-run forces dry-run banner."""
+    monkeypatch.delenv(ENV_DEFAULT_APPLY, raising=False)
+    monkeypatch.delenv(ENV_SETTINGS_PATH, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    # Default dry-run renders prominent DRY-RUN MODE banner
+    rc_dry, out_dry, _ = cli_runner(["apply", "--profile", "user-only", "--only", "explorer.show_file_extensions"])
+    assert rc_dry == 0
+    assert "DRY-RUN MODE — NO CHANGES WERE WRITTEN TO YOUR SYSTEM" in out_dry
+    assert "default_apply = true" in out_dry
+    assert "WINBEARABLE_APPLY=1" in out_dry
+
+    # Invalid default_apply type in settings.toml fails validation
+    bad_apply = tmp_path / "bad_apply.toml"
+    bad_apply.write_text('default_apply = "yes"\n', encoding="utf-8")
+    monkeypatch.setenv(ENV_SETTINGS_PATH, str(bad_apply))
+    with pytest.raises(ProfileValidationError, match="default_apply"):
+        load_settings()
+
+    # Valid default_apply = true in settings.toml + WINBEARABLE_APPLY override
+    cfg = tmp_path / "apply_settings.toml"
+    cfg.write_text('default_profile = "user-only"\ndefault_apply = true\n', encoding="utf-8")
+    monkeypatch.setenv(ENV_SETTINGS_PATH, str(cfg))
+    assert load_settings().default_apply is True
+
+    monkeypatch.setenv(ENV_DEFAULT_APPLY, "0")
+    assert load_settings().default_apply is False
+
+    monkeypatch.setenv(ENV_DEFAULT_APPLY, "1")
+    assert load_settings().default_apply is True
+
+    # With WINBEARABLE_APPLY=1, --dry-run forces dry-run mode
+    rc_forced, out_forced, _ = cli_runner(
+        ["apply", "--profile", "user-only", "--only", "explorer.show_file_extensions", "--dry-run", "--json"]
+    )
+    assert rc_forced == 0
+    assert json.loads(out_forced)["dry_run"] is True
     capsys.readouterr()

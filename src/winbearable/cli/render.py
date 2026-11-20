@@ -208,10 +208,36 @@ def format_summary_markdown(
     header_emoji = ("🔍 " if summary.dry_run else "🚀 ") if use_emoji else ""
     header_color = _ANSI_CYAN if summary.dry_run else (_ANSI_RED if summary.failed_ids else _ANSI_GREEN)
     title = colorize(f"# {header_emoji}winbearable — {mode_str}", _ANSI_BOLD, header_color, enabled=use_color)
-    lines = [
-        title,
-        f"Profile: `{escape_md_cell(summary.profile_name)}`",
-    ]
+    lines: list[str] = []
+    if summary.dry_run:
+        bar = "=" * 78
+        warn_icon = "⚠️  " if use_emoji else ""
+        ptr_icon = "👉 " if use_emoji else ""
+        lines.extend(
+            [
+                colorize(bar, _ANSI_BOLD, _ANSI_YELLOW, enabled=use_color),
+                colorize(
+                    f"{warn_icon}DRY-RUN MODE — NO CHANGES WERE WRITTEN TO YOUR SYSTEM",
+                    _ANSI_BOLD,
+                    _ANSI_YELLOW,
+                    enabled=use_color,
+                ),
+                colorize(
+                    f"{ptr_icon}Pass `--apply` (or set `default_apply = true` in settings.toml / "
+                    "`WINBEARABLE_APPLY=1`) to write changes.",
+                    _ANSI_CYAN,
+                    enabled=use_color,
+                ),
+                colorize(bar, _ANSI_BOLD, _ANSI_YELLOW, enabled=use_color),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            title,
+            f"Profile: `{escape_md_cell(summary.profile_name)}`",
+        ]
+    )
     if summary.plan_digest:
         lines.append(f"Plan Digest: `{summary.plan_digest}`")
     lines.extend(

@@ -123,6 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_parser.add_argument("--apply", action="store_true", help="Actually write changes to the system")
     apply_parser.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="Force dry-run preview even if default_apply / WINBEARABLE_APPLY is enabled",
+    )
+    apply_parser.add_argument(
         "--detailed-exitcode",
         action="store_true",
         help="Return 2 on pending changes (dry-run) and 3 on policy-blocked tweaks",
@@ -179,6 +185,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument("--apply", action="store_true", help="Actually execute rollback")
     rollback_parser.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="Force dry-run preview even if default_apply / WINBEARABLE_APPLY is enabled",
+    )
+    rollback_parser.add_argument(
         "--elevate",
         action="store_true",
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
@@ -201,6 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect or recover incomplete write-ahead journal transactions",
     )
     recover_parser.add_argument("--apply", action="store_true", help="Actually execute recovery compensation")
+    recover_parser.add_argument(
+        "--dry-run",
+        dest="dry_run_flag",
+        action="store_true",
+        help="Force dry-run preview even if default_apply / WINBEARABLE_APPLY is enabled",
+    )
     recover_parser.add_argument(
         "--elevate",
         action="store_true",

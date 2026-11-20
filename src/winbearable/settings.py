@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .const import DEFAULT_PROFILE_NAME, ENV_DEBUG, ENV_DEFAULT_PROFILE, ENV_SETTINGS_PATH
+from .const import (
+    DEFAULT_PROFILE_NAME,
+    ENV_DEBUG,
+    ENV_DEFAULT_APPLY,
+    ENV_DEFAULT_PROFILE,
+    ENV_SETTINGS_PATH,
+)
 from .profiles.schema_migration import ProfileValidationError
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -21,6 +27,7 @@ class UserSettings:
     """Resolved CLI settings from settings file and environment variables."""
 
     default_profile: str = DEFAULT_PROFILE_NAME
+    default_apply: bool = False
     debug: bool = False
     source_path: Path | None = None
 
@@ -78,6 +85,7 @@ def load_settings(path: Path | None = None) -> UserSettings:
     target = path if path is not None else resolve_settings_path()
 
     default_profile = DEFAULT_PROFILE_NAME
+    default_apply = False
     debug = False
     source_path: Path | None = None
 
@@ -89,6 +97,11 @@ def load_settings(path: Path | None = None) -> UserSettings:
             if not isinstance(raw_profile, str) or not raw_profile.strip():
                 raise ProfileValidationError(f"'default_profile' in '{target}' must be a non-empty string.")
             default_profile = raw_profile.strip()
+        if "default_apply" in data:
+            raw_apply = data["default_apply"]
+            if not isinstance(raw_apply, bool):
+                raise ProfileValidationError(f"'default_apply' in '{target}' must be a boolean.")
+            default_apply = raw_apply
         if "debug" in data:
             raw_debug = data["debug"]
             if not isinstance(raw_debug, bool):
@@ -101,8 +114,17 @@ def load_settings(path: Path | None = None) -> UserSettings:
     if env_profile:
         default_profile = env_profile
 
+    env_apply = os.environ.get(ENV_DEFAULT_APPLY, "").strip()
+    if env_apply:
+        default_apply = _parse_env_bool(ENV_DEFAULT_APPLY, env_apply)
+
     env_debug = os.environ.get(ENV_DEBUG, "").strip()
     if env_debug:
         debug = _parse_env_bool(ENV_DEBUG, env_debug)
 
-    return UserSettings(default_profile=default_profile, debug=debug, source_path=source_path)
+    return UserSettings(
+        default_profile=default_profile,
+        default_apply=default_apply,
+        debug=debug,
+        source_path=source_path,
+    )

@@ -22,9 +22,9 @@ uv run pytest tests/test_windows_integration.py -v
 ```
 Revalidation policy: re-run `tests/test_windows_integration.py` on every minor release or after any change to Win32 `ctypes`, `winreg`, ACLs, UAC, WSL, services, tasks, or native subprocess wrappers.
 
-## Verification Ledger (`0.29.0`)
+## Verification Ledger (`0.30.0`)
 
-Current release baseline (`0.29.0`):
+Current release baseline (`0.30.0`):
 - **CI `windows-contracts` (`windows-latest`):** runs `tests/contracts`, `tests/test_windows_integration.py` (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`), `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, and `tests/test_architecture_invariants.py`.
 - **Crash-consistency harness (`tests/engine/test_crash_consistency_harness.py`):** verifies baseline restoration across all 12 reversible operation kinds in `OPERATION_KIND_SPECS`.
 - **UAC elevation trust (`src/winbearable/uac/elevation.py`):** `assess_elevation_target_trust` classifies system-protected vs user-writable elevation targets and is unit-tested in `tests/uac/test_uac_and_locale_security.py`.
