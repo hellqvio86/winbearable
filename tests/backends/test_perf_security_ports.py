@@ -347,3 +347,38 @@ def test_precondition_check_sees_out_of_band_package_install(
                 allow_simulated=True,
                 expected_fingerprints=plan_summary.precondition_fingerprints,
             )
+
+
+def test_concurrent_inventory_cache_invalidation_and_history_safety() -> None:
+    """Concurrent cache get/set/invalidate, command_history appends, and last_outcome remain isolated."""
+    cache = InventoryCache(ttl_seconds=30.0)
+    nat = NativeSystemBackend(platform_override="win32", inventory_cache=cache)
+    barrier = threading.Barrier(8)
+
+    def _worker(idx: int) -> tuple[str | None, bool]:
+        barrier.wait()
+        for step in range(25):
+            key = f"k{step % 4}"
+            cache.set("ns", key, f"v-{idx}-{step}")
+            _hit, _val = cache.get("ns", key)
+            if step % 5 == 0:
+                cache.invalidate("ns", key)
+            if step % 11 == 0:
+                nat.invalidate_all()
+            nat._record_cmd_history([f"tool-{idx}", str(step)], step % 2, OperationStatus.OK, f"err-{idx}")
+        nat.last_outcome = OperationOutcome(status=OperationStatus.ACCESS_DENIED, message=f"thread-{idx}")
+        barrier.wait()
+        return (nat.last_outcome.message if nat.last_outcome else None, len(nat.command_history) <= 50)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_worker, range(8)))
+
+    assert results == [(f"thread-{i}", True) for i in range(8)]
+    assert len(nat.command_history) == 50
+
+
+def test_find_permissive_sddl_trustees_allows_local_admin_alias_for_rid_500() -> None:
+    """SDDL alias 'LA' is accepted when the current user SID is the built-in -500 admin."""
+    sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
+    assert find_permissive_sddl_trustees(sddl, allowed_user_sid="S-1-5-21-111-222-333-500") == []
+    assert find_permissive_sddl_trustees(sddl, allowed_user_sid="S-1-5-21-111-222-333-1001") == ["LA"]

@@ -463,7 +463,20 @@ def test_concrete_adapters_forbid_full_system_backend_and_python_floor_is_315() 
         "icacls_adapter.py",
         "env_adapters.py",
         "package_and_file_adapters.py",
+        "registry_adapter.py",
     )
     for fname in concrete_files:
         text = (ops_dir / fname).read_text(encoding="utf-8")
         assert "SystemBackend" not in text, f"{fname} must use narrow capability ports, not SystemBackend"
+
+    port_enforced_dirs = (
+        repo_root / "src" / "winbearable" / "wsl",
+        repo_root / "src" / "winbearable" / "audit",
+    )
+    for pdir in port_enforced_dirs:
+        for py_file in sorted(pdir.glob("*.py")):
+            text = py_file.read_text(encoding="utf-8")
+            assert "SystemBackend" not in text, f"{py_file.name} must use narrow ports, not SystemBackend"
+
+    params_text = (repo_root / "src" / "winbearable" / "engine" / "params.py").read_text(encoding="utf-8")
+    assert "SystemBackend" not in params_text, "engine/params.py must use OutcomePort/EnvironmentPort"

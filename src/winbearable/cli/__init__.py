@@ -1,6 +1,7 @@
 """Command-line interface for winbearable (`wb` and `winbearable`)."""
 
-from winbearable.cli.handlers import _relay_elevated_uac, main, run_cli
+from winbearable.cli.handlers import main, run_cli
+from winbearable.cli.handlers_apply import relay_elevated_uac as _relay_elevated_uac
 from winbearable.cli.handlers_tools import CliDeps
 from winbearable.cli.parser import absolutize_elevated_argv as _absolutize_elevated_argv
 from winbearable.cli.parser import build_parser

@@ -6,6 +6,7 @@ Reviewed modules: `src/winbearable/uac/elevation.py` (`run_elevated_wb`, `build_
 
 1. **Executable Resolution & Isolation (`PATH` Hijack / Env Injection Prevention):**
    - `resolve_elevation_target` avoids `PATH` lookup, validates targets and ancestors against disallowed symlink/mount-point reparse tags (`IO_REPARSE_TAG_SYMLINK` / `IO_REPARSE_TAG_MOUNT_POINT`), and passes `-I -m winbearable` when launching `python.exe` for non-frozen installs.
+   - `assess_elevation_target_trust` classifies whether the resolved executable resides in a system-protected root (`%ProgramFiles%`, `%ProgramFiles(x86)%`, `%SystemRoot%`, `%WINDIR%`) or a user-writable directory (e.g. developer/venv/`uv` installs) and logs the trust decision at debug level.
    - `sanitize_elevated_python_env` clears `PYTHONPATH`/`PYTHONHOME`/`PYTHONUSERBASE`/`PYTHONSTARTUP` before spawning child processes; non-frozen Python startup isolation is provided by `-I` rather than post-startup `os.environ` edits. Note that UAC is not a security boundary against already-compromised same-user code.
 2. **Forwarded `argv` Integrity & Caller-SID Binding:**
    - `build_elevated_cmdline_args` strips any caller-supplied `--elevate`, `--uac-output`, and `--uac-caller-sid` flags before appending the single internal `--uac-output <path>` and `--uac-caller-sid <sid>` arguments, formatted via `subprocess.list2cmdline`.

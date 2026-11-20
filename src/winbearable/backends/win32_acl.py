@@ -38,7 +38,11 @@ def find_permissive_sddl_trustees(sddl: str, *, allowed_user_sid: str | None = N
     has_allow_ace = False
     allowed_set = {"SY", "BA", "CO", "OW", "S-1-5-18", "S-1-5-32-544"}
     if allowed_user_sid:
-        allowed_set.add(allowed_user_sid.upper())
+        upper_sid = allowed_user_sid.upper()
+        allowed_set.add(upper_sid)
+        # ConvertSecurityDescriptorToStringSecurityDescriptorW collapses RID -500 to SDDL alias "LA".
+        if upper_sid.endswith("-500"):
+            allowed_set.add("LA")
 
     found: list[str] = []
     for ace_body in aces:

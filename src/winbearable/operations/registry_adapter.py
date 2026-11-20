@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import RegistryBackupPort
 from ..backends.registry import RegistryBackend, expand_registry_spec
-from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
 from ..models import (
     CompensationIssue,
@@ -41,7 +41,7 @@ class RegistryOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: RegistryBackupPort,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         ops: list[PlannedOperation] = []
         drifted: list[str] = []
@@ -105,7 +105,7 @@ class RegistryOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: RegistryBackupPort,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[RegistryValueSnapshot | RegistryKeySnapshot]:
@@ -133,7 +133,7 @@ class RegistryOperationAdapter:
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: RegistryBackupPort,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         entries: list[OperationJournalEntry] = []
@@ -240,7 +240,7 @@ class RegistryOperationAdapter:
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: RegistryBackupPort,
     ) -> bool:
         _, drifted, unverified = self.inspect(tweak, registry, system)
         return not drifted and not unverified
@@ -249,7 +249,7 @@ class RegistryOperationAdapter:
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: RegistryBackupPort,
         *,
         force: bool = False,
         restore_full_policy: bool = False,

@@ -48,14 +48,12 @@ NON_REGISTRY_ADAPTERS: tuple[OperationAdapter, ...] = (
     OneDriveOperationAdapter(),
 )
 
-_ADAPTER_INSTANCES: dict[str, OperationAdapter] = {
-    adapter.kind: adapter
-    for adapter in (
-        RegistryOperationAdapter(),
-        *NON_REGISTRY_ADAPTERS,
-        HypervFirewallOperationAdapter(),
-    )
-}
+_ALL_ADAPTERS: tuple[OperationAdapter, ...] = (
+    RegistryOperationAdapter(),
+    *NON_REGISTRY_ADAPTERS,
+    HypervFirewallOperationAdapter(),
+)
+_ADAPTER_INSTANCES: dict[str, OperationAdapter] = {adapter.kind: adapter for adapter in _ALL_ADAPTERS}
 OPERATION_ADAPTERS: tuple[OperationAdapter, ...] = (
     *(_ADAPTER_INSTANCES[kind] for kind in APPLY_KIND_ORDER if kind in _ADAPTER_INSTANCES),
     *(adapter for kind, adapter in _ADAPTER_INSTANCES.items() if kind not in APPLY_KIND_ORDER),

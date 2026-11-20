@@ -15,3 +15,7 @@ coverage.json
 *.bak
 *.orig
 *.spec
+*.pfx
+*.p12
+*.cer
+*.snk

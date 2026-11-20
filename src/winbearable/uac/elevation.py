@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import ntpath
 import os
 import secrets
 import shutil
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +86,79 @@ def _is_wb_launcher(path: Path) -> bool:
     return path.name.lower() in {"wb.exe", "winbearable.exe", "wb", "winbearable"}
 
 
+@dataclass(frozen=True)
+class ElevationTargetTrust:
+    """Trust assessment for a resolved UAC elevation target executable."""
+
+    target_path: Path
+    parent_dir: Path
+    in_trusted_system_location: bool
+    user_writable_risk: bool
+    reason: str
+
+
+def _norm_win_prefix(path: Path | str) -> str:
+    return ntpath.normcase(ntpath.normpath(str(path)))
+
+
+def assess_elevation_target_trust(
+    target: Path,
+    *,
+    env: dict[str, str] | None = None,
+    writable_check: Callable[[Path], bool] | None = None,
+) -> ElevationTargetTrust:
+    """Assess whether *target* resides in a system-protected location or a user-writable directory.
+
+    Dev/venv/pip/uv installs commonly run from user-writable locations (`%LOCALAPPDATA%`,
+    `%USERPROFILE%`); those are permitted with explicit diagnostic logging, whereas installs
+    under `%ProgramFiles%`, `%ProgramFiles(x86)%`, or `%SystemRoot%` require admin ACLs to modify.
+    """
+    env_map = env if env is not None else os.environ
+    resolved = target.resolve()
+    parent = resolved.parent
+    norm_target = _norm_win_prefix(resolved)
+
+    trusted_roots = tuple(
+        _norm_win_prefix(raw)
+        for key in ("ProgramFiles", "ProgramFiles(x86)", "SystemRoot", "WINDIR")
+        if (raw := env_map.get(key))
+    )
+    in_trusted = any(norm_target == root or norm_target.startswith(root + ntpath.sep) for root in trusted_roots)
+    is_writable = writable_check(parent) if writable_check is not None else os.access(parent, os.W_OK)
+
+    if in_trusted and not is_writable:
+        return ElevationTargetTrust(
+            target_path=resolved,
+            parent_dir=parent,
+            in_trusted_system_location=True,
+            user_writable_risk=False,
+            reason="system-protected directory",
+        )
+    if in_trusted and is_writable:
+        return ElevationTargetTrust(
+            target_path=resolved,
+            parent_dir=parent,
+            in_trusted_system_location=True,
+            user_writable_risk=True,
+            reason="system root path is writable by current token",
+        )
+    if is_writable:
+        return ElevationTargetTrust(
+            target_path=resolved,
+            parent_dir=parent,
+            in_trusted_system_location=False,
+            user_writable_risk=True,
+            reason="user-writable parent directory (e.g. venv/uv/dev install)",
+        )
+    return ElevationTargetTrust(
+        target_path=resolved,
+        parent_dir=parent,
+        in_trusted_system_location=False,
+        user_writable_risk=False,
+        reason="non-writable custom location",
+    )
+
+
 def _validate_elevation_executable(
     path: Path,
     *,
@@ -94,6 +169,16 @@ def _validate_elevation_executable(
     resolved = path.resolve()
     if check_symlinks and (reparse_check(path) or any(reparse_check(p) for p in path.parents)):
         raise UacElevationError(f"Refusing elevation target with symlink or reparse point: {path}")
+    trust = assess_elevation_target_trust(resolved)
+    if trust.user_writable_risk:
+        _logger.debug(
+            "UAC elevation target %s resides in %s (%s); developer/user-scope installs remain permitted.",
+            resolved,
+            trust.parent_dir,
+            trust.reason,
+        )
+    else:
+        _logger.debug("UAC elevation target %s verified in %s (%s).", resolved, trust.parent_dir, trust.reason)
     return resolved
 
 
