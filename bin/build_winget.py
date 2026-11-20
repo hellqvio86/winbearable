@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import re
 import shutil
@@ -83,19 +84,12 @@ def _write_version_info_file(path: Path, version: str) -> Path:
     return path
 
 
-def main() -> int:
-    """Build `dist/wb/wb.exe` (--onedir) and package `dist/winbearable-<version>-win-x64.zip`."""
-    if sys.platform != "win32":
-        print("Error: bin/build_winget.py must be run on Windows.", file=sys.stderr)
-        return 1
-
-    dist_dir = ROOT / "dist"
-    build_dir = ROOT / "build" / "pyinstaller"
+def _build_pyinstaller_bundle(dist_dir: Path, build_dir: Path, wb_dir: Path) -> int:
+    """Build the PyInstaller --onedir bundle into *wb_dir*."""
     build_dir.mkdir(parents=True, exist_ok=True)
     entry_script = build_dir / "_wb_entry.py"
     entry_script.write_text("from winbearable.cli import main\n\nraise SystemExit(main())\n", encoding="utf-8")
     version_file = _write_version_info_file(build_dir / "version_info.txt", __version__)
-    wb_dir = dist_dir / "wb"
     if wb_dir.exists():
         shutil.rmtree(wb_dir)
 
@@ -131,6 +125,15 @@ def main() -> int:
     if not wb_exe.is_file():
         print(f"Error: expected {wb_exe} was not created.", file=sys.stderr)
         return 1
+    return 0
+
+
+def _package_winget_zip(dist_dir: Path, wb_dir: Path) -> int:
+    """Package *wb_dir* into `winbearable-<version>-win-x64.zip` and emit SHA-256."""
+    wb_exe = wb_dir / "wb.exe"
+    if not wb_exe.is_file():
+        print(f"Error: expected {wb_exe} was not found for packaging.", file=sys.stderr)
+        return 1
 
     zip_path = dist_dir / f"winbearable-{__version__}-win-x64.zip"
     if zip_path.exists():
@@ -154,6 +157,31 @@ def main() -> int:
 
     print(f"Built:  {zip_path}")
     print(f"SHA256: {sha256_hex}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Build `dist/wb/wb.exe` (--onedir) and package `dist/winbearable-<version>-win-x64.zip`."""
+    parser = argparse.ArgumentParser(description="Build and package the portable Windows Winget zip.")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--build-only", action="store_true", help="Only build dist/wb/wb.exe via PyInstaller.")
+    mode_group.add_argument("--package-only", action="store_true", help="Only package existing dist/wb into zip.")
+    args = parser.parse_args(argv)
+
+    if sys.platform != "win32":
+        print("Error: bin/build_winget.py must be run on Windows.", file=sys.stderr)
+        return 1
+
+    dist_dir = ROOT / "dist"
+    build_dir = ROOT / "build" / "pyinstaller"
+    wb_dir = dist_dir / "wb"
+
+    if not args.package_only:
+        rc = _build_pyinstaller_bundle(dist_dir, build_dir, wb_dir)
+        if rc != 0:
+            return rc
+    if not args.build_only:
+        return _package_winget_zip(dist_dir, wb_dir)
     return 0
 
 
