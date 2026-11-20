@@ -446,9 +446,46 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Build and verify Winget portable zip
+      - name: Build Winget portable binary
+        run: uv run --group release --frozen python bin/build_winget.py --build-only
+
+      - name: Sign wb.exe with Authenticode (if secret configured)
+        shell: pwsh
+        env:
+          WIN_SIGNING_CERT_PFX_B64: ${{ secrets.WIN_SIGNING_CERT_PFX_B64 }}
+          WIN_SIGNING_CERT_PASSWORD: ${{ secrets.WIN_SIGNING_CERT_PASSWORD }}
+          WIN_SIGNING_TIMESTAMP_URL: ${{ vars.WIN_SIGNING_TIMESTAMP_URL }}
         run: |
-          uv run --group release --frozen python bin/build_winget.py
+          if (-not $env:WIN_SIGNING_CERT_PFX_B64 -or -not $env:WIN_SIGNING_CERT_PASSWORD) {
+            Write-Output "::notice::WIN_SIGNING_CERT_PFX_B64 / WIN_SIGNING_CERT_PASSWORD not set; skipping Authenticode signing."
+            exit 0
+          }
+          $pfxBytes = [Convert]::FromBase64String($env:WIN_SIGNING_CERT_PFX_B64)
+          $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $pfxBytes,
+            $env:WIN_SIGNING_CERT_PASSWORD
+          )
+          try {
+            $signParams = @{
+              FilePath      = "dist\wb\wb.exe"
+              Certificate   = $cert
+              HashAlgorithm = "SHA256"
+            }
+            if ($env:WIN_SIGNING_TIMESTAMP_URL) {
+              $signParams["TimestampServer"] = $env:WIN_SIGNING_TIMESTAMP_URL
+            }
+            $sig = Set-AuthenticodeSignature @signParams
+            if ($sig.Status -eq "UnknownError") {
+              throw "Authenticode signing failed: $($sig.StatusMessage)"
+            }
+            Write-Output "Signed dist\wb\wb.exe -> Status=$($sig.Status) Thumbprint=$($cert.Thumbprint)"
+          } finally {
+            $cert.Dispose()
+          }
+
+      - name: Package and verify Winget portable zip
+        run: |
+          uv run --group release --frozen python bin/build_winget.py --package-only
           (cd dist && sha256sum -c winbearable-*.zip.sha256)
 
       - name: Generate release Winget manifests with real SHA256
