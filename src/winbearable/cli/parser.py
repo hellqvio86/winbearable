@@ -32,6 +32,20 @@ def _add_logging_args(target: argparse.ArgumentParser, *, suppress_defaults: boo
         default=argparse.SUPPRESS if suppress_defaults else None,
         help="Optional path to append JSONL logs (or WINBEARABLE_LOG_PATH)",
     )
+    target.add_argument(
+        "--no-color",
+        dest="no_color",
+        action="store_true",
+        default=argparse.SUPPRESS if suppress_defaults else False,
+        help="Disable ANSI color output (also honors NO_COLOR)",
+    )
+    target.add_argument(
+        "--no-emoji",
+        dest="no_emoji",
+        action="store_true",
+        default=argparse.SUPPRESS if suppress_defaults else False,
+        help="Disable emoji characters in CLI output (also honors NO_EMOJI)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

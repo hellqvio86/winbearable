@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import json
 import os
 import sys
 from collections.abc import Callable
@@ -41,7 +40,6 @@ from ..models import (
     EnvironmentInfo,
     PermissionDeniedError,
     TransactionState,
-    TweakStatus,
     UnsupportedPlatformError,
     WinbearableError,
 )
@@ -70,34 +68,18 @@ from .handlers_tools import (
 )
 from .parser import absolutize_elevated_argv, build_parser
 from .render import (
+    build_summary_notes,
+    compute_sync_state,
     detailed_exit_code,
+    format_status_output,
     format_summary_markdown,
+    load_expected_fingerprints,
     parse_id_list,
     print_json,
     require_windows_for_mutation,
+    should_use_color,
+    should_use_emoji,
 )
-
-
-def _load_expected_fingerprints(args: argparse.Namespace) -> dict[str, str] | None:
-    """Parse --expected-fingerprints (JSON string or @file) or --plan-file into a fingerprint map."""
-    raw_fp = getattr(args, "expected_fingerprints", None)
-    plan_file = getattr(args, "plan_file", None)
-    merged: dict[str, str] = {}
-    if plan_file:
-        payload = json.loads(Path(plan_file).read_text(encoding="utf-8"))
-        fp_map = payload.get("precondition_fingerprints")
-        if not isinstance(fp_map, dict):
-            raise ValueError(f"Plan file '{plan_file}' does not contain 'precondition_fingerprints'.")
-        for k, v in fp_map.items():
-            merged[str(k)] = str(v)
-    if raw_fp:
-        raw_text = Path(raw_fp[1:]).read_text(encoding="utf-8") if raw_fp.startswith("@") else raw_fp
-        fp_map = json.loads(raw_text)
-        if not isinstance(fp_map, dict):
-            raise ValueError("--expected-fingerprints must decode to a JSON object.")
-        for k, v in fp_map.items():
-            merged[str(k)] = str(v)
-    return merged if (plan_file or raw_fp) else None
 
 
 def _handle_status(
@@ -127,18 +109,25 @@ def _handle_status(
         allow_managed=bool(getattr(args, "allow_managed", False)),
     )
     if args.json:
+        in_sync, sync_reasons = compute_sync_state(evaluations)
         print_json(
             {
                 "profile": profile.name,
                 "environment": env.to_dict(),
                 "results": [res.to_dict() for res in evaluations],
+                "in_sync": in_sync,
+                "sync_reasons": sync_reasons,
             }
         )
     else:
-        applied_cnt = sum(1 for item in evaluations if item.status == TweakStatus.APPLIED)
-        sys.stdout.write(f"Profile '{profile.name}': {applied_cnt}/{len(evaluations)} tweaks applied.\n")
-        for item in evaluations:
-            sys.stdout.write(f"  [{item.status}] {item.tweak_id}: {item.detail}\n")
+        sys.stdout.write(
+            format_status_output(
+                profile.name,
+                evaluations,
+                use_color=should_use_color(args),
+                use_emoji=should_use_emoji(args),
+            )
+        )
     if getattr(args, "detailed_exitcode", False):
         return detailed_exit_code(evaluations)
     return EXIT_SUCCESS
@@ -175,20 +164,22 @@ def _handle_plan(
         category_filter=getattr(args, "category", None),
     )
     if args.json:
-        print_json(summary.to_dict())
+        in_sync, sync_reasons = compute_sync_state(summary.results, summary.failed_ids)
+        print_json({**summary.to_dict(), "in_sync": in_sync, "sync_reasons": sync_reasons})
     else:
-        sys.stdout.write(format_summary_markdown(summary))
-        if is_managed_device(env) and not allow_managed:
-            sys.stdout.write(
-                "Notice: managed device detected (domain/Entra/MDM) — machine-scope tweaks skipped "
-                "(pass `--allow-managed` to override).\n"
+        extra_notes = build_summary_notes(
+            summary,
+            profile.wsl.enabled,
+            managed_notice=is_managed_device(env) and not allow_managed,
+        )
+        sys.stdout.write(
+            format_summary_markdown(
+                summary,
+                use_color=should_use_color(args),
+                use_emoji=should_use_emoji(args),
+                extra_notes=extra_notes,
             )
-        if any(not op.reversible for r in summary.results for op in r.operations):
-            sys.stdout.write("Note: non-compensable side effects (process stops / uninstalls) cannot be rolled back.\n")
-        if profile.wsl.enabled:
-            sys.stdout.write(
-                "Note: Linux-side sysctl/git baseline requires running `wb wsl baseline --apply` separately.\n"
-            )
+        )
     if getattr(args, "detailed_exitcode", False):
         return detailed_exit_code(summary.results, summary.failed_ids)
     return EXIT_ERROR if summary.failed_ids else EXIT_SUCCESS
@@ -213,7 +204,7 @@ def _handle_apply(
     only_ids = parse_id_list(getattr(args, "only", None))
     skip_ids = parse_id_list(getattr(args, "skip", None))
     allow_managed = bool(getattr(args, "allow_managed", False))
-    expected_fp = _load_expected_fingerprints(args)
+    expected_fp = load_expected_fingerprints(args)
 
     caller_sid = getattr(args, "uac_caller_sid", None)
     if caller_sid:
@@ -291,15 +282,18 @@ def _handle_apply(
         expected_fingerprints=expected_fp,
     )
     if args.json:
-        print_json(summary.to_dict())
+        in_sync, sync_reasons = compute_sync_state(summary.results, summary.failed_ids)
+        print_json({**summary.to_dict(), "in_sync": in_sync, "sync_reasons": sync_reasons})
     else:
-        sys.stdout.write(format_summary_markdown(summary))
-        if any(not op.reversible for r in summary.results for op in r.operations):
-            sys.stdout.write("Note: non-compensable side effects (process stops / uninstalls) cannot be rolled back.\n")
-        if profile.wsl.enabled:
-            sys.stdout.write(
-                "Note: Linux-side sysctl/git baseline requires running `wb wsl baseline --apply` separately.\n"
+        extra_notes = build_summary_notes(summary, profile.wsl.enabled)
+        sys.stdout.write(
+            format_summary_markdown(
+                summary,
+                use_color=should_use_color(args),
+                use_emoji=should_use_emoji(args),
+                extra_notes=extra_notes,
             )
+        )
     if getattr(args, "detailed_exitcode", False):
         return detailed_exit_code(summary.results, summary.failed_ids)
     return EXIT_ERROR if summary.failed_ids else EXIT_SUCCESS

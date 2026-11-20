@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.26.0] - 2026-11-20
+
+### CLI Output, Sync Status & JSON Automation
+
+- **ANSI Color Output (`--no-color` / `NO_COLOR`):** Added TTY-aware ANSI color formatting for `wb status`, `wb plan`, and `wb apply` headers, tweak statuses, risk tags, notes, and sync status, with `--no-color`, `NO_COLOR`, and `WINBEARABLE_NO_COLOR` opt-outs (plus `FORCE_COLOR`).
+- **Emojis Outside Tables (`--no-emoji` / `NO_EMOJI`):** Added visual emojis on headers, notes, and sync status lines while keeping Markdown tables emoji-free, with `--no-emoji`, `NO_EMOJI`, and `WINBEARABLE_NO_EMOJI` opt-outs.
+- **Default Final Sync Status & JSON `in_sync` Fields:** Added a trailing `Sync Status: IN SYNC` / `OUT OF SYNC (...)` line to `wb status`, `wb plan`, and `wb apply` by default, and included `"in_sync"` and `"sync_reasons"` in `--json` payloads for PowerShell (`ConvertFrom-Json`) and automation scripts.
+
 ## [0.25.0] - 2026-11-19
 
 ### Performance & Python 3.15

@@ -411,3 +411,66 @@ def test_wsl_set_default_cli_defaults_to_ubuntu(
     assert data["distro"] == "Ubuntu"
     assert not data["dry_run"]
     assert (["--set-default", "Ubuntu"], None) in system.wsl_commands_executed
+
+
+def test_cli_colors_emojis_and_final_sync_status(
+    cli_runner: Callable[[list[str]], tuple[int, str, str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    onedrive_registry: InMemoryRegistryBackend,
+    system: InMemorySystemBackend,
+) -> None:
+    """CLI reports final IN/OUT OF SYNC status, emits emojis outside tables, and supports --no-color/--no-emoji."""
+    custom = tmp_path / "sync-check.toml"
+    custom.write_text(
+        'name = "sync-check"\ndescription = "sync check"\n[tweaks]\n"explorer.show_file_extensions" = true\n',
+        encoding="utf-8",
+    )
+
+    # Default plan (non-TTY): no ANSI escapes, emojis present outside table, OUT OF SYNC at the end
+    code_plan, out_plan, _ = cli_runner(["plan", "--profile", str(custom)])
+    assert code_plan == 0
+    assert "\x1b[" not in out_plan
+    assert "🔍" in out_plan
+    assert "⚠️ Sync Status: OUT OF SYNC (1 drifted)" in out_plan
+    assert out_plan.strip().splitlines()[-1].endswith("OUT OF SYNC (1 drifted)")
+    table_lines = [line for line in out_plan.splitlines() if line.startswith("|")]
+    assert table_lines
+    assert all(ch not in line for line in table_lines for ch in ("🔍", "🚀", "✅", "⚠️", "❌", "💡", "ℹ️"))
+
+    # --no-emoji disables emojis while keeping Sync Status
+    code_no_emoji, out_no_emoji, _ = cli_runner(["plan", "--profile", str(custom), "--no-emoji"])
+    assert code_no_emoji == 0
+    assert all(ch not in out_no_emoji for ch in ("🔍", "🚀", "✅", "⚠️", "❌", "💡", "ℹ️"))
+    assert out_no_emoji.strip().splitlines()[-1] == "Sync Status: OUT OF SYNC (1 drifted)"
+
+    # FORCE_COLOR enables ANSI colors; --no-color and NO_COLOR disable them
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    _, out_color, _ = cli_runner(["plan", "--profile", str(custom)])
+    assert "\x1b[" in out_color
+    _, out_no_color_flag, _ = cli_runner(["plan", "--profile", str(custom), "--no-color"])
+    assert "\x1b[" not in out_no_color_flag
+    monkeypatch.setenv("NO_COLOR", "1")
+    _, out_no_color_env, _ = cli_runner(["plan", "--profile", str(custom)])
+    assert "\x1b[" not in out_no_color_env
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+    # Apply converges -> final Sync Status is IN SYNC on apply and status
+    onedrive_registry.is_simulated = False
+    system.is_simulated = False
+    code_apply, out_apply, _ = cli_runner(["apply", "--profile", str(custom), "--apply"])
+    assert code_apply == 0
+    assert "🚀" in out_apply
+    assert out_apply.strip().splitlines()[-1] == "✅ Sync Status: IN SYNC"
+
+    code_status, out_status, _ = cli_runner(["status", "--profile", str(custom), "--no-emoji"])
+    assert code_status == 0
+    assert out_status.strip().splitlines()[-1] == "Sync Status: IN SYNC"
+
+    # --json includes in_sync and sync_reasons for PowerShell / automation consumers
+    code_json, out_json, _ = cli_runner(["status", "--profile", str(custom), "--json"])
+    assert code_json == 0
+    status_payload = json.loads(out_json)
+    assert status_payload["in_sync"] is True
+    assert status_payload["sync_reasons"] == []
