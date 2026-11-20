@@ -1,6 +1,6 @@
 # winbearable — critical review, pass 4 (architecture · security · maintainability · maturity) → agent TODO
 
-Reviewed: `winbearable-main_74e0d9.zip`, `__version__ = "0.26.0"` (2026-11-20). Earlier passes are archived as `todo-v0.10.0.md`, `todo-v0.12.1.md`, `todo-v0.19.0.md` (IDs `R-/S-/N-/TRX-/SEC-/ARCH-/MAINT-/MAT-` refer to those).
+Reviewed: `winbearable-main_74e0d9.zip`, updated for `__version__ = "0.27.0"` (2026-11-20). Earlier passes are archived as `todo-v0.10.0.md`, `todo-v0.12.1.md`, `todo-v0.19.0.md` (IDs `R-/S-/N-/TRX-/SEC-/ARCH-/MAINT-/MAT-` refer to those).
 Note: an upload for 0.21.0 arrived just before this one; this review supersedes it and covers 0.19.0 → 0.26.0.
 
 **Method (same as last pass):** extract + diff against the previous tree; run all gates; re-run my three repros; **13 mutants** against security/transaction-critical lines; verify every pass-3 item in code; read new code (`backends/win32_acl.py`, caches in `backends/system_native*.py`, `cli/render.py`, `engine/evaluate.py`, crash-consistency harness, CI).

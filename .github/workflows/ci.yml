@@ -100,6 +100,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Print hypothesis wheel/module info
+        run: uv run python -c "import hypothesis; print(hypothesis.__version__, hypothesis.__file__)"
+
       - name: Run tests
         run: uv run pytest --cov=src/winbearable --cov-report=term-missing --cov-fail-under=89
 

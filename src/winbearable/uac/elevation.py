@@ -24,7 +24,7 @@ from .win32 import (
     DEFAULT_UAC_TIMEOUT_MS,
     ENV_UAC_TIMEOUT_MS,
     SEE_MASK_NOCLOSEPROCESS,
-    SW_HIDE,
+    SW_SHOWNORMAL,
     ShellExecuteInfoW,
     UacCancelledError,
     UacElevationError,
@@ -218,7 +218,7 @@ def run_elevated_wb(
         sei.lpFile = resolved_exe
         sei.lpParameters = params
         sei.lpDirectory = cwd or resolve_trusted_system32(kernel32)
-        sei.nShow = SW_HIDE
+        sei.nShow = SW_SHOWNORMAL
 
         ok = shell32.ShellExecuteExW(ctypes.byref(sei))
         if not ok:
