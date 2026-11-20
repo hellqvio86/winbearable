@@ -28,7 +28,7 @@ TWEAKS: dict[str, TweakDefinition] = {
         ),
         source_url="https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies",
         risk=RiskLevel.LOW,
-        requires_admin=False,
+        requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,

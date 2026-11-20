@@ -3,7 +3,7 @@
 # Every tweak in this profile operates strictly in HKCU / user scope.
 
 name = "user-only"
-description = "Per-user tweaks that require no Administrator privileges: install VS Code + Remote-WSL, kill OneDrive tray/Explorer pin, kill Bing search, ads, widgets, and restore classic Explorer behavior."
+description = "Per-user tweaks that require no Administrator privileges: install VS Code + Remote-WSL, kill OneDrive tray/Explorer pin, hide search highlights and taskbar search, kill ads and widgets, and restore classic Explorer behavior."
 
 [wsl]
 enabled = true
@@ -26,7 +26,7 @@ systemd = true
 
 # --- Search & Start Menu (No Admin) ---
 # Source: https://learn.microsoft.com/en-us/windows/configuration/search/
-"search.disable_bing" = true
+# Note: search.disable_bing writes HKCU\Software\Policies (admin-protected ACL on Win11) and lives in the owner profile.
 "search.disable_highlights" = true
 "search.hide_taskbar_box" = true
 "search.disable_cloud_and_history" = true
@@ -39,10 +39,9 @@ systemd = true
 "explorer.show_file_extensions" = true
 "explorer.show_hidden_files" = true
 
-# --- AI, Privacy & Hardening (No Admin) ---
-# Source: https://learn.microsoft.com/en-us/windows/client-management/manage-windows-copilot
-"ai.disable_copilot_user" = true
-"ai.disable_click_to_do" = true
+# --- Privacy & Hardening (No Admin) ---
+# Note: ai.disable_copilot_user and ai.disable_click_to_do write HKCU\Software\Policies (admin-protected ACL on Win11)
+# and belong in the owner profile.
 "privacy.disable_advertising_id" = true
 "privacy.disable_tailored_experiences" = true
 "hardening.disable_wsh_user" = true

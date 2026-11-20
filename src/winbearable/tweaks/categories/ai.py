@@ -29,7 +29,7 @@ TWEAKS: dict[str, TweakDefinition] = {
         description="Disables Windows Copilot policy in HKCU and hides the taskbar Copilot button.",
         source_url="https://learn.microsoft.com/en-us/windows/client-management/manage-windows-copilot",
         risk=RiskLevel.LOW,
-        requires_admin=False,
+        requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
@@ -135,11 +135,12 @@ TWEAKS: dict[str, TweakDefinition] = {
         title="Disable Click to Do (User Policy)",
         description=(
             "Sets HKCU\\Software\\Policies\\Microsoft\\Windows\\WindowsAI\\DisableClickToDo=1 "
-            "(no admin required; may display 'managed by your organization' in Settings)."
+            "(requires Administrator due to the HKCU\\Software\\Policies ACL; "
+            "may display 'managed by your organization' in Settings)."
         ),
         source_url="https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-windowsai",
         risk=RiskLevel.LOW,
-        requires_admin=False,
+        requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,

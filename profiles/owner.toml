@@ -22,9 +22,15 @@ systemd = true
 # Source: https://learn.microsoft.com/en-us/windows/configuration/provisioning-packages/provisioning-CSP-ref
 "bloat.disable_consumer_features" = true
 
+# --- Search (Admin-Protected HKCU Policy) ---
+# Source: https://learn.microsoft.com/en-us/windows/configuration/search/
+"search.disable_bing" = true
+
 # --- AI & Telemetry (Admin Policy & Scheduled Tasks) ---
 # Source: https://learn.microsoft.com/en-us/windows/privacy/manage-windows-recall
 "ai.disable_copilot_machine" = true
+"ai.disable_copilot_user" = true
+"ai.disable_click_to_do" = true
 "ai.disable_recall" = true
 "ai.disable_recall_feature" = true
 "ai.disable_notepad_paint_ai" = true

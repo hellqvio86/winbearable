@@ -163,7 +163,7 @@ TWEAKS: dict[str, TweakDefinition] = {
         ),
         source_url="https://learn.microsoft.com/en-us/microsoft-365-apps/security/internet-macros-blocked",
         risk=RiskLevel.LOW,
-        requires_admin=False,
+        requires_admin=True,
         min_build=MIN_SUPPORTED_BUILD,
         max_build=None,
         tested_builds=DEFAULT_TESTED_BUILDS,
