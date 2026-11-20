@@ -135,7 +135,8 @@ TWEAKS: dict[str, TweakDefinition] = {
         title="Disable Click to Do (User Policy)",
         description=(
             "Sets HKCU\\Software\\Policies\\Microsoft\\Windows\\WindowsAI\\DisableClickToDo=1 "
-            "(requires Administrator due to HKCU\\Software\\Policies ACL; may display 'managed by your organization' in Settings)."
+            "(requires Administrator due to the HKCU\\Software\\Policies ACL; "
+            "may display 'managed by your organization' in Settings)."
         ),
         source_url="https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-windowsai",
         risk=RiskLevel.LOW,

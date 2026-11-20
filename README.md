@@ -250,8 +250,8 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 
 | Tweak ID | What It Does | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value |
 | :--- | :--- | :---: | :--- | :--- | :---: | :--- |
-| `search.disable_bing` | Stops Windows Search bar from sending queries to Bing web search | No | `HKCU\Software\Policies\Microsoft\Windows\Explorer` | `DisableSearchBoxSuggestions` | `REG_DWORD` | `1` |
-| `search.disable_bing` | Disables Bing web results inside local Windows Search | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Search` | `BingSearchEnabled` | `REG_DWORD` | `0` |
+| `search.disable_bing` | Stops Windows Search bar from sending queries to Bing web search | Yes | `HKCU\Software\Policies\Microsoft\Windows\Explorer` | `DisableSearchBoxSuggestions` | `REG_DWORD` | `1` |
+| `search.disable_bing` | Disables Bing web results inside local Windows Search | Yes | `HKCU\Software\Microsoft\Windows\CurrentVersion\Search` | `BingSearchEnabled` | `REG_DWORD` | `0` |
 | `search.disable_highlights` | Removes daily trending/promotional doodles in the search box | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsDynamicSearchBoxEnabled` | `REG_DWORD` | `0` |
 | `search.hide_taskbar_box` | Hides the taskbar Search box (Win key / Start still searches) | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Search` | `SearchboxTaskbarMode` | `REG_DWORD` | `0` |
 | `search.disable_cloud_and_history` | Stops syncing search queries with Microsoft personal cloud account | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings` | `IsMSACloudSearchEnabled` | `REG_DWORD` | `0` |
@@ -274,8 +274,8 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 
 | Tweak ID | What It Does | Admin? | Registry Hive & Key Path | Value Name | Type | Target Value |
 | :--- | :--- | :---: | :--- | :--- | :---: | :--- |
-| `ai.disable_copilot_user` | Disables Microsoft Copilot AI assistant for current user | No | `HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot` | `TurnOffWindowsCopilot` | `REG_DWORD` | `1` |
-| `ai.disable_copilot_user` | Hides Copilot button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowCopilotButton` | `REG_DWORD` | `0` |
+| `ai.disable_copilot_user` | Disables Microsoft Copilot AI assistant for current user | Yes | `HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot` | `TurnOffWindowsCopilot` | `REG_DWORD` | `1` |
+| `ai.disable_copilot_user` | Hides Copilot button from taskbar | Yes | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowCopilotButton` | `REG_DWORD` | `0` |
 | `ai.disable_copilot_machine` | Disables Microsoft Copilot AI assistant machine-wide | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot` | `TurnOffWindowsCopilot` | `REG_DWORD` | `1` |
 | `ai.disable_recall` | Disables Windows Recall AI data analysis | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI` | `DisableAIDataAnalysis` | `REG_DWORD` | `1` |
 | `ai.disable_recall` | Disables Windows Recall continuous screen-snapshot recording | Yes | `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI` | `TurnOffSavingSnapshots` | `REG_DWORD` | `1` |

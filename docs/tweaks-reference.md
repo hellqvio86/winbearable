@@ -4,9 +4,9 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 
 | Tweak ID | Category | Admin? | Risk | CIS ID | Profiles | Summary |
 | :--- | :--- | :---: | :---: | :---: | :--- | :--- |
-| `ai.disable_click_to_do` | `ai` | No | `low` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Click to Do (User Policy) |
+| `ai.disable_click_to_do` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Click to Do (User Policy) |
 | `ai.disable_copilot_machine` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Copilot (Machine Policy) |
-| `ai.disable_copilot_user` | `ai` | No | `low` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Windows Copilot (Per-User) |
+| `ai.disable_copilot_user` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Copilot (Per-User) |
 | `ai.disable_notepad_paint_ai` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable AI Features in Notepad & Paint |
 | `ai.disable_recall` | `ai` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Recall & AI Snapshot Analysis |
 | `ai.disable_recall_feature` | `ai` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Windows Recall Optional Feature |
@@ -26,7 +26,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `dev.long_paths` | `dev` | Yes | `low` | — | `dev-comfort` | Enable Win32 Long Paths (> 260 chars) |
 | `dev.terminal_settings_defaults` | `dev` | No | `low` | — | `dev-comfort` | Configure Windows Terminal Developer Defaults |
 | `dev.vscode_settings_defaults` | `dev` | No | `low` | — | `dev-comfort` | Configure VS Code Developer & WSL Defaults |
-| `edge.quieting_baseline` | `edge` | No | `low` | — | `edge-quiet` | Quiet Microsoft Edge Nags, Boost, Shopping & Sidebar |
+| `edge.quieting_baseline` | `edge` | Yes | `low` | — | `edge-quiet` | Quiet Microsoft Edge Nags, Boost, Shopping & Sidebar |
 | `explorer.alt_tab_windows_only` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Alt+Tab Shows Open Windows Only (No Edge Tabs) |
 | `explorer.classic_context_menu` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Restore Classic Full Right-Click Context Menu (Windows 11) |
 | `explorer.disable_recent_frequent` | `explorer` | No | `low` | — | `corp-safe`, `dev-comfort` | Hide Recent Files & Frequent Folders in Explorer |
@@ -64,7 +64,7 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `hardening.harden_ip_stack` | `hardening` | Yes | `low` | — | `hardened-baseline` | Harden TCP/IPv4 & IPv6 Stack (No Source Routing / ICMP Redirects) |
 | `hardening.inactivity_lock` | `hardening` | Yes | `low` | — | *opt-in* | Enforce Machine Inactivity Lock Timeout (15 Minutes) |
 | `hardening.ntlm_hardening` | `hardening` | Yes | `medium` | — | `hardened-baseline` | Enforce NTLMv2 Only & Block Anonymous Enumeration |
-| `hardening.office_macro_ole` | `hardening` | No | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Block Office Internet Macros & Disable OLE Packager Shortcuts |
+| `hardening.office_macro_ole` | `hardening` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Block Office Internet Macros & Disable OLE Packager Shortcuts |
 | `hardening.powershell_module_logging` | `hardening` | Yes | `low` | — | `hardened-baseline` | Enable PowerShell Module Logging (*) |
 | `hardening.powershell_scriptblock_logging` | `hardening` | Yes | `low` | `18.9.97.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Enable PowerShell Script Block Logging |
 | `hardening.restrict_blank_passwords` | `hardening` | Yes | `medium` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Restrict Blank Passwords to Console Logon Only |
@@ -96,11 +96,11 @@ Every tweak in `winbearable` targets the maintainer's current **Windows 11 deskt
 | `privacy.disable_feedback_prompts` | `privacy` | No | `low` | — | `corp-safe`, `privacy` | Disable Windows Feedback Prompts (SIUF) |
 | `privacy.disable_inking_typing_collection` | `privacy` | No | `low` | — | `corp-safe`, `privacy` | Disable Inking & Typing Personalization Collection |
 | `privacy.disable_location_machine` | `privacy` | Yes | `medium` | — | *opt-in* | Disable Windows Location Platform (Opt-In) |
-| `privacy.disable_spotlight_user` | `privacy` | No | `low` | — | `privacy` | Disable Windows Spotlight Features (User Policy) |
+| `privacy.disable_spotlight_user` | `privacy` | Yes | `low` | — | `privacy` | Disable Windows Spotlight Features (User Policy) |
 | `privacy.disable_tailored_experiences` | `privacy` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Tailored Experiences with Diagnostic Data |
 | `privacy.language_list_optout` | `privacy` | No | `low` | — | `corp-safe`, `privacy` | Opt Out of Website Access to Language List |
 | `privacy.telemetry_minimal` | `privacy` | Yes | `low` | `18.9.16.1` | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Minimize Windows Diagnostic Telemetry & Activity History |
-| `search.disable_bing` | `search` | No | `low` | — | `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Bing / Web Results in Start Menu Search |
+| `search.disable_bing` | `search` | Yes | `low` | — | `hardened-baseline`, `owner`, `paranoid`, `privacy` | Disable Bing / Web Results in Start Menu Search |
 | `search.disable_cloud_and_history` | `search` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Cloud Content Search and Search History |
 | `search.disable_highlights` | `search` | No | `low` | — | `corp-safe`, `dev-comfort`, `hardened-baseline`, `owner`, `paranoid`, `privacy`, `user-only` | Disable Search Highlights |
 | `search.disable_wsearch_service` | `search` | Yes | `medium` | — | `paranoid` | Disable Windows Search Indexer Service (WSearch) |

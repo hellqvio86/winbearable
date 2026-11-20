@@ -24,7 +24,6 @@ def _build_init_profile_dict(env: EnvironmentInfo) -> dict[str, Any]:
         "apps.install_vscode": True,
         "onedrive.disable_tray_autorun": True,
         "onedrive.unpin_explorer": True,
-        "search.disable_bing": True,
         "explorer.classic_context_menu": True,
         "explorer.show_file_extensions": True,
         "explorer.show_hidden_files": True,

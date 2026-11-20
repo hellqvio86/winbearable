@@ -6,7 +6,7 @@ import runpy
 from pathlib import Path
 
 import winbearable.cli as cli_pkg
-from winbearable.const import HIVE_HKLM, UNSUPPORTED_IOT_LTSC_EDITION_IDS, __version__
+from winbearable.const import HIVE_HKCU, HIVE_HKLM, UNSUPPORTED_IOT_LTSC_EDITION_IDS, __version__
 from winbearable.models import RiskLevel
 from winbearable.profiles import load_profile
 from winbearable.tweaks import TWEAK_CATALOG, validate_catalog
@@ -72,15 +72,18 @@ def test_catalog_never_disables_wsl_or_core_protections() -> None:
 
 
 def test_catalog_admin_flags_and_cis_verification_consistent() -> None:
-    """HKLM/service/task/feature tweaks require admin; HKCU-only tweaks do not; CIS mappings have verification."""
+    """Machine ops and HKCU policy keys require admin; plain HKCU tweaks do not; CIS mappings have verification."""
     assert validate_catalog(TWEAK_CATALOG) == []
     seen_cis_ids: set[str] = set()
     for tid, tweak in TWEAK_CATALOG.items():
         if tweak.parameterized:
             continue
         uses_hklm = any(r.hive == HIVE_HKLM for r in tweak.registry_specs)
+        # HKCU\Software\Policies has an admin-only ACL on Windows 11, so writing it needs elevation.
+        uses_hkcu_policy = any(r.hive == HIVE_HKCU and "policies" in r.key_path.lower() for r in tweak.registry_specs)
         uses_machine_ops = bool(
             uses_hklm
+            or uses_hkcu_policy
             or tweak.service_specs
             or tweak.task_specs
             or tweak.feature_specs
@@ -149,6 +152,11 @@ def test_profiles_membership_and_corp_safe_constraints() -> None:
 
     uncovered = set(TWEAK_CATALOG.keys()) - covered - OPT_IN_TWEAKS
     assert uncovered == set(), f"Catalog tweaks missing from profiles and OPT_IN_TWEAKS: {sorted(uncovered)}"
+
+    user_only = load_profile(str(profiles_dir / "user-only.toml"))
+    for tid, enabled in user_only.tweaks.items():
+        if enabled:
+            assert not TWEAK_CATALOG[tid].requires_admin, f"user-only must not include admin tweak {tid}"
 
     corp_safe = load_profile(str(profiles_dir / "corp-safe.toml"))
     for tid, enabled in corp_safe.tweaks.items():
@@ -496,10 +504,3 @@ def test_category_modules_under_350_loc_and_cli_all_public() -> None:
 
     private_exports = [name for name in cli_pkg.__all__ if name.startswith("_")]
     assert not private_exports, f"Private symbols in winbearable.cli.__all__: {private_exports}"
-
-
-def test_hkcu_policies_tweaks_require_admin() -> None:
-    """HKCU\\Software\\Policies keys have an admin-only ACL on Windows 11 and must set requires_admin=True."""
-    for tweak in TWEAK_CATALOG.values():
-        if any(r.hive == "HKCU" and "policies" in r.key_path.lower() for r in tweak.registry_specs):
-            assert tweak.requires_admin, f"{tweak.tweak_id} writes HKCU\\Software\\Policies without requires_admin=True"
