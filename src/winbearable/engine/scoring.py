@@ -51,9 +51,15 @@ def calculate_hardening_score(
     env: EnvironmentInfo,
     registry: RegistryBackend,
     system: SystemBackend,
+    *,
+    results: list[TweakCheckResult] | None = None,
 ) -> dict[str, Any]:
     """Audit all catalog tweaks across separated dimensions and traceable CIS controls."""
-    all_results = [detect_tweak(tweak, env, registry, system) for tweak in get_all_tweaks()]
+    if results is None:
+        system.invalidate_all()
+        all_results = [detect_tweak(tweak, env, registry, system) for tweak in get_all_tweaks()]
+    else:
+        all_results = list(results)
     applicable = [res for res in all_results if res.status != TweakStatus.UNSUPPORTED_BUILD]
     passed = [res for res in applicable if res.status == TweakStatus.APPLIED]
     cis_results = [res for res in applicable if res.cis_mapping is not None and res.cis_mapping.verified_on is not None]

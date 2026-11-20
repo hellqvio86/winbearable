@@ -1,8 +1,8 @@
-"""Built-in tweaks and provenance for the `privacy` category."""
+"""Privacy tweaks for advertising ID, telemetry, and typing/feedback collection."""
 
 from __future__ import annotations
 
-from ...const import (
+from ....const import (
     ACTION_DELETE,
     ACTION_SET,
     DEFAULT_TESTED_BUILDS,
@@ -11,14 +11,14 @@ from ...const import (
     MIN_SUPPORTED_BUILD,
     REG_DWORD,
 )
-from ...models import (
+from ....models import (
     PolicyConflictPath,
     RegistrySpec,
     RiskLevel,
     TweakDefinition,
     TweakProvenance,
 )
-from ..helpers import provenance_entry
+from ...helpers import provenance_entry
 
 TWEAKS: dict[str, TweakDefinition] = {
     "privacy.disable_advertising_id": TweakDefinition(
@@ -224,192 +224,6 @@ TWEAKS: dict[str, TweakDefinition] = {
             ),
         ),
     ),
-    "privacy.disable_clipboard_history_user": TweakDefinition(
-        tweak_id="privacy.disable_clipboard_history_user",
-        category="privacy",
-        title="Disable Clipboard History (Per-User, Opt-In)",
-        description="Sets HKCU\\Software\\Microsoft\\Clipboard\\EnableClipboardHistory=0.",
-        source_url="https://learn.microsoft.com/en-us/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services",
-        risk=RiskLevel.LOW,
-        requires_admin=False,
-        min_build=MIN_SUPPORTED_BUILD,
-        max_build=None,
-        tested_builds=DEFAULT_TESTED_BUILDS,
-        registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKCU,
-                key_path=r"Software\Microsoft\Clipboard",
-                value_name="EnableClipboardHistory",
-                value_data=0,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-                policy_checks=(
-                    PolicyConflictPath(
-                        hive=HIVE_HKLM,
-                        key_path=r"SOFTWARE\Policies\Microsoft\Windows\System",
-                        value_name="AllowClipboardHistory",
-                        enforced_value=1,
-                    ),
-                ),
-            ),
-        ),
-    ),
-    "privacy.disable_clipboard_cloud_machine": TweakDefinition(
-        tweak_id="privacy.disable_clipboard_cloud_machine",
-        category="privacy",
-        title="Disable Clipboard History & Cloud Sync (Machine Policy)",
-        description="Sets AllowClipboardHistory=0 and AllowCrossDeviceClipboard=0 in HKLM policy.",
-        source_url="https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-experience#allowclipboardhistory",
-        risk=RiskLevel.LOW,
-        requires_admin=True,
-        min_build=MIN_SUPPORTED_BUILD,
-        max_build=None,
-        tested_builds=DEFAULT_TESTED_BUILDS,
-        registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKLM,
-                key_path=r"SOFTWARE\Policies\Microsoft\Windows\System",
-                value_name="AllowClipboardHistory",
-                value_data=0,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-                policy_checks=(
-                    PolicyConflictPath(
-                        hive=HIVE_HKLM,
-                        key_path=r"SOFTWARE\Microsoft\PolicyManager\current\device\Experience",
-                        value_name="AllowClipboardHistory",
-                        enforced_value=1,
-                    ),
-                ),
-            ),
-            RegistrySpec(
-                hive=HIVE_HKLM,
-                key_path=r"SOFTWARE\Policies\Microsoft\Windows\System",
-                value_name="AllowCrossDeviceClipboard",
-                value_data=0,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-        ),
-    ),
-    "privacy.disable_spotlight_user": TweakDefinition(
-        tweak_id="privacy.disable_spotlight_user",
-        category="privacy",
-        title="Disable Windows Spotlight Features (User Policy)",
-        description="Sets DisableWindowsSpotlightFeatures=1 and DisableSpotlightCollectionOnDesktop=1 in HKCU policy.",
-        source_url="https://learn.microsoft.com/en-us/windows/configuration/windows-spotlight",
-        risk=RiskLevel.LOW,
-        requires_admin=False,
-        min_build=MIN_SUPPORTED_BUILD,
-        max_build=None,
-        tested_builds=DEFAULT_TESTED_BUILDS,
-        registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKCU,
-                key_path=r"Software\Policies\Microsoft\Windows\CloudContent",
-                value_name="DisableWindowsSpotlightFeatures",
-                value_data=1,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-            RegistrySpec(
-                hive=HIVE_HKCU,
-                key_path=r"Software\Policies\Microsoft\Windows\CloudContent",
-                value_name="DisableSpotlightCollectionOnDesktop",
-                value_data=1,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-        ),
-    ),
-    "privacy.disable_advertising_id_machine": TweakDefinition(
-        tweak_id="privacy.disable_advertising_id_machine",
-        category="privacy",
-        title="Disable Advertising ID (Machine Policy)",
-        description="Sets HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\AdvertisingInfo\\DisabledByGroupPolicy=1.",
-        source_url="https://learn.microsoft.com/en-us/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services",
-        risk=RiskLevel.LOW,
-        requires_admin=True,
-        min_build=MIN_SUPPORTED_BUILD,
-        max_build=None,
-        tested_builds=DEFAULT_TESTED_BUILDS,
-        registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKLM,
-                key_path=r"SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo",
-                value_name="DisabledByGroupPolicy",
-                value_data=1,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-        ),
-    ),
-    "privacy.disable_error_reporting": TweakDefinition(
-        tweak_id="privacy.disable_error_reporting",
-        category="privacy",
-        title="Disable Windows Error Reporting",
-        description="Sets HKLM\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\Disabled=1.",
-        source_url="https://learn.microsoft.com/en-us/windows/win32/wer/wer-settings",
-        risk=RiskLevel.LOW,
-        requires_admin=True,
-        min_build=MIN_SUPPORTED_BUILD,
-        max_build=None,
-        tested_builds=DEFAULT_TESTED_BUILDS,
-        registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKLM,
-                key_path=r"SOFTWARE\Microsoft\Windows\Windows Error Reporting",
-                value_name="Disabled",
-                value_data=1,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-        ),
-    ),
-    "privacy.delivery_optimization_http_only": TweakDefinition(
-        tweak_id="privacy.delivery_optimization_http_only",
-        category="privacy",
-        title="Restrict Delivery Optimization to HTTP Only (No P2P)",
-        description="Sets HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization\\DODownloadMode=0.",
-        source_url="https://learn.microsoft.com/en-us/windows/deployment/do/waas-delivery-optimization-reference",
-        risk=RiskLevel.LOW,
-        requires_admin=True,
-        min_build=MIN_SUPPORTED_BUILD,
-        max_build=None,
-        tested_builds=DEFAULT_TESTED_BUILDS,
-        registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKLM,
-                key_path=r"SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization",
-                value_name="DODownloadMode",
-                value_data=0,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-        ),
-    ),
-    "privacy.disable_location_machine": TweakDefinition(
-        tweak_id="privacy.disable_location_machine",
-        category="privacy",
-        title="Disable Windows Location Platform (Opt-In)",
-        description="Sets DisableLocation=1 (breaks auto timezone, weather, and maps).",
-        source_url="https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-privacy#disablelocation",
-        risk=RiskLevel.MEDIUM,
-        requires_admin=True,
-        min_build=MIN_SUPPORTED_BUILD,
-        max_build=None,
-        tested_builds=DEFAULT_TESTED_BUILDS,
-        registry_specs=(
-            RegistrySpec(
-                hive=HIVE_HKLM,
-                key_path=r"SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors",
-                value_name="DisableLocation",
-                value_data=1,
-                value_type=REG_DWORD,
-                action=ACTION_SET,
-            ),
-        ),
-    ),
 }
 
 PROVENANCE: dict[str, TweakProvenance] = {
@@ -469,66 +283,5 @@ PROVENANCE: dict[str, TweakProvenance] = {
         "Stops local inking/typing dictionary collection.",
         "registry_value",
         "Verified InputPersonalization and Input\\TIPC values.",
-    ),
-    "privacy.disable_clipboard_history_user": provenance_entry(
-        "Disables per-user Windows Clipboard History (Win+V).",
-        "Microsoft Windows Clipboard EnableClipboardHistory reference",
-        "Low risk: HKCU clipboard preference (opt-in).",
-        "Clipboard history is not persisted.",
-        "registry_value",
-        "Verified HKCU Software\\Microsoft\\Clipboard EnableClipboardHistory=0.",
-    ),
-    "privacy.disable_clipboard_cloud_machine": provenance_entry(
-        "Disables clipboard history and cross-device clipboard cloud sync via machine policy.",
-        "Microsoft Windows System Policy CSP AllowClipboardHistory / AllowCrossDeviceClipboard",
-        "Low risk: machine policy keys; reversible via snapshot.",
-        "Prevents clipboard contents from syncing to Microsoft cloud.",
-        "registry_value",
-        "Verified HKLM Policies\\Microsoft\\Windows\\System clipboard policy keys.",
-        supported_editions=("Pro", "Enterprise", "Education"),
-    ),
-    "privacy.disable_spotlight_user": provenance_entry(
-        "Disables Windows Spotlight features and desktop Spotlight collection via user policy.",
-        "Microsoft Windows CloudContent ADMX DisableWindowsSpotlightFeatures",
-        "Low risk: HKCU policy preference (honoured on Pro/Enterprise/Education).",
-        "Stops Spotlight background downloads and lock-screen promos.",
-        "registry_value",
-        "Verified HKCU Policies\\Microsoft\\Windows\\CloudContent Spotlight values.",
-        supported_editions=("Pro", "Enterprise", "Education"),
-    ),
-    "privacy.disable_advertising_id_machine": provenance_entry(
-        "Disables Windows Advertising ID machine-wide via Group Policy.",
-        "Microsoft AdvertisingInfo DisabledByGroupPolicy ADMX reference",
-        "Low risk: machine policy key.",
-        "Disables advertising ID for all users.",
-        "registry_value",
-        "Verified HKLM Policies\\Microsoft\\Windows\\AdvertisingInfo DisabledByGroupPolicy=1.",
-        supported_editions=("Pro", "Enterprise", "Education"),
-    ),
-    "privacy.disable_error_reporting": provenance_entry(
-        "Disables Windows Error Reporting (WER) crash upload service.",
-        "Microsoft Windows Error Reporting Disabled registry reference",
-        "Low risk: prevents crash dumps from being uploaded to Microsoft.",
-        "Crash reports are not sent externally.",
-        "registry_value",
-        "Verified HKLM Windows Error Reporting Disabled=1.",
-    ),
-    "privacy.delivery_optimization_http_only": provenance_entry(
-        "Restricts Windows Update Delivery Optimization to HTTP only (no LAN/internet P2P).",
-        "Microsoft Learn: Delivery Optimization DODownloadMode=0",
-        "Low risk: disables P2P update sharing.",
-        "Updates download directly from Microsoft/WSUS over HTTP only.",
-        "registry_value",
-        "Verified HKLM Policies\\DeliveryOptimization DODownloadMode=0.",
-        supported_editions=("Pro", "Enterprise", "Education"),
-    ),
-    "privacy.disable_location_machine": provenance_entry(
-        "Disables Windows Location platform machine-wide via policy.",
-        "Microsoft Windows LocationAndSensors DisableLocation ADMX reference",
-        "Medium risk: breaks automatic timezone, weather, and maps location; opt-in.",
-        "Apps and OS services cannot query device location.",
-        "registry_value",
-        "Verified HKLM Policies\\LocationAndSensors DisableLocation=1.",
-        supported_editions=("Pro", "Enterprise", "Education"),
     ),
 }

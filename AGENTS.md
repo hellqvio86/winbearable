@@ -24,7 +24,7 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
 4. **Minimal Windows Cloud CI Runners (Contracts & Release-Only Winget):**
    - Full unit test matrices run on free `ubuntu-latest`. Only two `windows-latest` jobs are permitted in `.github/workflows/ci.yml`: `windows-contracts` (read-only contract & Windows integration tests on PR/push) and `publish-winget-asset` (on `release: published` to build and attach the PyInstaller Winget zip).
    - Run as much as possible **locally**:
-     - Unit tests & Linux dev flow: inside the Linux **Dev Container** (`.devcontainer/devcontainer.json`, using free open-source `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`) or WSL2.
+     - Unit tests & Linux dev flow: inside the Linux **Dev Container** (`.devcontainer/devcontainer.json`, using free open-source `ghcr.io/astral-sh/uv:python3.15-bookworm-slim`) or WSL2.
      - Real Windows integration tests (`tests/test_windows_integration.py`): run locally on Windows (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py`) or in a local Windows Docker container (`Dockerfile.windows` when Docker Desktop is in Windows-container mode).
 
 ---

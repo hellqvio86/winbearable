@@ -8,7 +8,7 @@ from typing import Any
 
 from ..audit import build_doctor_blockers, run_security_audit
 from ..backends import RegistryBackend, SystemBackend
-from ..const import MIN_SUPPORTED_BUILD, __version__
+from ..const import MIN_SUPPORTED_BUILD, __version__, are_env_overrides_allowed, get_active_env_overrides
 from ..engine import (
     inspect_defender_smartscreen_posture,
     inspect_vbs_credential_guard_posture,
@@ -148,6 +148,8 @@ def handle_doctor(
         "incomplete_runs": [run.to_dict() for run in incomplete_runs],
         "command_history": list(raw_history)[-10:] if isinstance(raw_history, list) else [],
         "last_outcome": last_outcome.to_dict() if last_outcome is not None else None,
+        "active_env_overrides": get_active_env_overrides(),
+        "env_overrides_allowed": are_env_overrides_allowed(is_elevated=env.is_admin),
     }
     if args.json:
         print_json(payload)
