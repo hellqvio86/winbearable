@@ -19,3 +19,4 @@ coverage.json
 *.p12
 *.cer
 *.snk
+.env
