@@ -141,7 +141,7 @@ winget install --exact --id Astral-sh.uv --scope user --accept-source-agreements
 >
 > 3. **Open another new `cmd` window** (or restart) so `wb` / `winbearable` is picked up from `%USERPROFILE%\.local\bin`, then verify with `wb --version` (or invoke `%USERPROFILE%\.local\bin\wb.exe` directly without restarting your shell).
 
-*(Prefer `pipx`? Install Python and `pipx` via `winget install --exact --id Python.Python.3.14 --scope user` and `pip install --user pipx`, then run `pipx install winbearable`.)*
+*(Prefer `pipx`? Install Python and `pipx` via `winget install --exact --id Python.Python.3.15 --scope user` and `pip install --user pipx`, then run `pipx install winbearable`.)*
 
 ### Step 2: Install VS Code, Kill OneDrive Tray, Kill Bing Search & Fix Explorer (`wb`)
 
