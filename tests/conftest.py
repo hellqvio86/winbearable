@@ -47,11 +47,16 @@ def system() -> InMemorySystemBackend:
 
 @pytest.fixture
 def cli_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     onedrive_registry: InMemoryRegistryBackend,
     system: InMemorySystemBackend,
     state_store: StateStore,
 ) -> Callable[[list[str]], tuple[int, str, str]]:
     """Return a helper that runs `wb` CLI commands and captures (exit_code, stdout, stderr)."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
 
     def _invoke(argv: list[str]) -> tuple[int, str, str]:
         out_buf = io.StringIO()
