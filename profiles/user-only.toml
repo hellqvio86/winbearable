@@ -26,7 +26,7 @@ systemd = true
 
 # --- Search & Start Menu (No Admin) ---
 # Source: https://learn.microsoft.com/en-us/windows/configuration/search/
-"search.disable_bing" = true
+# Note: search.disable_bing writes HKCU\Software\Policies (admin-protected ACL on Win11) and lives in owner/paranoid.
 "search.disable_highlights" = true
 "search.hide_taskbar_box" = true
 "search.disable_cloud_and_history" = true
@@ -39,10 +39,9 @@ systemd = true
 "explorer.show_file_extensions" = true
 "explorer.show_hidden_files" = true
 
-# --- AI, Privacy & Hardening (No Admin) ---
-# Source: https://learn.microsoft.com/en-us/windows/client-management/manage-windows-copilot
-"ai.disable_copilot_user" = true
-"ai.disable_click_to_do" = true
+# --- Privacy & Hardening (No Admin) ---
+# Note: ai.disable_copilot_user and ai.disable_click_to_do write HKCU\Software\Policies (admin-protected ACL on Win11)
+# and belong in owner/paranoid profiles.
 "privacy.disable_advertising_id" = true
 "privacy.disable_tailored_experiences" = true
 "hardening.disable_wsh_user" = true

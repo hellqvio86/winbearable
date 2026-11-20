@@ -496,3 +496,10 @@ def test_category_modules_under_350_loc_and_cli_all_public() -> None:
 
     private_exports = [name for name in cli_pkg.__all__ if name.startswith("_")]
     assert not private_exports, f"Private symbols in winbearable.cli.__all__: {private_exports}"
+
+
+def test_hkcu_policies_tweaks_require_admin() -> None:
+    """HKCU\\Software\\Policies keys have an admin-only ACL on Windows 11 and must set requires_admin=True."""
+    for tweak in TWEAK_CATALOG.values():
+        if any(r.hive == "HKCU" and "policies" in r.key_path.lower() for r in tweak.registry_specs):
+            assert tweak.requires_admin, f"{tweak.tweak_id} writes HKCU\\Software\\Policies without requires_admin=True"
