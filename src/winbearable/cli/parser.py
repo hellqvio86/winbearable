@@ -86,7 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # wb status
     status_parser = _add_sub(subparsers, "status", help="Show current tweak status and registry paths for a profile")
-    status_parser.add_argument("--profile", default="user-only", help="Profile name or TOML path (default: user-only)")
+    status_parser.add_argument(
+        "--profile",
+        default=None,
+        help="Profile name or TOML/JSON path (default: user-only, or WINBEARABLE_PROFILE / settings)",
+    )
     status_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     status_parser.add_argument(
         "--detailed-exitcode",
@@ -97,7 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # wb plan
     plan_parser = _add_sub(subparsers, "plan", help="Preview registry changes required to converge a profile")
-    plan_parser.add_argument("--profile", default="user-only", help="Profile name or TOML path (default: user-only)")
+    plan_parser.add_argument(
+        "--profile",
+        default=None,
+        help="Profile name or TOML/JSON path (default: user-only, or WINBEARABLE_PROFILE / settings)",
+    )
     plan_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     plan_parser.add_argument(
         "--detailed-exitcode",
@@ -108,7 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # wb apply
     apply_parser = _add_sub(subparsers, "apply", help="Apply a profile (dry-run unless --apply is passed)")
-    apply_parser.add_argument("--profile", default="user-only", help="Profile name or TOML path (default: user-only)")
+    apply_parser.add_argument(
+        "--profile",
+        default=None,
+        help="Profile name or TOML/JSON path (default: user-only, or WINBEARABLE_PROFILE / settings)",
+    )
     apply_parser.add_argument("--apply", action="store_true", help="Actually write changes to the system")
     apply_parser.add_argument(
         "--detailed-exitcode",
@@ -280,7 +292,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # wb tui
     tui_parser = _add_sub(subparsers, "tui", help="Launch optional Textual TUI")
-    tui_parser.add_argument("--profile", default="user-only", help="Profile name or TOML path (default: user-only)")
+    tui_parser.add_argument(
+        "--profile",
+        default=None,
+        help="Profile name or TOML/JSON path (default: user-only, or WINBEARABLE_PROFILE / settings)",
+    )
 
     # wb wsl ...
     wsl_parser = _add_sub(subparsers, "wsl", help="Audit, plan, or apply WSL2 (.wslconfig and /etc/wsl.conf) settings")

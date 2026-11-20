@@ -221,6 +221,7 @@ def test_architectural_layer_boundaries() -> None:
         "state": 4,
         "engine": 5,
         "audit": 5,
+        "settings": 5,
         "uac": 6,
         "tui": 6,
         "cli": 6,

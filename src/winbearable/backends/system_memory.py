@@ -98,6 +98,9 @@ class InMemorySystemBackend:
     def last_outcome(self, value: OperationOutcome | None) -> None:
         self._outcome_local.value = value
 
+    def invalidate_all(self) -> None:
+        return None
+
     def detect_environment(self, registry: RegistryBackend) -> EnvironmentInfo:
         ok_b, build_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
         resolved_build = (

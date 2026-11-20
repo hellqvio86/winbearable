@@ -19,8 +19,10 @@ from hypothesis import strategies as st  # noqa: E402
 
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import InMemorySystemBackend
+from winbearable.cli.render import escape_md_cell
 from winbearable.const import HIVE_HKCU, HIVE_HKLM, REG_DWORD, REG_SZ
 from winbearable.engine import apply_profile, recover_incomplete_runs, rollback_runs
+from winbearable.log import sanitize_for_terminal
 from winbearable.models import ProfileSpec
 from winbearable.state import StateStore
 from winbearable.tweaks.catalog import TWEAK_CATALOG
@@ -154,3 +156,11 @@ def test_interrupted_apply_followed_by_recover_restores_consistent_state(
             recover_incomplete_runs(store, reg, sys_b, dry_run=False, allow_simulated=True)
             assert store.get_incomplete_runs() == []
             assert dict(reg._values) == before_reg
+
+
+@given(text=st.text(max_size=200))
+@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+def test_terminal_sanitizers_never_emit_c0_c1_controls(text: str) -> None:
+    """Neither sanitize_for_terminal nor escape_md_cell emits C0/C1 control chars (except tab)."""
+    for out in (sanitize_for_terminal(text), escape_md_cell(text)):
+        assert not any(ord(c) < 32 and c not in "\t" or 0x7F <= ord(c) <= 0x9F for c in out)

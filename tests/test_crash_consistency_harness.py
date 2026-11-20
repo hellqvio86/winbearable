@@ -103,13 +103,76 @@ def test_crash_at_each_checkpoint_recovers_idempotently(tmp_path: Path) -> None:
         }:
             recovered = recover_incomplete_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
             assert len(recovered) == 1
-            assert recovered[0].state in {TransactionState.ROLLED_BACK, TransactionState.PARTIALLY_ROLLED_BACK}
+            assert recovered[0].state == TransactionState.ROLLED_BACK
         else:
             assert runs[0].state == TransactionState.ROLLED_BACK
+
+        assert dict(reg._values) == {}
 
         # Re-running recovery is a complete no-op
         second_pass = recover_incomplete_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
         assert second_pass == []
+
+
+@pytest.mark.parametrize(
+    ("tweak_id", "target_is_reg", "method_name"),
+    [
+        ("explorer.show_file_extensions", True, "set_value"),
+        ("services.disable_diagtrack", True, "set_value"),
+        ("dev.git_sane_defaults", False, "set_git_global_config"),
+        ("telemetry.disable_scheduled_tasks", False, "set_scheduled_task_enabled"),
+    ],
+)
+def test_crash_between_mutation_and_journal_flush_restores_baseline(
+    tmp_path: Path,
+    tweak_id: str,
+    target_is_reg: bool,
+    method_name: str,
+) -> None:
+    """Crashing immediately after a backend mutation restores exact pre-apply baseline."""
+    reg = InMemoryRegistryBackend()
+    reg.set_value("HKLM", r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start", 2)
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    env = sysb.detect_environment(reg)
+    store = StateStore(state_path=tmp_path / "state.json")
+    profile = ProfileSpec(name="mid-crash", description="mid-crash", tweaks={tweak_id: True})
+
+    baseline_reg = dict(reg._values)
+    baseline_git = dict(sysb.git_global_config)
+    baseline_tasks = dict(sysb.scheduled_tasks)
+
+    target_obj = reg if target_is_reg else sysb
+    orig_fn = getattr(target_obj, method_name)
+    crashed = {"done": False}
+
+    def _mutate_then_crash(*args: object, **kwargs: object) -> object:
+        res = orig_fn(*args, **kwargs)
+        if not crashed["done"]:
+            crashed["done"] = True
+            raise _InjectedCrashError("crash before journal flush")
+        return res
+
+    with patch.object(target_obj, method_name, side_effect=_mutate_then_crash):
+        summary = apply_profile(
+            profile,
+            env,
+            reg,
+            sysb,
+            store,
+            dry_run=False,
+            allow_simulated=True,
+            allow_high_risk=True,
+            allow_managed=True,
+        )
+    assert tweak_id in summary.failed_ids
+
+    if store.get_incomplete_runs():
+        recovered = recover_incomplete_runs(store, reg, sysb, dry_run=False, allow_simulated=True)
+        assert all(r.state == TransactionState.ROLLED_BACK for r in recovered)
+
+    assert dict(reg._values) == baseline_reg
+    assert dict(sysb.git_global_config) == baseline_git
+    assert dict(sysb.scheduled_tasks) == baseline_tasks
 
 
 def test_fault_injection_disk_full_permission_denied_and_corrupt_state_recovery(tmp_path: Path) -> None:

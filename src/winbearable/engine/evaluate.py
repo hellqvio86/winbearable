@@ -299,6 +299,7 @@ def evaluate_profile(
 ) -> list[TweakCheckResult]:
     """Evaluate all enabled (or explicitly selected) tweaks in a profile."""
     validate_profile_spec(profile)
+    system.invalidate_all()
     results: list[TweakCheckResult] = []
     if only_ids is not None:
         candidate_ids = [tid for tid in profile.tweaks if tid in only_ids]

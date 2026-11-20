@@ -227,7 +227,6 @@ Every `wb plan`, `wb apply`, `wb status`, and `wb rollback` command prints the *
 | `start.disable_recommendations` | Disables Windows tips & tricks suggestions | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SubscribedContent-338389Enabled` | `REG_DWORD` | `0` |
 | `start.disable_recommendations` | Disables post-install promo notifications ("Windows Welcome") | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager` | `SoftLandingEnabled` | `REG_DWORD` | `0` |
 | `start.disable_recommendations` | Disables Windows 11 Start menu "Recommended" feed ads | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `Start_IrisRecommendations` | `REG_DWORD` | `0` |
-| `taskbar.disable_widgets_and_chat` | Removes the MSN News/Weather Widgets button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarDa` | `REG_DWORD` | `0` |
 | `taskbar.disable_widgets_and_chat` | Removes the Microsoft Teams Chat icon from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `TaskbarMn` | `REG_DWORD` | `0` |
 | `taskbar.disable_widgets_and_chat` | Hides the Task View (virtual desktops) button from taskbar | No | `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` | `ShowTaskViewButton` | `REG_DWORD` | `0` |
 | `explorer.classic_context_menu` | Restores full Windows 10 right-click menu (no "Show more options") | No | `HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32` | `(Default)` | `REG_SZ` | `""` |
@@ -346,6 +345,35 @@ When running inside **WSL2**, you can audit your live Windows host and see which
 
 ---
 
+## Settings, Common Flags & Environment Variables
+
+Configure persistent defaults in `~/.config/winbearable/settings.toml` (or `settings.json`):
+
+```toml
+default_profile = "paranoid"
+debug = true
+```
+
+Precedence (highest to lowest): **CLI flag** → **environment variable** → **settings file** → **built-in default** (`user-only`, `debug = false`).
+
+| Option / Flag | Environment Variable | Description |
+| :--- | :--- | :--- |
+| `--profile PROFILE` | `WINBEARABLE_PROFILE` | Default profile for `status`, `plan`, `apply`, and `tui` (default: `user-only`). |
+| `--debug` | `WINBEARABLE_DEBUG` | Enable `DEBUG` stderr logs and full tracebacks (`1`/`true`/`yes`/`on`). |
+| — | `WINBEARABLE_SETTINGS` | Override path to `settings.toml` or `settings.json`. |
+| — | `WINBEARABLE_STATE_PATH` | Override path to `state.json`. |
+| `--log-format {json,text}` | `WINBEARABLE_LOG_FORMAT` | `stderr` log format (default: `json`). |
+| `--log-file PATH` | `WINBEARABLE_LOG_PATH` | Append rotating JSONL logs to a file. |
+| `--no-color` / `--no-emoji` | `NO_COLOR` / `NO_EMOJI` | Disable ANSI colors or emoji output. |
+| `--apply` | — | Mutate the system (all commands are dry-run without `--apply`). |
+| `--allow-managed` | — | Allow machine-scope tweaks on domain/Entra/MDM-managed devices. |
+| `--elevate` | — | Trigger a UAC prompt if not already running as Administrator. |
+| `--json` | — | Emit machine-readable JSON output. |
+
+See [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md) for the complete reference of all subcommands, flags, and environment variables.
+
+---
+
 ## Windows Build & Edition Support Policy
 
 We don't like Windows enough to maintain legacy workarounds or embedded/IoT quirks. **Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT and LTSC are strictly unsupported.**
@@ -383,6 +411,8 @@ make release-check # lint + test + TruffleHog + Trivy
 
 ## Documentation
 
+- [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md)
+- [Support & Compatibility Policy](docs/support-policy.md)
 - [Project Roadmap & TODO](TODO.md)
 - [Per-Tweak Catalog Reference](docs/tweaks-reference.md)
 - [Frequently Asked Questions (FAQ)](docs/faq.md)
@@ -391,6 +421,14 @@ make release-check # lint + test + TruffleHog + Trivy
 - [AI Agent Instructions (`AGENTS.md`)](AGENTS.md)
 - [Security Policy (`SECURITY.md`)](SECURITY.md)
 - [Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)
+
+### Verifying Release Provenance (`gh attestation verify`)
+
+Release archives (PyPI wheels/sdists and Winget zips) include GitHub build-provenance attestations:
+
+```bash
+gh attestation verify winbearable-0.27.0-win-x64.zip --owner hellqvio86
+```
 
 ---
 

@@ -26,6 +26,7 @@ from ..const import (
 )
 from ..models import EnvironmentInfo, OperationOutcome, OperationStatus, RegistryView
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS, ONEDRIVE_SETUP_CANDIDATES
+from .inventory_cache import InventoryCache
 from .posture import collect_posture_observations, safe_get_reg
 from .registry import RegistryBackend, find_wsl_reg_exe, is_wsl2
 from .system_native_apps import NativeAppMixin
@@ -74,20 +75,21 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
         popen_factory: Callable[..., Any] | None = None,
         wsl2_fn: Callable[[], bool] | None = None,
         find_reg_fn: Callable[[], str | None] | None = None,
+        inventory_cache: InventoryCache | None = None,
     ) -> None:
         self._platform = platform_override or sys.platform
         self._windll_override = windll_override
         self._setup_candidates = setup_candidates
         self._popen_factory: Callable[..., Any] = popen_factory or subprocess.Popen
-        self._has_custom_popen: bool = popen_factory is not None
         self._wsl2_fn: Callable[[], bool] = wsl2_fn or is_wsl2
         self._find_reg_fn: Callable[[], str | None] = find_reg_fn or find_wsl_reg_exe
-        self._winget_installed_cache: dict[str, bool] = {}
-        self._git_global_config_cache: dict[str, str | None] = {}
-        self._wsl_env_cache: tuple[bool, str | None, list[str]] | None = None
+        self._inventory_cache = inventory_cache or InventoryCache()
         self._outcome_local = threading.local()
         self._state_lock = threading.Lock()
         self.command_history: list[dict[str, Any]] = []
+
+    def invalidate_all(self) -> None:
+        self._inventory_cache.invalidate_all()
 
     @property
     def last_outcome(self) -> OperationOutcome | None:
@@ -312,8 +314,8 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
                 wsl_distros = [distro_name]
 
         if is_win:
-            cached_wsl = None if self._has_custom_popen else self._wsl_env_cache
-            if cached_wsl is not None:
+            hit, cached_wsl = self._inventory_cache.get("wsl_env", "")
+            if hit and cached_wsl is not None:
                 wsl_installed, wsl_version, cached_distros = cached_wsl
                 wsl_distros = list(cached_distros)
             else:
@@ -327,8 +329,7 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
                 list_res = self._run_native_cmd([self._sys32_exe("wsl.exe"), "--list", "--quiet"])
                 if list_res.returncode == 0:
                     wsl_distros = [line.strip() for line in list_res.stdout.splitlines() if line.strip()]
-                if not self._has_custom_popen:
-                    self._wsl_env_cache = (wsl_installed, wsl_version, list(wsl_distros))
+                self._inventory_cache.set("wsl_env", "", (wsl_installed, wsl_version, list(wsl_distros)))
 
         os_label = "Windows" if is_win else ("Linux (WSL2 -> Windows host)" if wsl_interop_audit else platform.system())
 
@@ -501,7 +502,7 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
     def run_wsl_command(self, args: list[str], input_text: str | None = None) -> CommandResult:
         mutating_ops = {"--install", "--import", "--set-default", "--manage", "--update", "--unregister"}
         if input_text is not None or any(arg in mutating_ops for arg in args):
-            self._wsl_env_cache = None
+            self._inventory_cache.invalidate("wsl_env")
         long_ops = {"--install", "--export", "--import"}
         timeout = 600.0 if any(arg in long_ops for arg in args) else 60.0
         return self._run_native_cmd([self._sys32_exe("wsl.exe"), *args], input_text=input_text, timeout=timeout)
@@ -531,15 +532,15 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
 
     def get_git_global_config(self, key: str) -> str | None:
         cache_key = key.strip().lower()
-        if not self._has_custom_popen and cache_key in self._git_global_config_cache:
-            return self._git_global_config_cache[cache_key]
+        hit, cached = self._inventory_cache.get("git_config", cache_key)
+        if hit:
+            return str(cached) if cached is not None else None
         val = get_git_global_config(self._run_native_cmd, key, self._resolve_git_exe, is_admin=self._check_is_admin())
-        if not self._has_custom_popen:
-            self._git_global_config_cache[cache_key] = val
+        self._inventory_cache.set("git_config", cache_key, val)
         return val
 
     def set_git_global_config(self, key: str, value: str | None) -> bool:
-        self._git_global_config_cache.pop(key.strip().lower(), None)
+        self._inventory_cache.invalidate("git_config", key.strip().lower())
         return set_git_global_config(
             self._run_native_cmd, key, value, self._resolve_git_exe, is_admin=self._check_is_admin()
         )

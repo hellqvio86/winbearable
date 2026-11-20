@@ -11,13 +11,15 @@ from unittest.mock import patch
 import pytest
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend, NativeSystemBackend
+from winbearable.backends.inventory_cache import InventoryCache
 from winbearable.backends.system_protocol import CommandResult
 from winbearable.backends.win32_acl import (
     apply_windows_private_acl,
     find_permissive_sddl_trustees,
     verify_windows_private_acl,
 )
-from winbearable.engine import evaluate_profile
+from winbearable.const import HIVE_HKLM, NT_CURRENT_VERSION_KEY, REG_SZ
+from winbearable.engine import apply_profile, evaluate_profile
 from winbearable.models import (
     OperationOutcome,
     OperationStatus,
@@ -259,3 +261,84 @@ def test_evaluate_profile_validates_unknown_tweak_ids_directly() -> None:
     bad = ProfileSpec(name="direct", description="bad direct spec", tweaks={"nonexistent.tweak": True})
     with pytest.raises(ProfileValidationError, match="unknown tweak ID"):
         evaluate_profile(bad, env, reg, sysb)
+
+
+def test_precondition_check_sees_out_of_band_package_install(
+    state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Out-of-band changes invalidate at evaluate/pre-apply and trigger precondition drift (CACHE-01)."""
+    monkeypatch.setenv("WINBEARABLE_BUILD_OVERRIDE", "26300")
+    now = {"t": 100.0}
+    cache = InventoryCache(ttl_seconds=30.0, clock=lambda: now["t"])
+    state = {"installed": False, "winget_calls": 0, "git_val": ""}
+
+    class _FakeProc:
+        def __init__(self, rc: int, out: str) -> None:
+            self.returncode = rc
+            self._out = out
+
+        def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
+            return (self._out, "")
+
+        def kill(self) -> None:
+            return None
+
+    def _fake_popen(cmd: list[str], **_kwargs: object) -> _FakeProc:
+        exe = cmd[0].lower()
+        if exe.endswith("winget.exe") and "list" in cmd:
+            state["winget_calls"] += 1
+            if state["installed"]:
+                return _FakeProc(
+                    0,
+                    "Name                 Id                             Version\n"
+                    "VS Code              Microsoft.VisualStudioCode     1.99.0\n",
+                )
+            return _FakeProc(0, "Name                 Id                             Version\n")
+        if exe.endswith("code.cmd") and "--list-extensions" in cmd:
+            return _FakeProc(0, "")
+        if exe.endswith("git.exe") and "--get" in cmd:
+            if state["git_val"]:
+                return _FakeProc(0, state["git_val"] + "\n")
+            return _FakeProc(1, "")
+        return _FakeProc(0, "")
+
+    reg = InMemoryRegistryBackend()
+    reg.set_value(HIVE_HKLM, NT_CURRENT_VERSION_KEY, "EditionID", "Professional", REG_SZ)
+    sysb = NativeSystemBackend(platform_override="win32", popen_factory=_fake_popen, inventory_cache=cache)
+    with patch.object(sysb, "_check_is_admin", return_value=False):
+        env = sysb.detect_environment(reg)
+
+        # Verify caching works with fake runner on repeated back-to-back calls and expires on TTL
+        assert sysb.is_winget_package_installed("Microsoft.VisualStudioCode") is False
+        assert sysb.is_winget_package_installed("Microsoft.VisualStudioCode") is False
+        assert state["winget_calls"] == 1
+        now["t"] += 31.0
+        assert sysb.is_winget_package_installed("Microsoft.VisualStudioCode") is False
+        assert state["winget_calls"] == 2
+
+        # Out-of-band winget install is seen on evaluate_profile
+        pkg_prof = ProfileSpec(name="pkg-cache", description="pkg cache", tweaks={"apps.install_vscode": True})
+        res_before = evaluate_profile(pkg_prof, env, reg, sysb)
+        assert res_before[0].status.value == "drifted"
+        state["installed"] = True
+        res_after = evaluate_profile(pkg_prof, env, reg, sysb)
+        assert any(
+            op.operation_type == "winget_package" and op.before_state == "installed" for op in res_after[0].operations
+        )
+
+        # Out-of-band git config change between plan and apply triggers Precondition drift detected
+        git_prof = ProfileSpec(name="git-cache", description="git cache", tweaks={"dev.git_sane_defaults": True})
+        plan_summary = apply_profile(git_prof, env, reg, sysb, state_store, dry_run=True, allow_simulated=True)
+        assert plan_summary.precondition_fingerprints
+        state["git_val"] = "input"
+        with pytest.raises(Exception, match="Precondition drift detected"):
+            apply_profile(
+                git_prof,
+                env,
+                reg,
+                sysb,
+                state_store,
+                dry_run=False,
+                allow_simulated=True,
+                expected_fingerprints=plan_summary.precondition_fingerprints,
+            )

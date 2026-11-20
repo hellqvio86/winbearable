@@ -35,7 +35,7 @@ from ..engine import (
     run_profile_command,
     summarize_elevation_requirements,
 )
-from ..log import configure_logging, get_logger, reset_logging
+from ..log import configure_logging, get_logger, reset_logging, sanitize_for_terminal
 from ..models import (
     EnvironmentInfo,
     PermissionDeniedError,
@@ -44,6 +44,7 @@ from ..models import (
     WinbearableError,
 )
 from ..profiles import ProfileValidationError, load_profile
+from ..settings import load_settings
 from ..state import StateStore, StateStoreError
 from ..uac import (
     UacCancelledError,
@@ -69,7 +70,7 @@ from .handlers_tools import (
 from .parser import absolutize_elevated_argv, build_parser
 from .render import (
     build_summary_notes,
-    compute_sync_state,
+    build_sync_payload,
     detailed_exit_code,
     format_status_output,
     format_summary_markdown,
@@ -109,14 +110,12 @@ def _handle_status(
         allow_managed=bool(getattr(args, "allow_managed", False)),
     )
     if args.json:
-        in_sync, sync_reasons = compute_sync_state(evaluations)
         print_json(
             {
                 "profile": profile.name,
                 "environment": env.to_dict(),
                 "results": [res.to_dict() for res in evaluations],
-                "in_sync": in_sync,
-                "sync_reasons": sync_reasons,
+                **build_sync_payload(evaluations),
             }
         )
     else:
@@ -164,8 +163,7 @@ def _handle_plan(
         category_filter=getattr(args, "category", None),
     )
     if args.json:
-        in_sync, sync_reasons = compute_sync_state(summary.results, summary.failed_ids)
-        print_json({**summary.to_dict(), "in_sync": in_sync, "sync_reasons": sync_reasons})
+        print_json({**summary.to_dict(), **build_sync_payload(summary.results, summary.failed_ids)})
     else:
         extra_notes = build_summary_notes(
             summary,
@@ -282,8 +280,7 @@ def _handle_apply(
         expected_fingerprints=expected_fp,
     )
     if args.json:
-        in_sync, sync_reasons = compute_sync_state(summary.results, summary.failed_ids)
-        print_json({**summary.to_dict(), "in_sync": in_sync, "sync_reasons": sync_reasons})
+        print_json({**summary.to_dict(), **build_sync_payload(summary.results, summary.failed_ids)})
     else:
         extra_notes = build_summary_notes(summary, profile.wsl.enabled)
         sys.stdout.write(
@@ -482,8 +479,15 @@ def run_cli(
 
     try:
         with out_cm, err_cm:
+            try:
+                settings = load_settings()
+            except ProfileValidationError as exc:
+                return _handle_cli_exception(args, exc, EXIT_ERROR)
+            args.debug = bool(getattr(args, "debug", False)) or settings.debug
+            if args.command in {"status", "plan", "apply", "tui"} and getattr(args, "profile", None) is None:
+                args.profile = settings.default_profile
             configure_logging(
-                debug=bool(getattr(args, "debug", False)),
+                debug=args.debug,
                 log_format=getattr(args, "log_format", None),
                 log_file=getattr(args, "log_file", None),
             )
@@ -507,7 +511,7 @@ def run_cli(
 
 def _emit_cli_error(args: argparse.Namespace, exc: BaseException) -> None:
     """Write human-readable and optional structured JSON error payload."""
-    sys.stderr.write(f"ERROR: {exc}\n")
+    sys.stderr.write(f"ERROR: {sanitize_for_terminal(str(exc))}\n")
     if getattr(args, "json", False):
         if isinstance(exc, WinbearableError):
             print_json({"ok": False, "error": str(exc), **exc.to_dict()})

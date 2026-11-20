@@ -50,6 +50,12 @@ logging.getLogger(LOGGER_ROOT_NAME).addHandler(logging.NullHandler())
 
 _SECRET_TEXT_RE = re.compile(r"(?i)(\b(?:bearer|token|password|passwd|secret|api[_-]?key)\b\s*[:=]\s*)([^\s,;\"']+)")
 _WIN_USER_PATH_RE = re.compile(r"(?i)([A-Za-z]:\\Users\\)([^\\/\s\"']+)")
+_TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+
+
+def sanitize_for_terminal(text: str) -> str:
+    """Strip C0/C1 control characters (preserving tabs) to prevent terminal escape injection."""
+    return _TERMINAL_CONTROL_RE.sub("", text)
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -133,9 +139,16 @@ def _resolve_format(log_format: str | None) -> str:
     return raw if raw in LOG_FORMATS else "json"
 
 
+class TextLogFormatter(logging.Formatter):
+    """Format log records as sanitized single-line text for terminal stderr output."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return sanitize_for_terminal(super().format(record))
+
+
 def _build_formatter(fmt: str) -> logging.Formatter:
     if fmt == "text":
-        return logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+        return TextLogFormatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     return JsonLogFormatter()
 
 
