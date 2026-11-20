@@ -16,7 +16,7 @@ param(
 
     [string]$PfxPath = "",
 
-    [string]$TimestampServer = "http://timestamp.digicert.com"
+    [string]$TimestampServer = ""
 )
 
 Set-StrictMode -Version Latest
@@ -59,7 +59,15 @@ try {
         if (-not (Test-Path -LiteralPath $path)) {
             throw "Target binary not found: $path"
         }
-        $sig = Set-AuthenticodeSignature -FilePath $path -Certificate $cert -HashAlgorithm SHA256 -TimestampServer $TimestampServer
+        $signParams = @{
+            FilePath      = $path
+            Certificate   = $cert
+            HashAlgorithm = "SHA256"
+        }
+        if ($TimestampServer) {
+            $signParams["TimestampServer"] = $TimestampServer
+        }
+        $sig = Set-AuthenticodeSignature @signParams
         if ($sig.Status -eq "UnknownError") {
             throw "Signing failed for ${path}: $($sig.StatusMessage)"
         }
