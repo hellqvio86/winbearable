@@ -375,3 +375,10 @@ def test_concurrent_inventory_cache_invalidation_and_history_safety() -> None:
 
     assert results == [(f"thread-{i}", True) for i in range(8)]
     assert len(nat.command_history) == 50
+
+
+def test_find_permissive_sddl_trustees_allows_local_admin_alias_for_rid_500() -> None:
+    """SDDL alias 'LA' is accepted when the current user SID is the built-in -500 admin."""
+    sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
+    assert find_permissive_sddl_trustees(sddl, allowed_user_sid="S-1-5-21-111-222-333-500") == []
+    assert find_permissive_sddl_trustees(sddl, allowed_user_sid="S-1-5-21-111-222-333-1001") == ["LA"]
