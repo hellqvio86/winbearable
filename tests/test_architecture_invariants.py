@@ -278,3 +278,14 @@ def test_engine_layering_and_phase_boundaries() -> None:
         if isinstance(node, ast.ImportFrom) and node.module and "apply" in node.module:
             raise AssertionError(f"rollback.py must not import {node.module}")
     assert all(cls is not None for cls in (PlanPhase, MutateTweaksPhase, MutateWslPhase, FinalizeJournalPhase))
+
+
+def test_elevation_entrypoints_sanitize_env() -> None:
+    """Every module invoking ShellExecuteExW must call sanitize_elevated_python_env."""
+    pkg_root = Path(__file__).resolve().parent.parent / "src" / "winbearable"
+    for py_file in sorted(pkg_root.rglob("*.py")):
+        src = py_file.read_text(encoding="utf-8")
+        if "ShellExecuteExW(" in src:
+            assert "sanitize_elevated_python_env(" in src, (
+                f"{py_file.name} invokes ShellExecuteExW without sanitize_elevated_python_env"
+            )

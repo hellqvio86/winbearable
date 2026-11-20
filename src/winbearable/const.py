@@ -1,8 +1,10 @@
 """Single-source package version and module-level constants for winbearable."""
 
+import os
+import sys
 from pathlib import Path
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"
 JSON_SCHEMA_VERSION = "2.0"
 STATE_SCHEMA_VERSION = 2
 PROFILE_SCHEMA_VERSION = 2
@@ -61,6 +63,32 @@ ENV_ADMIN_OVERRIDE = "WINBEARABLE_ADMIN_OVERRIDE"
 ENV_LOG_LEVEL = "WINBEARABLE_LOG_LEVEL"
 ENV_LOG_FORMAT = "WINBEARABLE_LOG_FORMAT"
 ENV_LOG_PATH = "WINBEARABLE_LOG_PATH"
+
+TEST_ENV_OVERRIDE_VARS: tuple[str, ...] = (ENV_ADMIN_OVERRIDE, ENV_BUILD_OVERRIDE)
+ELEVATED_ENV_STRIP_VARS: tuple[str, ...] = (
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONUSERBASE",
+    "PYTHONSTARTUP",
+    ENV_ADMIN_OVERRIDE,
+    ENV_BUILD_OVERRIDE,
+    ENV_DEBUG,
+)
+
+
+def are_env_overrides_allowed(*, is_elevated: bool = False) -> bool:
+    """Return True only when test/debug env overrides are explicitly enabled in a non-frozen, non-elevated process."""
+    if getattr(sys, "frozen", False) or is_elevated:
+        return False
+    if "--uac-output" in sys.argv or "--uac-caller-sid" in sys.argv:
+        return False
+    return os.environ.get(ENV_DEBUG, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_active_env_overrides() -> dict[str, str]:
+    """Return any currently set test/debug override environment variables (empty if none)."""
+    return {var: val for var in TEST_ENV_OVERRIDE_VARS if (val := os.environ.get(var)) is not None}
+
 
 DEFAULT_PROFILE_NAME = "user-only"
 

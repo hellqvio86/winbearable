@@ -13,6 +13,7 @@ from ..const import (
     ENV_BUILD_OVERRIDE,
     HIVE_HKLM,
     NT_CURRENT_VERSION_KEY,
+    are_env_overrides_allowed,
 )
 from ..models import (
     EnvironmentInfo,
@@ -519,7 +520,7 @@ def build_environment_info(
     run_cmd: Callable[[list[str]], CommandResult] | None,
 ) -> EnvironmentInfo:
     """Assemble EnvironmentInfo from registry metadata and posture observations."""
-    build_override = os.environ.get(ENV_BUILD_OVERRIDE)
+    build_override = os.environ.get(ENV_BUILD_OVERRIDE) if are_env_overrides_allowed(is_elevated=is_admin) else None
     ok_b, build_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
     if build_override is not None and build_override.isdigit():
         windows_build = int(build_override)

@@ -19,7 +19,7 @@ from winbearable.backends.win32_acl import (
     verify_windows_private_acl,
 )
 from winbearable.const import HIVE_HKLM, NT_CURRENT_VERSION_KEY, REG_SZ
-from winbearable.engine import apply_profile, evaluate_profile
+from winbearable.engine import apply_profile, calculate_hardening_score, detect_tweak, evaluate_profile
 from winbearable.models import (
     OperationOutcome,
     OperationStatus,
@@ -30,6 +30,7 @@ from winbearable.models import (
 )
 from winbearable.profiles import ProfileValidationError
 from winbearable.state import StateStore
+from winbearable.tweaks import get_all_tweaks
 from winbearable.wsl.config import probe_distro_wsl_conf
 
 
@@ -267,6 +268,7 @@ def test_precondition_check_sees_out_of_band_package_install(
     state_store: StateStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Out-of-band changes invalidate at evaluate/pre-apply and trigger precondition drift (CACHE-01)."""
+    monkeypatch.setenv("WINBEARABLE_DEBUG", "1")
     monkeypatch.setenv("WINBEARABLE_BUILD_OVERRIDE", "26300")
     now = {"t": 100.0}
     cache = InventoryCache(ttl_seconds=30.0, clock=lambda: now["t"])
@@ -382,3 +384,51 @@ def test_find_permissive_sddl_trustees_allows_local_admin_alias_for_rid_500() ->
     sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
     assert find_permissive_sddl_trustees(sddl, allowed_user_sid="S-1-5-21-111-222-333-500") == []
     assert find_permissive_sddl_trustees(sddl, allowed_user_sid="S-1-5-21-111-222-333-1001") == ["LA"]
+
+
+def test_score_and_evaluate_invalidate_once_and_reuse_precomputed_results() -> None:
+    """Scoring and profile evaluation invalidate once per pass and reuse precomputed results."""
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=True, windows_build=26300)
+    env = sysb.detect_environment(reg)
+    detect_calls = 0
+    inv_calls = 0
+    orig_detect = detect_tweak
+    orig_inv = sysb.invalidate_all
+
+    def _counting_detect(*args: object, **kwargs: object) -> object:
+        nonlocal detect_calls
+        detect_calls += 1
+        return orig_detect(*args, **kwargs)  # type: ignore[arg-type]
+
+    def _counting_inv() -> None:
+        nonlocal inv_calls
+        inv_calls += 1
+        orig_inv()
+
+    with (
+        patch("winbearable.engine.scoring.detect_tweak", side_effect=_counting_detect),
+        patch.object(sysb, "invalidate_all", side_effect=_counting_inv),
+    ):
+        score_one = calculate_hardening_score(env, reg, sysb)
+        assert inv_calls == 1
+        assert detect_calls == len(score_one["results"])
+
+        precomputed = [orig_detect(t, env, reg, sysb) for t in get_all_tweaks()]
+        detect_calls = 0
+        inv_calls = 0
+        score_two = calculate_hardening_score(env, reg, sysb, results=precomputed)
+        assert inv_calls == 0
+        assert detect_calls == 0
+        assert score_two["score_percent"] == score_one["score_percent"]
+
+    profile = ProfileSpec(
+        name="cache-check",
+        description="cache-check",
+        tweaks={"explorer.show_file_extensions": True, "explorer.show_hidden_files": True},
+    )
+    inv_calls = 0
+    with patch.object(sysb, "invalidate_all", side_effect=_counting_inv):
+        eval_res = evaluate_profile(profile, env, reg, sysb)
+        assert len(eval_res) == 2
+        assert inv_calls == 1

@@ -11,7 +11,8 @@ import pytest
 from winbearable import audit
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
-from winbearable.cli import CliDeps, _absolutize_elevated_argv, run_cli
+from winbearable.cli import CliDeps, run_cli
+from winbearable.cli.parser import absolutize_elevated_argv as _absolutize_elevated_argv
 from winbearable.const import HIVE_HKCU, HIVE_HKLM, REG_DWORD, REG_SZ
 from winbearable.engine import (
     ApplySummary,

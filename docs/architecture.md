@@ -19,3 +19,14 @@
 - **Supported Python import surface:** `winbearable.__all__` in `src/winbearable/__init__.py`, verified by `tests/test_api_stability_and_workflows.py`.
 - **Supported CLI & JSON contracts:** `wb` subcommands (`doctor`, `status`, `plan`, `apply`, `rollback`, `recover`, `init`, `list`, `show`, `schema`, `migrate`, `audit`, `tui`, `wsl`) and `JSON_SCHEMAS` (`JSON_SCHEMA_VERSION = "2.0"`), plus `STATE_SCHEMA_VERSION = 2` and `PROFILE_SCHEMA_VERSION = 2` with backwards-compatible `wb migrate`.
 - **Internal modules:** Submodules under `backends/`, `operations/`, `engine/`, `uac/`, and `cli/` not re-exported in `winbearable.__all__` are internal implementation details.
+
+## Phase & Transaction Journal Contract
+
+1. **`PlanPhase`:** Validates profile, acquires cooperative `StateStore` lock, creates `PLANNED` `RunRecord` with pre-apply snapshots, and writes `.reg` backups (for admin runs) before any OS mutation.
+2. **`MutateTweaksPhase`:** Transitions journal to `APPLYING`, executes operation adapters in canonical `APPLY_KIND_ORDER`, and flushes per-operation checkpoints. Any failure triggers immediate compensation of attempted targets.
+3. **`MutateWslPhase`:** Applies host `.wslconfig` / per-distro `/etc/wsl.conf` / Hyper-V firewall changes after recording `WslDistroSnapshot` / `.wslconfig.bak`.
+4. **`FinalizeJournalPhase`:** Transitions cleanly to `COMMITTED` (or `ROLLED_BACK` / `FAILED`). Incomplete (`PLANNED` / `APPLYING` / `ROLLING_BACK` / `FAILED`) runs are repaired deterministically via `wb recover --apply`.
+
+## Module Size Policy
+
+- Production modules under `src/winbearable/` are capped at `600` LOC, and category tweak modules under `src/winbearable/tweaks/categories/` are capped at `350` LOC (both enforced by `tests/test_catalog_lint.py`).

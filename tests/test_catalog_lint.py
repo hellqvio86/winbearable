@@ -5,6 +5,7 @@ import re
 import runpy
 from pathlib import Path
 
+import winbearable.cli as cli_pkg
 from winbearable.const import HIVE_HKLM, UNSUPPORTED_IOT_LTSC_EDITION_IDS, __version__
 from winbearable.models import RiskLevel
 from winbearable.profiles import load_profile
@@ -480,3 +481,18 @@ def test_concrete_adapters_forbid_full_system_backend_and_python_floor_is_315() 
 
     params_text = (repo_root / "src" / "winbearable" / "engine" / "params.py").read_text(encoding="utf-8")
     assert "SystemBackend" not in params_text, "engine/params.py must use OutcomePort/EnvironmentPort"
+
+
+def test_category_modules_under_350_loc_and_cli_all_public() -> None:
+    """Enforce <= 350 LOC per category tweak module and no private symbols in winbearable.cli.__all__."""
+    repo_root = Path(__file__).resolve().parent.parent
+    cat_root = repo_root / "src" / "winbearable" / "tweaks" / "categories"
+    oversized_cats = [
+        f"{p.relative_to(repo_root)} ({sum(1 for _ in p.open(encoding='utf-8'))} LOC)"
+        for p in sorted(cat_root.rglob("*.py"))
+        if sum(1 for _ in p.open(encoding="utf-8")) > 350
+    ]
+    assert not oversized_cats, "Category modules exceeding 350 LOC:\n" + "\n".join(oversized_cats)
+
+    private_exports = [name for name in cli_pkg.__all__ if name.startswith("_")]
+    assert not private_exports, f"Private symbols in winbearable.cli.__all__: {private_exports}"

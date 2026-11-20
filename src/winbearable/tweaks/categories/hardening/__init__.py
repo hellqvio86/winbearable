@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from ....models import TweakDefinition, TweakProvenance
-from . import credentials, defender_asr, execution_policy, network
+from . import credentials, defender_asr, execution_audit, execution_policy, network, network_firewall
 
 TWEAKS: dict[str, TweakDefinition] = {}
 PROVENANCE: dict[str, TweakProvenance] = {}
 
-for _submod in (execution_policy, network, defender_asr, credentials):
+for _submod in (execution_policy, execution_audit, network, network_firewall, defender_asr, credentials):
     TWEAKS.update(_submod.TWEAKS)
     PROVENANCE.update(_submod.PROVENANCE)
 

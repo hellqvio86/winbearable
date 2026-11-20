@@ -26,6 +26,7 @@ from winbearable.const import (
     WAIT_FAILED,
     WAIT_OBJECT_0,
     WAIT_TIMEOUT,
+    are_env_overrides_allowed,
 )
 from winbearable.hyperv_firewall import _parse_ps_setting_json, _powershell_exe
 from winbearable.models import (
@@ -60,7 +61,7 @@ from winbearable.uac import (
     set_console_title,
     write_uac_output_safe,
 )
-from winbearable.uac.elevation import assess_elevation_target_trust
+from winbearable.uac.elevation import assess_elevation_target_trust, sanitize_elevated_python_env
 from winbearable.wsl import prepare_wsl_plan
 
 
@@ -710,3 +711,37 @@ def test_assess_elevation_target_trust_classifies_system_vs_user_writable(tmp_pa
     readonly_custom = assess_elevation_target_trust(venv_exe, env=env, writable_check=lambda _p: False)
     assert readonly_custom.in_trusted_system_location is False
     assert readonly_custom.user_writable_risk is False
+
+
+def test_sanitize_elevated_python_env_and_override_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sanitize_elevated_python_env strips PYTHON* and WINBEARABLE overrides; overrides stay gated."""
+    env = {
+        "PATH": r"C:\Windows\System32",
+        "PYTHONPATH": r"C:\evil",
+        "PYTHONHOME": r"C:\evil",
+        "WINBEARABLE_ADMIN_OVERRIDE": "1",
+        "WINBEARABLE_BUILD_OVERRIDE": "26300",
+        "WINBEARABLE_DEBUG": "1",
+        "WINBEARABLE_CUSTOM_OVERRIDE": "yes",
+    }
+    removed = sanitize_elevated_python_env(env)
+    assert "PYTHONPATH" in removed
+    assert "WINBEARABLE_ADMIN_OVERRIDE" in removed
+    assert "WINBEARABLE_BUILD_OVERRIDE" in removed
+    assert "WINBEARABLE_DEBUG" in removed
+    assert "WINBEARABLE_CUSTOM_OVERRIDE" in removed
+    assert env == {"PATH": r"C:\Windows\System32"}
+
+    monkeypatch.delenv("WINBEARABLE_DEBUG", raising=False)
+    assert are_env_overrides_allowed(is_elevated=False) is False
+
+    monkeypatch.setenv("WINBEARABLE_DEBUG", "1")
+    assert are_env_overrides_allowed(is_elevated=False) is True
+    assert are_env_overrides_allowed(is_elevated=True) is False
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert are_env_overrides_allowed(is_elevated=False) is False
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    monkeypatch.setattr(sys, "argv", ["wb", "apply", "--uac-output", "out.txt"])
+    assert are_env_overrides_allowed(is_elevated=False) is False

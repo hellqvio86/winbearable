@@ -10,7 +10,8 @@ from unittest.mock import patch
 import pytest
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
-from winbearable.cli import CliDeps, _escape_md_cell, main, run_cli
+from winbearable.cli import CliDeps, main, run_cli
+from winbearable.cli.render import escape_md_cell as _escape_md_cell
 from winbearable.const import (
     EXIT_BLOCKED,
     EXIT_PENDING_CHANGES,

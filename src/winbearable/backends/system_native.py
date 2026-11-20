@@ -21,6 +21,7 @@ from ..const import (
     HIVE_HKLM,
     MAX_CMD_OUTPUT_CHARS,
     REG_DWORD,
+    are_env_overrides_allowed,
 )
 from ..models import EnvironmentInfo, OperationOutcome, OperationStatus, RegistryView
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS, ONEDRIVE_SETUP_CANDIDATES
@@ -133,19 +134,19 @@ class NativeSystemBackend:
                 self.command_history = self.command_history[-50:]
 
     def _check_is_admin(self) -> bool:
-        override = os.environ.get(ENV_ADMIN_OVERRIDE)
-        if override is not None:
-            return override.lower() in ("1", "true", "yes", "on")
         shell32 = self._get_dll("shell32")
         if self._platform == "win32" and shell32 is not None:
             try:
                 fn = shell32.IsUserAnAdmin
                 with contextlib.suppress(AttributeError, TypeError):
-                    fn.argtypes = []
-                    fn.restype = ctypes.c_int
-                return bool(fn())
+                    fn.argtypes, fn.restype = [], ctypes.c_int
+                if fn():
+                    return True
             except OSError, AttributeError, TypeError, ctypes.ArgumentError:
-                return False
+                pass
+        if are_env_overrides_allowed(is_elevated=False):
+            override = os.environ.get(ENV_ADMIN_OVERRIDE)
+            return override is not None and override.lower() in ("1", "true", "yes", "on")
         return False
 
     _classify_cmd_failure = staticmethod(classify_cmd_failure)

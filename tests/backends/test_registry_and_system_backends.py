@@ -267,12 +267,27 @@ def test_native_system_backend_linux_and_simulated_win32(tmp_path: Path) -> None
     with patch("os.sysconf", side_effect=OSError("no sysconf"), create=True):
         assert win_sys_err.get_total_memory_bytes() == 16 * GIB_BYTES
 
-    # Env overrides for build and admin
+    # Env overrides require WINBEARABLE_DEBUG=1 and are ignored otherwise
     empty_reg = InMemoryRegistryBackend()
-    with patch.dict(os.environ, {ENV_ADMIN_OVERRIDE: "1", ENV_BUILD_OVERRIDE: "22631"}):
+    with patch.dict(os.environ, {ENV_ADMIN_OVERRIDE: "1", ENV_BUILD_OVERRIDE: "22631"}, clear=False):
+        os.environ.pop("WINBEARABLE_DEBUG", None)
+        env_ignored = win_sys_err.detect_environment(empty_reg)
+        assert not env_ignored.is_admin
+        assert env_ignored.windows_build == 0
+
+    with patch.dict(os.environ, {"WINBEARABLE_DEBUG": "1", ENV_BUILD_OVERRIDE: "22631"}):
+        env_build_ovr = win_sys_err.detect_environment(empty_reg)
+        assert not env_build_ovr.is_admin
+        assert env_build_ovr.windows_build == 22631
+
+    with patch.dict(
+        os.environ,
+        {"WINBEARABLE_DEBUG": "1", ENV_ADMIN_OVERRIDE: "1", ENV_BUILD_OVERRIDE: "22631"},
+    ):
         env_ovr = win_sys_err.detect_environment(empty_reg)
         assert env_ovr.is_admin
-        assert env_ovr.windows_build == 22631
+        # Elevated sessions ignore ENV_BUILD_OVERRIDE even when WINBEARABLE_DEBUG=1.
+        assert env_ovr.windows_build == 0
 
     env_no_build = win_sys_err.detect_environment(empty_reg)
     assert env_no_build.windows_build == 0

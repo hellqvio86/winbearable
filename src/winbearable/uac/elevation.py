@@ -18,7 +18,7 @@ from typing import Any
 
 from ..backends.win32_ctypes import get_current_process_user_sid
 from ..backends.win32_fs import is_reparse_or_symlink
-from ..const import ERROR_CANCELLED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT
+from ..const import ELEVATED_ENV_STRIP_VARS, ERROR_CANCELLED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT
 from ..log import get_logger
 from .output import read_bounded_uac_output
 from .win32 import (
@@ -40,14 +40,18 @@ _logger = get_logger(__name__)
 
 
 def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
-    """Remove Python import/runtime injection variables before spawning child Python processes.
+    """Strip Python runtime-injection variables and test/debug overrides before spawning elevated children.
 
-    Note: the already-started elevated Python process relies on `-I` (for non-frozen python.exe
-    launches) rather than post-startup os.environ cleanup.
+    Policy: elevated children must never inherit `PYTHON*` import hooks or `WINBEARABLE_*_OVERRIDE` /
+    `WINBEARABLE_DEBUG` knobs from an unelevated parent. Non-frozen Python launches additionally pass `-I`.
     """
     target_env = env if env is not None else os.environ
     removed: list[str] = []
-    for var in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP"):
+    strip_keys = list(ELEVATED_ENV_STRIP_VARS)
+    for key in list(target_env):
+        if key.startswith("WINBEARABLE_") and key.endswith("_OVERRIDE") and key not in strip_keys:
+            strip_keys.append(key)
+    for var in strip_keys:
         if var in target_env:
             del target_env[var]
             removed.append(var)
