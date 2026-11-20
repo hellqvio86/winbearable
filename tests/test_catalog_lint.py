@@ -463,6 +463,7 @@ def test_concrete_adapters_forbid_full_system_backend_and_python_floor_is_315() 
         "icacls_adapter.py",
         "env_adapters.py",
         "package_and_file_adapters.py",
+        "registry_adapter.py",
     )
     for fname in concrete_files:
         text = (ops_dir / fname).read_text(encoding="utf-8")

@@ -24,7 +24,7 @@ It is not yet architecturally cohesive or mature enough to treat its design docu
 
 | ID | Status | Notes |
 |---|---|---|
-| `ARCH-01` | **PARTIAL** | `wsl/audit.py` and `engine/params.py` narrowed to `WslPort`/`EnvironmentPort`; AST lint forbids `SystemBackend` in `wsl/`, `audit/`, and `engine/params.py`. Remaining `engine/`/`cli/` composition boundaries retain `SystemBackend` for multi-adapter dispatch. |
+| `ARCH-01` | **PARTIAL** | All concrete operation adapters (including `registry_adapter.py` via `RegistryBackupPort`), `wsl/`, `audit/`, and `engine/params.py` are narrowed to capability ports and enforced by `test_catalog_lint.py`. Multi-adapter orchestration (`engine/`, `cli/`) remains the documented composition boundary using `SystemBackend`. |
 | `ARCH-02` | **FIXED** | `assert_port_conformance` validates all 13 ports in `ports.py`; `tests/contracts/test_system_backend_contract.py` adds negative fake + per-port behavioral contract tests. |
 | `ARCH-03` | **FIXED** | `NativeAppService` and `NativeSecService` use typed `_AppBackendHost`/`_SecBackendHost` protocols instead of `Any`. |
 | `MAT-01` | **FIXED** | `windows-contracts` in `.github/workflows/ci.yml` runs contracts, unit suites (`audit`, `backends`, `cli`, `engine`, `operations`, `uac`, `wsl`, lint/invariants), and `tests/test_windows_integration.py` on `windows-latest`. |
@@ -32,7 +32,7 @@ It is not yet architecturally cohesive or mature enough to treat its design docu
 | `SEC-01` | **FIXED** | `assess_elevation_target_trust` in `src/winbearable/uac/elevation.py` evaluates and logs system-protected vs user-writable targets; documented in `docs/uac-security-review.md` and unit-tested. |
 | `SEC-02` | **OPEN (DEFERRED)** | Authenticode code signing deferred until an EV/Open-Source signing certificate is provisioned. |
 | `TEST-01` | **FIXED** | `test_concurrent_inventory_cache_invalidation_and_history_safety` tests multi-threaded cache invalidation and command history boundedness. |
-| `MAINT-01` | **OPEN (ACCEPTED)** | `engine/phases.py` and `cli/handlers.py` are cohesive orchestration boundaries under the 600-LOC module cap. |
+| `MAINT-01` | **FIXED** | `cli/handlers.py` split into `cli/handlers.py` (read-only/dispatch, ~390 LOC) and `cli/handlers_apply.py` (mutating apply/rollback/recover); `engine/phases.py` (475 LOC) stays a cohesive orchestration boundary under the 600-LOC cap. |
 | `MAINT-02` | **FIXED** | `restore_conflict` is absent from `src/` (already structured via `OperationIssue`). |
 | `MAT-02` / `MAT-03` / `MAT-04` | **FIXED** | `docs/verify-matrix.md` marks `0.22.0` historical and adds `0.28.0` ledger; `TODO.md` reconciled. |
 | `GOV-01` / `GOV-02` | **FIXED** | Support policy, `AGENTS.md`, `SECURITY.md`, `const.py`, and Winget manifests aligned to `0.28.0`. |

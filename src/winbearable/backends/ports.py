@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..models import EnvironmentInfo, OperationOutcome
+from ..models import EnvironmentInfo, OperationOutcome, RegistryView
 from .registry_protocol import RegistryBackend
 from .system_protocol import CommandResult
 
@@ -112,9 +112,22 @@ class ProcessAndOneDrivePort(Protocol):
 
 
 class OutcomePort(Protocol):
-    """Port for reading structured OperationOutcome from a backend."""
+    """Port for reading structured OperationOutcome and command history from a backend."""
 
     last_outcome: OperationOutcome | None
+    command_history: list[dict[str, Any]]
+
+
+class RegistryBackupPort(Protocol):
+    """Port for exporting Windows registry keys to .reg backup files."""
+
+    def export_registry_backup(
+        self,
+        hive: str,
+        key_path: str,
+        output_path: Path,
+        view: RegistryView = RegistryView.DEFAULT,
+    ) -> bool: ...
 
 
 class WslPort(Protocol):
@@ -207,7 +220,8 @@ _PORT_CONTRACTS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("is_onedrive_installed", True),
         ("uninstall_onedrive_client", True),
     ),
-    "OutcomePort": (("last_outcome", False),),
+    "OutcomePort": (("last_outcome", False), ("command_history", False)),
+    "RegistryBackupPort": (("export_registry_backup", True),),
     "WslPort": (("run_wsl_command", True),),
     "WslHostPort": (
         ("run_wsl_command", True),
