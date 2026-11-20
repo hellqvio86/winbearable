@@ -17,19 +17,17 @@ from typing import Any
 
 from ..const import (
     ENV_ADMIN_OVERRIDE,
-    ENV_BUILD_OVERRIDE,
     ENV_CMD_TIMEOUT,
     HIVE_HKLM,
     MAX_CMD_OUTPUT_CHARS,
-    NT_CURRENT_VERSION_KEY,
     REG_DWORD,
 )
 from ..models import EnvironmentInfo, OperationOutcome, OperationStatus, RegistryView
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS, ONEDRIVE_SETUP_CANDIDATES
 from .inventory_cache import InventoryCache
-from .posture import collect_posture_observations, safe_get_reg
+from .posture import build_environment_info
 from .registry import RegistryBackend, find_wsl_reg_exe, is_wsl2
-from .system_native_apps import NativeAppMixin
+from .system_native_apps import NativeAppService
 from .system_native_cmd import (
     classify_cmd_failure,
     communicate_bounded_with_truncation,
@@ -49,7 +47,7 @@ from .system_native_cmd import (
     run_tool as _run_tool_outcome,
 )
 from .system_native_sec import (
-    NativeSecMixin,
+    NativeSecService,
     get_git_global_config,
     set_git_global_config,
 )
@@ -58,7 +56,7 @@ from .win32_ctypes import get_win32_dll
 from .win32_fs import is_reparse_or_symlink
 
 
-class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
+class NativeSystemBackend:
     """Native Windows/WSL system backend using ctypes, winreg, and direct Win32 executables."""
 
     is_simulated: bool = False
@@ -87,6 +85,8 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
         self._outcome_local = threading.local()
         self._state_lock = threading.Lock()
         self.command_history: list[dict[str, Any]] = []
+        self._apps = NativeAppService(self)
+        self._sec = NativeSecService(self)
 
     def invalidate_all(self) -> None:
         self._inventory_cache.invalidate_all()
@@ -152,6 +152,9 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
     _truncate_text = staticmethod(truncate_text)
     _decode_cmd_bytes = staticmethod(decode_cmd_bytes)
     _communicate_bounded_with_truncation = staticmethod(communicate_bounded_with_truncation)
+    _match_winget_id_in_bulk_table = staticmethod(NativeAppService._match_winget_id_in_bulk_table)
+    _is_user_writable_binary = staticmethod(NativeAppService._is_user_writable_binary)
+    _is_sddl_restricted_to_sid = staticmethod(NativeSecService._is_sddl_restricted_to_sid)
 
     def _terminate_process_tree(self, pid: int) -> None:
         terminate_process_tree(pid, self._platform, self._windll_override)
@@ -282,28 +285,6 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
         is_win = self._platform == "win32"
         wsl_interop_audit = (self._platform == "linux") and self._wsl2_fn() and (self._find_reg_fn() is not None)
         can_audit_windows = is_win or wsl_interop_audit
-        build_override = os.environ.get(ENV_BUILD_OVERRIDE)
-
-        ok_b, build_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "CurrentBuildNumber")
-        if build_override is not None and build_override.isdigit():
-            windows_build = int(build_override)
-        elif ok_b and build_val and isinstance(build_val[0], (int, str)) and str(build_val[0]).isdigit():
-            windows_build = int(build_val[0])
-        else:
-            windows_build = 0
-
-        ok_d, disp_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "DisplayVersion")
-        display_version = str(disp_val[0]) if ok_d and disp_val and disp_val[0] is not None else "Unknown"
-
-        ok_e, edition_val = safe_get_reg(registry, NT_CURRENT_VERSION_KEY, "EditionID")
-        edition = str(edition_val[0]) if ok_e and edition_val and edition_val[0] is not None else "Unknown"
-
-        observations, flags = collect_posture_observations(
-            registry=registry,
-            is_windows=can_audit_windows,
-            edition=edition,
-            run_cmd=self._run_native_cmd if is_win else None,
-        )
 
         wsl_installed = wsl_interop_audit or (self._platform == "linux" and is_wsl2())
         wsl_version: str | None = None
@@ -332,26 +313,16 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
                 self._inventory_cache.set("wsl_env", "", (wsl_installed, wsl_version, list(wsl_distros)))
 
         os_label = "Windows" if is_win else ("Linux (WSL2 -> Windows host)" if wsl_interop_audit else platform.system())
-
-        return EnvironmentInfo(
-            os_name=os_label,
-            is_windows=is_win,
-            host_auditable=can_audit_windows,
-            windows_build=windows_build,
-            display_version=display_version,
-            edition=edition,
+        return build_environment_info(
+            registry=registry,
+            os_label=os_label,
+            is_win=is_win,
+            can_audit_windows=can_audit_windows,
             is_admin=self._check_is_admin(),
-            domain_joined=flags["domain_joined"],
-            entra_joined=flags["entra_joined"],
-            mdm_enrolled=flags["mdm_enrolled"],
-            defender_enabled=flags["defender_enabled"],
-            secure_boot_enabled=flags["secure_boot_enabled"],
             wsl_installed=wsl_installed,
             wsl_version=wsl_version,
-            wsl_distros=tuple(wsl_distros),
-            bitlocker_protected=flags["bitlocker_protected"],
-            applocker_configured=flags["applocker_configured"],
-            observations=observations,
+            wsl_distros=wsl_distros,
+            run_cmd=self._run_native_cmd if is_win else None,
         )
 
     def get_service_state(self, registry: RegistryBackend, service_name: str) -> tuple[str, int | None]:
@@ -544,3 +515,82 @@ class NativeSystemBackend(NativeAppMixin, NativeSecMixin):
         return set_git_global_config(
             self._run_native_cmd, key, value, self._resolve_git_exe, is_admin=self._check_is_admin()
         )
+
+    def is_onedrive_installed(self) -> bool:
+        return self._apps.is_onedrive_installed()
+
+    def uninstall_onedrive_client(self) -> bool:
+        return self._apps.uninstall_onedrive_client()
+
+    def is_winget_package_installed(self, package_id: str) -> bool:
+        return self._apps.is_winget_package_installed(package_id)
+
+    def install_winget_package(
+        self, package_id: str, scope: str = "user", vscode_extensions: tuple[str, ...] = ()
+    ) -> bool:
+        return self._apps.install_winget_package(package_id, scope, vscode_extensions)
+
+    def uninstall_winget_package(self, package_id: str) -> bool:
+        return self._apps.uninstall_winget_package(package_id)
+
+    def install_vscode_extension(self, extension_id: str) -> bool:
+        return self._apps.install_vscode_extension(extension_id)
+
+    def is_vscode_extension_installed(self, extension_id: str) -> bool:
+        return self._apps.is_vscode_extension_installed(extension_id)
+
+    def uninstall_vscode_extension(self, extension_id: str) -> bool:
+        return self._apps.uninstall_vscode_extension(extension_id)
+
+    def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
+        return self._sec.get_auditpol_subcategory(subcategory_guid)
+
+    def set_auditpol_subcategory(self, subcategory_guid: str, success: bool, failure: bool) -> bool:
+        return self._sec.set_auditpol_subcategory(subcategory_guid, success, failure)
+
+    def backup_auditpol(self, output_csv: Path) -> bool:
+        return self._sec.backup_auditpol(output_csv)
+
+    def restore_auditpol(self, input_csv: Path) -> bool:
+        return self._sec.restore_auditpol(input_csv)
+
+    def get_event_log_config(self, channel: str) -> tuple[bool | None, int | None]:
+        return self._sec.get_event_log_config(channel)
+
+    def set_event_log_config(
+        self, channel: str, enabled: bool | None = None, max_size_bytes: int | None = None
+    ) -> bool:
+        return self._sec.set_event_log_config(channel, enabled, max_size_bytes)
+
+    def is_firewall_group_enabled(self, registry: Any, group_resource_id: str) -> bool | None:
+        return self._sec.is_firewall_group_enabled(registry, group_resource_id)
+
+    def set_firewall_group_enabled(self, group_resource_id: str, enabled: bool) -> bool:
+        return self._sec.set_firewall_group_enabled(group_resource_id, enabled)
+
+    def export_firewall_policy(self, output_wfw: Path) -> bool:
+        return self._sec.export_firewall_policy(output_wfw)
+
+    def import_firewall_policy(self, input_wfw: Path) -> bool:
+        return self._sec.import_firewall_policy(input_wfw)
+
+    def is_dir_case_sensitive(self, directory: str) -> bool | None:
+        return self._sec.is_dir_case_sensitive(directory)
+
+    def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool:
+        return self._sec.set_dir_case_sensitive(directory, enabled)
+
+    def _get_current_user_sid(self) -> str | None:
+        return self._sec._get_current_user_sid()
+
+    def is_ssh_acl_restricted(self, path_str: str) -> bool:
+        return self._sec.is_ssh_acl_restricted(path_str)
+
+    def backup_acl(self, path_str: str, backup_file: Path) -> bool:
+        return self._sec.backup_acl(path_str, backup_file)
+
+    def restore_acl(self, path_str: str, backup_file: Path) -> bool:
+        return self._sec.restore_acl(path_str, backup_file)
+
+    def restrict_acl_to_current_user(self, path_str: str) -> bool:
+        return self._sec.restrict_acl_to_current_user(path_str)

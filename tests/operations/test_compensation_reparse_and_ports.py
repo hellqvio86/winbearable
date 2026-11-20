@@ -343,7 +343,7 @@ def test_operation_kind_spec_consistency_and_invalid_profile_params(tmp_path: Pa
 
 def test_layering_and_makefile_trusted_publish_invariants() -> None:
     """state.py does not import tweaks, and Makefile has no upload publish target."""
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     state_tree = ast.parse((repo_root / "src" / "winbearable" / "state.py").read_text(encoding="utf-8"))
     for node in ast.walk(state_tree):
         if isinstance(node, ast.ImportFrom) and node.module:

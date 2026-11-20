@@ -268,7 +268,7 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
     """Native binaries resolve to absolute paths and tokens stay out of argv."""
 
     # 1. Source-level lint: no bare ".exe" / ".cmd" literals in _run_native_cmd([ or hyperv_firewall
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     sys_src = (repo_root / "src" / "winbearable" / "backends" / "system.py").read_text(encoding="utf-8")
     assert not re.findall(r'_run_native_cmd\(\s*\[\s*"[^"]*\.(?:exe|cmd)"', sys_src)
     fw_src = (repo_root / "src" / "winbearable" / "hyperv_firewall.py").read_text(encoding="utf-8")

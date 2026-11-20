@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from ..models import OperationOutcome, OperationStatus
 from .inventory_cache import InventoryCache
@@ -12,30 +13,51 @@ from .system_native_cmd import is_user_writable_binary
 from .system_protocol import CommandResult
 
 
-class NativeAppMixin:
-    """Mixin providing OneDrive, Winget, and VS Code extension operations for NativeSystemBackend."""
-
-    _platform: str
-    _setup_candidates: tuple[str, ...]
-    _inventory_cache: InventoryCache
-    last_outcome: OperationOutcome | None
+class NativeAppService:
+    """Composed service providing OneDrive, Winget, and VS Code extension operations for NativeSystemBackend."""
 
     _is_user_writable_binary = staticmethod(is_user_writable_binary)
 
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    @property
+    def _platform(self) -> str:
+        return str(self._backend._platform)
+
+    @property
+    def _setup_candidates(self) -> tuple[str, ...]:
+        return tuple(self._backend._setup_candidates)
+
+    @property
+    def _inventory_cache(self) -> InventoryCache:
+        cache: InventoryCache = self._backend._inventory_cache
+        return cache
+
+    @property
+    def last_outcome(self) -> OperationOutcome | None:
+        outcome: OperationOutcome | None = self._backend.last_outcome
+        return outcome
+
+    @last_outcome.setter
+    def last_outcome(self, value: OperationOutcome | None) -> None:
+        self._backend.last_outcome = value
+
     def _run_native_cmd(self, args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
-        raise NotImplementedError
+        res: CommandResult = self._backend._run_native_cmd(args, input_text=input_text, timeout=timeout)
+        return res
 
     def is_process_running(self, process_name: str) -> bool:
-        raise NotImplementedError
+        return bool(self._backend.is_process_running(process_name))
 
     def _resolve_winget_exe(self) -> str:
-        raise NotImplementedError
+        return str(self._backend._resolve_winget_exe())
 
     def _resolve_code_cmd(self) -> str:
-        raise NotImplementedError
+        return str(self._backend._resolve_code_cmd())
 
     def _check_is_admin(self) -> bool:
-        raise NotImplementedError
+        return bool(self._backend._check_is_admin())
 
     def is_onedrive_installed(self) -> bool:
         if self._platform != "win32":
@@ -60,7 +82,7 @@ class NativeAppMixin:
                 res = self._run_native_cmd([candidate, "/uninstall"])
                 if res.returncode != 0:
                     return False
-                return not self.is_onedrive_installed()
+                return not bool(self._backend.is_onedrive_installed())
         return False
 
     @staticmethod

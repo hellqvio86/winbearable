@@ -389,16 +389,22 @@ def restrict_acl_to_current_user(
     return res.returncode == 0
 
 
-class NativeSecMixin:
-    """Mixin delegating auditpol, wevtutil, firewall, fsutil, and ACL operations for NativeSystemBackend."""
+class NativeSecService:
+    """Composed service delegating auditpol, wevtutil, firewall, fsutil, and ACL operations for NativeSystemBackend."""
 
-    _platform: str
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    @property
+    def _platform(self) -> str:
+        return str(self._backend._platform)
 
     def _run_native_cmd(self, args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
-        raise NotImplementedError
+        res: CommandResult = self._backend._run_native_cmd(args, input_text=input_text, timeout=timeout)
+        return res
 
     def _get_dll(self, name: str) -> Any | None:
-        raise NotImplementedError
+        return self._backend._get_dll(name)
 
     def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
         return get_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid)
@@ -447,7 +453,9 @@ class NativeSecMixin:
     _is_sddl_restricted_to_sid = staticmethod(is_sddl_restricted_to_sid)
 
     def is_ssh_acl_restricted(self, path_str: str) -> bool:
-        return is_ssh_acl_restricted(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)
+        return is_ssh_acl_restricted(
+            self._run_native_cmd, self._platform, path_str, self._backend._get_current_user_sid
+        )
 
     def backup_acl(self, path_str: str, backup_file: Path) -> bool:
         return backup_acl(self._run_native_cmd, self._platform, path_str, backup_file)
@@ -456,4 +464,6 @@ class NativeSecMixin:
         return restore_acl(self._run_native_cmd, self._platform, path_str, backup_file)
 
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
-        return restrict_acl_to_current_user(self._run_native_cmd, self._platform, path_str, self._get_current_user_sid)
+        return restrict_acl_to_current_user(
+            self._run_native_cmd, self._platform, path_str, self._backend._get_current_user_sid
+        )
