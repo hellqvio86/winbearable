@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import WslHostPort, WslPort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import WslConfigSpec
 from .ini import (
     WslOperationError,
@@ -94,7 +94,7 @@ _WSL_FAILURE_MARKERS = (
 )
 
 
-def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfProbe:
+def probe_distro_wsl_conf(distro: str, system: WslPort) -> WslDistroConfProbe:
     """Probe /etc/wsl.conf in *distro*, distinguishing confirmed absence from read/WSL errors."""
     validate_wsl_distro_name(distro)
     try:
@@ -146,7 +146,7 @@ def probe_distro_wsl_conf(distro: str, system: SystemBackend) -> WslDistroConfPr
 
 def prepare_wsl_plan(
     spec: WslConfigSpec,
-    system: SystemBackend,
+    system: WslHostPort,
     *,
     wslconfig_path: Path | None = None,
     distros: tuple[str, ...] = (),
@@ -238,7 +238,7 @@ def lint_wsl_conf_lf(content: str) -> dict[str, Any]:
     }
 
 
-def _rollback_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBackend) -> None:
+def _rollback_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: WslHostPort) -> None:
     """Best-effort restore of /etc/wsl.conf if post-write verification fails."""
     if distro_plan.probe.status == "exists":
         system.run_wsl_command(
@@ -249,7 +249,7 @@ def _rollback_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: System
         system.run_wsl_command(["-d", distro_plan.distro, "-u", "root", "--", "rm", "-f", "/etc/wsl.conf"])
 
 
-def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBackend) -> None:
+def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: WslHostPort) -> None:
     """Atomically write and byte-verify /etc/wsl.conf (LF-only) for a single prepared distro."""
     if not distro_plan.changed:
         return
@@ -298,7 +298,7 @@ def apply_distro_wsl_conf(distro_plan: PreparedWslDistroPlan, system: SystemBack
 
 def plan_or_apply_wsl(
     spec: WslConfigSpec,
-    system: SystemBackend,
+    system: WslHostPort,
     wslconfig_path: Path | None = None,
     distro: str | None = None,
     dry_run: bool = True,
