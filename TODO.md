@@ -169,11 +169,11 @@ Document WSL phase vs tweak journal atomicity and recover behavior in `docs/arch
 
 Residual race between reparse check and write — document; prefer no-follow opens where Win32 allows.
 
-## [ ] P2-HYPERV-FILE  
+## [x] P2-HYPERV-FILE  
 
 Optional migration of PS to fixed `-File` script with integrity check; keep DEC-01 documented.
 
-## [ ] P2-VERIFY-MATRIX-CI  
+## [x] P2-VERIFY-MATRIX-CI  
 
 Fail CI when new non-registry identifiers lack `docs/verify-matrix.md` rows.
 
