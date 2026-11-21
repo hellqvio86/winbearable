@@ -34,8 +34,8 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
 1. **100% Native Python — Zero PowerShell Wrappers (with sole Hyper-V firewall exception):**
    - Never invoke `powershell.exe` or `pwsh.exe` anywhere in `src/winbearable/` except the sole, narrowly scoped Hyper-V firewall module (`src/winbearable/hyperv_firewall.py`, which uses `ConvertTo-Json -Compress` and `shell=False`).
    - Everywhere else, use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, and direct native executables (`wsl.exe`, `sc.exe`, `schtasks.exe`, `dism.exe`, `reg.exe`, `taskkill.exe`) with `shell=False` argument lists.
-2. **Dry-Run by Default:**
-   - `wb plan`, `wb apply` (without `--apply`), `wb rollback` (without `--apply`), and `wb wsl apply/install/export/import/baseline` (without `--apply`) must never mutate registry keys, files, processes, or services.
+2. **Dry-Run / Preview Safety:**
+   - `wb plan`, `wb apply --plan` / `wb apply --dry-run`, `wb rollback` (without `--apply`), `wb recover` (without `--apply`), and `wb wsl apply/install/export/import/baseline` (without `--apply`) must never mutate registry keys, files, processes, or services. `wb apply` applies by default unless `--plan` or `--dry-run` is passed.
 3. **High-Risk Guardrail:**
    - Any tweak with `RiskLevel.HIGH` (such as `hardening.enable_vbs_hvci`) must raise `HighRiskConfirmationError` when `dry_run=False` unless `--i-know-what-im-doing` (`allow_high_risk=True`) is passed.
 4. **Policy-Conflict Honesty (`BLOCKED_BY_POLICY`):**

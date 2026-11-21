@@ -69,14 +69,18 @@ def test_plan_apply_status_rollback_flow(
     assert code_md == 0
     assert "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run [OneDrive]" in stdout_md
 
-    # 2. Apply (human markdown & JSON)
-    code_dry, stdout_dry, _ = cli_runner(["apply", "--profile", "user-only"])
+    # 2. Apply (plan/dry-run flags, then default apply in JSON)
+    code_dry, stdout_dry, _ = cli_runner(["apply", "--profile", "user-only", "--dry-run"])
     assert code_dry == 0
     assert "DRY-RUN PLAN" in stdout_dry
 
+    code_plan_flag, stdout_plan_flag, _ = cli_runner(["apply", "--profile", "user-only", "--plan", "--json"])
+    assert code_plan_flag == 0
+    assert json.loads(stdout_plan_flag)["dry_run"]
+
     onedrive_registry.is_simulated = False
     system.is_simulated = False
-    code, stdout, _ = cli_runner(["apply", "--profile", "user-only", "--apply", "--json"])
+    code, stdout, _ = cli_runner(["apply", "--profile", "user-only", "--json"])
     assert code == 0
     apply_data = json.loads(stdout)
     assert not (apply_data["dry_run"])

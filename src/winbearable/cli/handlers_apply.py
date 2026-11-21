@@ -55,9 +55,9 @@ def handle_apply(
     _dry_run: bool,
     deps: CliDeps,
 ) -> int:
-    """Handle `wb apply` (dry-run by default unless `--apply` is passed)."""
+    """Handle `wb apply` (applies by default unless `--dry-run` / `--plan` is passed)."""
     if args.apply:
-        require_windows_for_mutation(env, "wb apply --apply")
+        require_windows_for_mutation(env, "wb apply")
     profile = load_profile(
         args.profile,
         allow_external_profiles=bool(getattr(args, "allow_external_profiles", False)),
