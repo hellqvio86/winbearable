@@ -11,6 +11,7 @@ from typing import Any
 from ..backends.ports import WslHostPort, WslPort
 from ..backends.registry import RegistryBackend
 from ..models import WslConfigSpec
+from .consts import filter_manageable_wsl_distros, is_internal_wsl_distro
 from .ini import (
     WslOperationError,
     atomic_write_text,
@@ -178,7 +179,7 @@ def prepare_wsl_plan(
 
     distro_sections = build_distro_wsl_conf_sections(spec)
     distro_plans: list[PreparedWslDistroPlan] = []
-    for distro in distros:
+    for distro in filter_manageable_wsl_distros(distros):
         probe = probe_distro_wsl_conf(distro, system)
         if probe.status == "error":
             raise WslOperationError(f"Refusing to modify /etc/wsl.conf in '{distro}': {probe.evidence}")
@@ -331,7 +332,11 @@ def plan_or_apply_wsl(
     existing_distro_conf = ""
     merged_distro_conf = merge_ini_preserving_comments("", distro_sections)
 
-    if distro is not None:
+    if distro is not None and is_internal_wsl_distro(distro):
+        distro_read_status = "skipped"
+        distro_read_evidence = "internal_distro"
+        warnings.append(f"Skipping /etc/wsl.conf for internal WSL distro '{distro}'.")
+    elif distro is not None:
         probe = probe_distro_wsl_conf(distro, system)
         distro_read_status = probe.status
         distro_read_evidence = probe.evidence

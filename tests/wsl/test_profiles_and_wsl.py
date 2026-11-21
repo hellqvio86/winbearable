@@ -17,10 +17,13 @@ from winbearable.wsl import (
     apply_distro_wsl_conf,
     apply_wsl_linux_baseline,
     audit_wsl,
+    filter_manageable_wsl_distros,
     install_wsl_distro,
+    is_internal_wsl_distro,
     lint_wsl_conf_lf,
     merge_ini_preserving_comments,
     plan_or_apply_wsl,
+    prepare_wsl_plan,
     set_default_wsl_distro,
 )
 from winbearable.wsl.ini import KEY_VALUE_RE
@@ -300,3 +303,58 @@ def test_ini_key_value_regex_avoids_backtracking() -> None:
     assert KEY_VALUE_RE.match("-=" + r"\&" * 5000) is not None
     assert KEY_VALUE_RE.match('-="' + r"\&" * 5000 + "\nnext") is None
     assert (time.monotonic() - start) < 0.2
+
+
+def test_internal_docker_desktop_wsl_distros_never_modified_or_audited(tmp_path: Path) -> None:
+    """Internal Docker Desktop distros are excluded from /etc/wsl.conf planning, applying, and deep audit."""
+    assert is_internal_wsl_distro("docker-desktop")
+    assert is_internal_wsl_distro("Docker-Desktop-Data")
+    assert not is_internal_wsl_distro("Ubuntu")
+    assert filter_manageable_wsl_distros(("Ubuntu", "docker-desktop", "docker-desktop-data", "AlmaLinux-10")) == (
+        "Ubuntu",
+        "AlmaLinux-10",
+    )
+
+    sys_b = InMemorySystemBackend(
+        is_windows=True,
+        is_admin=False,
+        windows_build=26300,
+        wsl_installed=True,
+        wsl_distros=("Ubuntu", "docker-desktop", "docker-desktop-data"),
+    )
+    probed_distros: list[str] = []
+
+    def _recording_wsl(args: list[str], input_text: str | None = None) -> CommandResult:
+        if len(args) >= 2 and args[0] == "-d":
+            probed_distros.append(args[1])
+        return CommandResult(tuple(args), 0, "WB_RC=1\n", "")
+
+    sys_b.run_wsl_command = _recording_wsl  # type: ignore[method-assign]
+    spec = WslConfigSpec(enabled=True, mode="convenient")
+    plan = prepare_wsl_plan(
+        spec,
+        sys_b,
+        wslconfig_path=tmp_path / ".wslconfig",
+        distros=("Ubuntu", "docker-desktop", "docker-desktop-data"),
+        create_host_backup=False,
+    )
+    assert [dp.distro for dp in plan.distro_plans] == ["Ubuntu"]
+    assert all(d not in {"docker-desktop", "docker-desktop-data"} for d in probed_distros)
+
+    probed_distros.clear()
+    res = plan_or_apply_wsl(
+        spec,
+        sys_b,
+        wslconfig_path=tmp_path / ".wslconfig",
+        distro="docker-desktop",
+        dry_run=False,
+    )
+    assert res["distro_read_status"] == "skipped"
+    assert res["distro_read_evidence"] == "internal_distro"
+    assert res["distro_changed"] is False
+    assert probed_distros == []
+
+    probed_distros.clear()
+    env = sys_b.detect_environment(InMemoryRegistryBackend())
+    audit_wsl(env, system=sys_b, wslconfig_path=tmp_path / ".wslconfig", deep=True)
+    assert all(d not in {"docker-desktop", "docker-desktop-data"} for d in probed_distros)

@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.31.1] - 2026-11-21
+
+### Bug Fixes
+
+- **Skip Internal Docker Desktop WSL Distros:** Exclude `docker-desktop` and `docker-desktop-data` from `/etc/wsl.conf` planning, applying, and deep WSL audits so `wb` never overwrites Docker Desktop's internal WSL configuration (`systemd=true` / `Devices cgroup` conflict).
+
 ## [0.31.0] - 2026-11-21
 
 ### Breaking / Behavior Changes

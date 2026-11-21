@@ -31,6 +31,7 @@ from ..wsl import (
     WslOperationError,
     apply_distro_wsl_conf,
     apply_wslconfig_target,
+    filter_manageable_wsl_distros,
     get_wsl_distro_guid,
     prepare_wsl_plan,
 )
@@ -296,24 +297,25 @@ class MutateWslPhase:
             ctx.wsl_result = {"enabled": True, "skipped": True, "reason": "WSL2 is not installed on this host."}
             return
 
+        manageable_distros = filter_manageable_wsl_distros(env.wsl_distros)
         planner = wsl_planner or prepare_wsl_plan
         if ctx.dry_run:
             prepared_wsl = planner(
                 ctx.profile.wsl,
                 system,
                 wslconfig_path=wslconfig_path,
-                distros=tuple(env.wsl_distros),
+                distros=manageable_distros,
                 create_host_backup=False,
                 installed_wsl_version=env.wsl_version,
             )
             ctx.wsl_result = self._build_wsl_result(
-                prepared_wsl, tuple(env.wsl_distros), wsl_mode=ctx.profile.wsl.mode, dry_run=True
+                prepared_wsl, manageable_distros, wsl_mode=ctx.profile.wsl.mode, dry_run=True
             )
             return
 
         applier = wsl_applier or apply_wslconfig_target
         try:
-            distros = tuple(env.wsl_distros)
+            distros = manageable_distros
             prepared_wsl = planner(
                 ctx.profile.wsl,
                 system,
