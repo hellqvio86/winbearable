@@ -2,6 +2,8 @@
 
 import io
 import json
+import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -9,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+import winbearable
+import winbearable.cli
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
 from winbearable.cli import CliDeps, main, run_cli
 from winbearable.cli.render import escape_md_cell as _escape_md_cell
@@ -548,3 +552,28 @@ def test_noop_apply_and_plan_omit_irreversible_warning_and_run_id_none(
     code_plan, out_plan, _ = cli_runner(["plan", "--profile", str(prof_path)])
     assert code_plan == 0
     assert "Irreversible / best-effort side effects" not in out_plan
+
+
+def test_lazy_package_and_cli_startup_avoids_heavy_imports() -> None:
+    """`import winbearable.cli` and `wb --help` avoid loading tweaks/engine/wsl/backends, while __getattr__ works."""
+    probe = (
+        "import sys, winbearable, winbearable.cli; "
+        "from winbearable.cli.parser import build_parser; "
+        "p = build_parser(); "
+        "loaded = sorted(m for m in sys.modules if m.startswith('winbearable')); "
+        "assert 'winbearable.tweaks' not in sys.modules, loaded; "
+        "assert 'winbearable.engine' not in sys.modules, loaded; "
+        "assert 'winbearable.wsl' not in sys.modules, loaded; "
+        "assert 'winbearable.backends' not in sys.modules, loaded; "
+        "assert callable(winbearable.get_all_tweaks); "
+        "assert callable(winbearable.cli.run_cli)"
+    )
+    res = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+
+    assert "ApplySummary" in dir(winbearable)
+    assert "run_cli" in dir(winbearable.cli)
+    with pytest.raises(AttributeError):
+        _ = winbearable.nonexistent_symbol_xyz  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        _ = winbearable.cli.nonexistent_symbol_xyz  # type: ignore[attr-defined]

@@ -128,4 +128,4 @@ make release-check # lint + test + TruffleHog + Trivy
 - **One item = one PR:** Keep each review/TODO item in its own focused PR.
 - **Regression test first:** Treat each item's acceptance criteria as a regression test — add the failing test first, verify it fails, then implement the fix.
 - **`NEEDS-WINDOWS` items require real-host evidence:** Never mark or merge a `NEEDS-WINDOWS` item on unit tests alone; verify on real Windows 11 and record the command + observed output in `docs/verify-matrix.md`.
-- **Release-time version bumps only:** Do not bump `__version__` in `src/winbearable/const.py` per fix/commit; bump only in dedicated release PRs.
+- **Release-time version bumps & mandatory CHANGELOG:** Do not bump `__version__` in `src/winbearable/const.py` per fix/commit; bump only in dedicated release PRs, and **always** add a corresponding `## [<version>] - YYYY-MM-DD` entry in `CHANGELOG.md` whenever `__version__` is bumped (enforced by `test_security_and_version_docs_consistent`).

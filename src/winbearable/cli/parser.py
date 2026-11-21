@@ -9,7 +9,7 @@ from typing import Any
 
 from ..const import DEFAULT_WSL_DISTRO, DEFAULT_WSL_MODE, MIN_SUPPORTED_BUILD, WSL_MODES, __version__
 from ..log import LOG_FORMATS
-from .render import JSON_SCHEMAS, add_selection_args
+from .schemas import JSON_SCHEMAS, add_selection_args
 
 
 def _add_logging_args(target: argparse.ArgumentParser, *, suppress_defaults: bool = False) -> None:
