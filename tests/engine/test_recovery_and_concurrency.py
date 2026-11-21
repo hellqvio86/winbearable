@@ -44,6 +44,7 @@ from winbearable.models import (
     FsutilSnapshot,
     GitConfigSnapshot,
     GitConfigSpec,
+    OperationJournalEntry,
     OperationStatus,
     OptionalFeatureSnapshot,
     PowercfgHibernateSpec,
@@ -730,3 +731,112 @@ def test_utf16le_wsl_decoding_registry_type_error_and_backup_dir_pruning(tmp_pat
     store_prune.save_runs([])
     assert user_folder.is_dir()
     assert not stale_run_dir.exists()
+
+
+def test_access_denied_registry_write_compensates_and_recovers_cleanly(tmp_path: Path) -> None:
+    """PermissionError on an absent registry value does not fail rollback or recovery."""
+    store = StateStore(tmp_path / "state_perm.json")
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_admin=True, total_memory_gb=32)
+    env = sysb.detect_environment(reg)
+
+    protected_key = r"Software\Policies\Microsoft\Windows\Explorer"
+    reg.set_value(HIVE_HKCU, protected_key, "Existing", 1, REG_DWORD)
+    orig_set = reg.set_value
+    orig_del = reg.delete_value
+
+    def deny_policy_set(
+        hive: str,
+        key_path: str,
+        value_name: str,
+        value_data: object,
+        value_type: str = REG_DWORD,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if "Policies\\Microsoft\\Windows\\Explorer" in key_path:
+            raise PermissionError("[WinError 5] Access is denied")
+        orig_set(hive, key_path, value_name, value_data, value_type, *args, **kwargs)  # type: ignore[arg-type]
+
+    def deny_policy_del(hive: str, key_path: str, value_name: str, *args: object, **kwargs: object) -> bool:
+        if "Policies\\Microsoft\\Windows\\Explorer" in key_path:
+            raise PermissionError("[WinError 5] Access is denied")
+        return orig_del(hive, key_path, value_name, *args, **kwargs)  # type: ignore[arg-type]
+
+    reg.set_value = deny_policy_set  # type: ignore[method-assign]
+    reg.delete_value = deny_policy_del  # type: ignore[method-assign]
+
+    failing_profile = ProfileSpec(
+        name="perm-test",
+        description="test",
+        tweaks={
+            "onedrive.unpin_explorer": True,
+            "search.disable_bing": True,
+        },
+    )
+    summary = apply_profile(failing_profile, env, reg, sysb, store, dry_run=False, allow_simulated=True)
+    assert summary.failed_ids == ("search.disable_bing",)
+    assert store.get_incomplete_runs() == []
+    assert [r.state for r in store.load_runs()] == [TransactionState.ROLLED_BACK]
+
+    # Also verify an existing FAILED run with post_existed=None recovers cleanly when value is already absent
+    failed_rec = RunRecord(
+        run_id="20261120-195517-de6d9b17",
+        timestamp="2026-11-20T19:55:17+00:00",
+        profile_name="user-only",
+        applied_tweaks=(),
+        state=TransactionState.FAILED,
+        error="[WinError 5] Access is denied",
+        registry_snapshots=(
+            RegistryValueSnapshot(
+                hive=HIVE_HKCU,
+                key_path=protected_key,
+                value_name="DisableSearchBoxSuggestions",
+                key_existed=True,
+                value_existed=False,
+                previous_data=None,
+                previous_type=None,
+            ),
+        ),
+        operation_journal=(
+            OperationJournalEntry(
+                target_id=f"reg:{HIVE_HKCU}\\{protected_key.lower()}|default|disablesearchboxsuggestions",
+                operation_type="registry",
+                tweak_id="search.disable_bing",
+                action="set",
+                outcome="unknown",
+            ),
+        ),
+    )
+    store_failed = StateStore(tmp_path / "state_failed.json")
+    store_failed.upsert_run(failed_rec)
+    recovered = recover_incomplete_runs(store_failed, reg, sysb, dry_run=False, allow_simulated=True)
+    assert len(recovered) == 1
+    assert recovered[0].state == TransactionState.ROLLED_BACK
+    assert store_failed.get_incomplete_runs() == []
+
+
+def test_dry_run_apply_and_plan_warn_on_incomplete_transactions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dry-run `wb apply` and `wb plan` warn when incomplete transactions block `--apply`."""
+    store = StateStore(tmp_path / "state_warn.json")
+    store.upsert_run(
+        RunRecord(
+            run_id="20261120-195517-de6d9b17",
+            timestamp="2026-11-20T19:55:17+00:00",
+            profile_name="user-only",
+            applied_tweaks=(),
+            state=TransactionState.FAILED,
+            error="failed",
+        )
+    )
+    reg = InMemoryRegistryBackend()
+    sysb = InMemorySystemBackend(is_windows=True, is_admin=False, windows_build=26300)
+
+    for cmd in (["apply", "--profile", "user-only"], ["plan", "--profile", "user-only"]):
+        rc = run_cli(cmd, registry=reg, system=sysb, state_store=store)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "20261120-195517-de6d9b17" in out
+        assert "wb recover --apply" in out

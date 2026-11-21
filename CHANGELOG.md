@@ -2,6 +2,13 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.30.2] - 2026-11-21
+
+### Bug Fixes
+
+- **Idempotent Registry Compensation on Unmutated Targets:** Skip `restore_snapshot` / `restore_key_snapshot` during failure rollback and `wb recover` when `post_existed` is `None` and the registry target already matches its pre-apply state, preventing `Access is denied` errors on protected policy keys from wedging transactions in `FAILED`.
+- **Dry-Run Incomplete Transaction Warning:** Surface a trailing warning in `wb plan` and dry-run `wb apply` when incomplete transactions exist in `state.json` that would block `--apply`.
+
 ## [0.26.0] - 2026-11-20
 
 ### CLI Output, Sync Status & JSON Automation

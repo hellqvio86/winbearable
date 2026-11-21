@@ -32,6 +32,13 @@ def _val_fp(existed: bool, data: Any, val_type: str | None) -> str:
     return f"{val_type}:{data!r}"
 
 
+def _matches_pre_value(snap: RegistryValueSnapshot, registry: RegistryBackend) -> bool:
+    cur_val = registry.get_value(snap.hive, snap.key_path, snap.value_name, view=snap.view)
+    if snap.value_existed:
+        return cur_val is not None and cur_val[0] == snap.previous_data and cur_val[1] == snap.previous_type
+    return cur_val is None and (snap.key_existed or not registry.key_exists(snap.hive, snap.key_path, view=snap.view))
+
+
 class RegistryOperationAdapter:
     """Lifecycle adapter for registry value and registry key operations."""
 
@@ -270,15 +277,7 @@ class RegistryOperationAdapter:
                             if snap.post_existed
                             else (cur_val is None)
                         )
-                        matches_pre = (
-                            (
-                                cur_val is not None
-                                and cur_val[0] == snap.previous_data
-                                and cur_val[1] == snap.previous_type
-                            )
-                            if snap.value_existed
-                            else (cur_val is None)
-                        )
+                        matches_pre = _matches_pre_value(snap, registry)
                         if matches_pre and not matches_post:
                             continue
                         if not matches_post:
@@ -288,6 +287,12 @@ class RegistryOperationAdapter:
                                 )
                             )
                             continue
+                    elif (
+                        attempted_targets is not None
+                        and snap.post_existed is None
+                        and _matches_pre_value(snap, registry)
+                    ):
+                        continue
                     registry.restore_snapshot(snap)
                 except Exception as exc:
                     issues.append(error_issue(vid, f"registry {snap.full_key_path} [{snap.display_value_name}]: {exc}"))
@@ -305,6 +310,12 @@ class RegistryOperationAdapter:
                                 conflict_issue(kid, f"restore_conflict registry_key {snap.hive}\\{snap.key_path}")
                             )
                             continue
+                    elif (
+                        attempted_targets is not None
+                        and snap.post_existed is None
+                        and registry.key_exists(snap.hive, snap.key_path, view=snap.view) == snap.existed
+                    ):
+                        continue
                     registry.restore_key_snapshot(snap)
                 except Exception as exc:
                     issues.append(error_issue(kid, f"registry_key {snap.hive}\\{snap.key_path}: {exc}"))

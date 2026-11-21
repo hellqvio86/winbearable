@@ -166,6 +166,7 @@ def _handle_plan(
             summary,
             profile.wsl.enabled,
             managed_notice=is_managed_device(env) and not allow_managed,
+            incomplete_run_ids=[rec.run_id for rec in store.get_incomplete_runs()],
         )
         sys.stdout.write(
             format_summary_markdown(
