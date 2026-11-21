@@ -834,7 +834,11 @@ def test_dry_run_apply_and_plan_warn_on_incomplete_transactions(
     reg = InMemoryRegistryBackend()
     sysb = InMemorySystemBackend(is_windows=True, is_admin=False, windows_build=26300)
 
-    for cmd in (["apply", "--profile", "user-only"], ["plan", "--profile", "user-only"]):
+    for cmd in (
+        ["apply", "--profile", "user-only", "--dry-run"],
+        ["apply", "--profile", "user-only", "--plan"],
+        ["plan", "--profile", "user-only"],
+    ):
         rc = run_cli(cmd, registry=reg, system=sysb, state_store=store)
         assert rc == 0
         out = capsys.readouterr().out

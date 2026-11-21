@@ -271,7 +271,7 @@ def run_cli(
             if hasattr(args, "apply"):
                 if getattr(args, "dry_run_flag", False):
                     args.apply = False
-                elif settings.default_apply:
+                elif args.command == "apply" or settings.default_apply:
                     args.apply = True
             if args.command in {"status", "plan", "apply", "tui"} and getattr(args, "profile", None) is None:
                 args.profile = settings.default_profile

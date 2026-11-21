@@ -401,7 +401,8 @@ Precedence (highest to lowest): **CLI flag** → **environment variable** → **
 | `--log-format {json,text}` | `WINBEARABLE_LOG_FORMAT` | `stderr` log format (default: `json`). |
 | `--log-file PATH` | `WINBEARABLE_LOG_PATH` | Append rotating JSONL logs to a file. |
 | `--no-color` / `--no-emoji` | `NO_COLOR` / `NO_EMOJI` | Disable ANSI colors or emoji output. |
-| `--apply` | — | Mutate the system (all commands are dry-run without `--apply`). |
+| `--apply` | — | Mutate the system (default for `wb apply`; required for `rollback`/`recover`/`wsl`/`migrate`). |
+| `--plan` / `--dry-run` | — | Preview changes without modifying the system. |
 | `--allow-managed` | — | Allow machine-scope tweaks on domain/Entra/MDM-managed devices. |
 | `--elevate` | — | Trigger a UAC prompt if not already running as Administrator. |
 | `--json` | — | Emit machine-readable JSON output. |

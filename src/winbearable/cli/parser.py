@@ -115,18 +115,23 @@ def build_parser() -> argparse.ArgumentParser:
     add_selection_args(plan_parser)
 
     # wb apply
-    apply_parser = _add_sub(subparsers, "apply", help="Apply a profile (dry-run unless --apply is passed)")
+    apply_parser = _add_sub(
+        subparsers, "apply", help="Apply a profile (use --plan or --dry-run to preview without writing)"
+    )
     apply_parser.add_argument(
         "--profile",
         default=None,
         help="Profile name or TOML/JSON path (default: user-only, or WINBEARABLE_PROFILE / settings)",
     )
-    apply_parser.add_argument("--apply", action="store_true", help="Actually write changes to the system")
+    apply_parser.add_argument(
+        "--apply", action="store_true", help="Apply changes (default for `wb apply`; kept for backwards compatibility)"
+    )
     apply_parser.add_argument(
         "--dry-run",
+        "--plan",
         dest="dry_run_flag",
         action="store_true",
-        help="Force dry-run preview even if default_apply / WINBEARABLE_APPLY is enabled",
+        help="Preview changes without modifying the system (plan mode)",
     )
     apply_parser.add_argument(
         "--detailed-exitcode",

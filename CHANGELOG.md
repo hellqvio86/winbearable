@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.31.0] - 2026-11-21
+
+### Breaking / Behavior Changes
+
+- **`wb apply` Applies by Default (`--plan` / `--dry-run` for Preview):** `wb apply` now applies changes by default without requiring `--apply` (`--apply` remains accepted for backwards compatibility). Pass `--plan` or `--dry-run` to preview changes without mutating the system. `wb rollback`, `wb recover`, `wb migrate`, and `wb wsl` remain dry-run by default.
+
 ## [0.30.3] - 2026-11-21
 
 ### Bug Fixes
