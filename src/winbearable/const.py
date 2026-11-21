@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "0.30.1"
+__version__ = "0.30.2"
 JSON_SCHEMA_VERSION = "2.0"
 STATE_SCHEMA_VERSION = 2
 PROFILE_SCHEMA_VERSION = 2

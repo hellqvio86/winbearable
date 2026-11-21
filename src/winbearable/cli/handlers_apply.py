@@ -144,7 +144,8 @@ def handle_apply(
     if args.json:
         print_json({**summary.to_dict(), **build_sync_payload(summary.results, summary.failed_ids)})
     else:
-        extra_notes = build_summary_notes(summary, profile.wsl.enabled)
+        incomplete_ids = [rec.run_id for rec in store.get_incomplete_runs()] if not args.apply else []
+        extra_notes = build_summary_notes(summary, profile.wsl.enabled, incomplete_run_ids=incomplete_ids)
         sys.stdout.write(
             format_summary_markdown(
                 summary,

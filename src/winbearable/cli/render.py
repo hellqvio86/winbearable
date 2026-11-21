@@ -342,9 +342,15 @@ def build_summary_notes(
     wsl_enabled: bool,
     *,
     managed_notice: bool = False,
+    incomplete_run_ids: Sequence[str] = (),
 ) -> list[str]:
     """Build trailing informational notes shared by `wb plan` and `wb apply`."""
     notes: list[str] = []
+    if incomplete_run_ids:
+        notes.append(
+            f"Warning: incomplete transaction(s) detected ({', '.join(incomplete_run_ids)}). "
+            "Run `wb recover --apply` (or `wb rollback --incomplete --apply`) before applying new changes."
+        )
     if managed_notice:
         notes.append(
             "Notice: managed device detected (domain/Entra/MDM) — machine-scope tweaks skipped "
