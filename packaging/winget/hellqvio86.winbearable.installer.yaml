@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
 
 PackageIdentifier: hellqvio86.winbearable
-PackageVersion: 0.31.0
+PackageVersion: 0.31.1
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
@@ -9,7 +9,7 @@ NestedInstallerFiles:
     PortableCommandAlias: wb
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/hellqvio86/winbearable/releases/download/v0.31.0/winbearable-0.31.0-win-x64.zip
+    InstallerUrl: https://github.com/hellqvio86/winbearable/releases/download/v0.31.1/winbearable-0.31.1-win-x64.zip
     InstallerSha256: PENDING_RELEASE_BUILD_SHA256
 ManifestType: installer
 ManifestVersion: 1.9.0
