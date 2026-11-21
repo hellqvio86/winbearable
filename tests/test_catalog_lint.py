@@ -222,6 +222,7 @@ def test_architectural_layer_boundaries() -> None:
         "const": 0,
         "log": 1,
         "models": 1,
+        "update_check": 1,
         "backends": 2,
         "hyperv_firewall": 2,
         "packages": 3,

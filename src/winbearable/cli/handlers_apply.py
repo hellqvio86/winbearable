@@ -9,6 +9,7 @@ from ..backends import RegistryBackend, SystemBackend
 from ..const import EXIT_ERROR, EXIT_SUCCESS, HIVE_HKCU
 from ..engine import (
     evaluate_profile,
+    is_managed_device,
     recover_incomplete_runs,
     rollback_runs,
     run_profile_command,
@@ -145,7 +146,12 @@ def handle_apply(
         print_json({**summary.to_dict(), **build_sync_payload(summary.results, summary.failed_ids)})
     else:
         incomplete_ids = [rec.run_id for rec in store.get_incomplete_runs()] if not args.apply else []
-        extra_notes = build_summary_notes(summary, profile.wsl.enabled, incomplete_run_ids=incomplete_ids)
+        extra_notes = build_summary_notes(
+            summary,
+            profile.wsl.enabled,
+            managed_notice=is_managed_device(env) and not allow_managed,
+            incomplete_run_ids=incomplete_ids,
+        )
         sys.stdout.write(
             format_summary_markdown(
                 summary,
