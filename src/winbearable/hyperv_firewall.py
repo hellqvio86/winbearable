@@ -7,6 +7,8 @@ This module is the sole permitted PowerShell boundary in `winbearable`.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
 import subprocess
@@ -20,6 +22,22 @@ from .const import WSL_VM_CREATOR_ID
 
 _ACTION_MAP = {"block": "Block", "allow": "Allow", "notconfigured": "NotConfigured"}
 _VM_CREATOR_GUID_RE = re.compile(r"^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$")
+HYPERV_SCRIPT_PATH = Path(__file__).resolve().parent / "scripts" / "hyperv_firewall.ps1"
+HYPERV_SCRIPT_SHA256 = "7e5982f46505a75e5b6b533ced357a6ab0235494cb8e8a2f1e81159a5ed6117c"
+
+
+def verify_hyperv_script_integrity(script_path: Path | None = None) -> Path:
+    """Verify the packaged Hyper-V PowerShell script exists, is not a symlink, and matches its pinned SHA-256."""
+    target = script_path or HYPERV_SCRIPT_PATH
+    if target.is_symlink() or not target.is_file():
+        raise RuntimeError(f"Hyper-V firewall script is missing or unsafe: '{target}'.")
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    if not hmac.compare_digest(digest, HYPERV_SCRIPT_SHA256):
+        raise RuntimeError(
+            f"Hyper-V firewall script integrity check failed for '{target}': "
+            f"expected {HYPERV_SCRIPT_SHA256}, got {digest}."
+        )
+    return target
 
 
 def _validate_vm_creator_id(guid: str) -> str:
@@ -184,17 +202,23 @@ def get_wsl_hyperv_firewall_setting(
     """Query the active Hyper-V firewall setting for the WSL2 VMCreatorId as JSON."""
     if (platform_override or sys.platform) != "win32":
         return None
-    creator_literal = _ps_quote(_validate_vm_creator_id(WSL_VM_CREATOR_ID))
-    ps_script = (
-        "try { "
-        f"Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name {creator_literal} -ErrorAction Stop "
-        "| Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction,LoopbackEnabled "
-        "| ConvertTo-Json -Compress "
-        "} catch { @{ error = $_.Exception.Message } | ConvertTo-Json -Compress; exit 1 }"
-    )
+    creator_id = _validate_vm_creator_id(WSL_VM_CREATOR_ID)
+    script_path = verify_hyperv_script_integrity()
     exec_fn = runner or _default_ps_runner
     try:
-        res = exec_fn([_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", ps_script])
+        res = exec_fn(
+            [
+                _powershell_exe(),
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                str(script_path),
+                "-Action",
+                "get",
+                "-VmCreatorId",
+                creator_id,
+            ]
+        )
     except OSError, subprocess.SubprocessError:
         return None
     if res.returncode != 0:
@@ -218,22 +242,28 @@ def set_wsl_hyperv_firewall_setting(
     if enabled == "NotConfigured":
         enabled_str = "NotConfigured"
     elif isinstance(enabled, bool):
-        enabled_str = "$true" if enabled else "$false"
+        enabled_str = "True" if enabled else "False"
     else:
         raise ValueError(f"Invalid enabled {enabled!r}; expected bool or 'NotConfigured'.")
-    creator_literal = _ps_quote(_validate_vm_creator_id(WSL_VM_CREATOR_ID))
-    ps_script = (
-        "try { "
-        f"Set-NetFirewallHyperVVMSetting -Name {creator_literal} "
-        f"-Enabled {enabled_str} "
-        f"-DefaultInboundAction {inbound} "
-        f"-DefaultOutboundAction {outbound} -ErrorAction Stop; "
-        f"Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name {creator_literal} -ErrorAction Stop "
-        "| Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction,LoopbackEnabled "
-        "| ConvertTo-Json -Compress "
-        "} catch { @{ error = $_.Exception.Message } | ConvertTo-Json -Compress; exit 1 }"
-    )
-    cmd = [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", ps_script]
+    creator_id = _validate_vm_creator_id(WSL_VM_CREATOR_ID)
+    script_path = verify_hyperv_script_integrity()
+    cmd = [
+        _powershell_exe(),
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        str(script_path),
+        "-Action",
+        "set",
+        "-VmCreatorId",
+        creator_id,
+        "-Enabled",
+        enabled_str,
+        "-DefaultInboundAction",
+        inbound,
+        "-DefaultOutboundAction",
+        outbound,
+    ]
     previous = get_wsl_hyperv_firewall_setting(runner=runner, platform_override=platform_override)
     verified: dict[str, Any] | None = None
     verified_ok = False

@@ -107,8 +107,33 @@ def test_catalog_admin_flags_and_cis_verification_consistent() -> None:
             assert ed.lower() not in UNSUPPORTED_IOT_LTSC_EDITION_IDS
 
 
+def test_non_registry_identifiers_in_verify_matrix() -> None:
+    """Every catalog tweak with non-registry specs must be documented in docs/verify-matrix.md."""
+    repo_root = Path(__file__).resolve().parent.parent
+    matrix_text = (repo_root / "docs" / "verify-matrix.md").read_text(encoding="utf-8")
+    non_reg_fields = (
+        "service_specs",
+        "task_specs",
+        "feature_specs",
+        "winget_specs",
+        "auditpol_specs",
+        "wevtutil_specs",
+        "firewall_group_specs",
+        "fsutil_specs",
+        "powercfg_specs",
+        "git_config_specs",
+        "icacls_specs",
+        "file_specs",
+    )
+    missing: list[str] = []
+    for tweak_id, tweak in TWEAK_CATALOG.items():
+        if any(getattr(tweak, field) for field in non_reg_fields) and f"`{tweak_id}`" not in matrix_text:
+            missing.append(tweak_id)
+    assert not missing, f"Non-registry tweaks missing from docs/verify-matrix.md: {missing}"
+
+
 def test_security_and_version_docs_consistent() -> None:
-    """SECURITY.md and winget manifests agree with const.__version__ and document the Hyper-V exception."""
+    """SECURITY.md, TODO.md, CHANGELOG.md, and winget manifests agree with const.__version__ and Hyper-V policy."""
     repo_root = Path(__file__).resolve().parent.parent
     sec_text = (repo_root / "SECURITY.md").read_text(encoding="utf-8")
     assert "Hyper-V" in sec_text and "hyperv_firewall.py" in sec_text
@@ -116,6 +141,12 @@ def test_security_and_version_docs_consistent() -> None:
     assert minor_prefix in sec_text
     todo_head = "\n".join((repo_root / "TODO.md").read_text(encoding="utf-8").splitlines()[:10])
     assert __version__ in todo_head
+    changelog_text = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(
+        rf"^## \[{re.escape(__version__)}\] - \d{{4}}-\d{{2}}-\d{{2}}\b",
+        changelog_text,
+        re.MULTILINE,
+    ), f"CHANGELOG.md must contain a '## [{__version__}] - YYYY-MM-DD' entry for __version__={__version__}"
     stale_hashes = {
         "7AA2A1B089EBBFFD8FACF468AB5F9131BFC027B61BEC4EC61633094CB48FDCC4",
         "F8147A672E30A49644960C69994FFCB2BA6A9F8B56B1E91C107DD256F8A9C705",

@@ -4,15 +4,18 @@ This matrix tracks how every non-registry identifier in `winbearable` is verifie
 
 | Identifier Category | Verification Command | Last Verified Build | Notes |
 | --- | --- | --- | --- |
-| **Services** (`services.*`) | `sc.exe query <ServiceName>` | 26300 | `DiagTrack`, `dmwappushservice`, `RemoteRegistry`, `SSDPSRV`, `upnphost`, `WerSvc`, `Xbl*`, `MapsBroker`, `RetailDemo`, `Spooler`, `WinRM`, `WinHttpAutoProxySvc` |
-| **Scheduled Tasks** (`telemetry.disable_scheduled_tasks`) | `schtasks.exe /Query /TN "<TaskPath>" /XML` | 26300 | Uses XML output (locale-independent); OS-protected tasks report `ACCESS_DENIED` |
-| **Optional Features** (`SMB1Protocol`, `Containers`, `Recall`) | `dism.exe /English /Online /Get-FeatureInfo /FeatureName:<Name>` | 26300 | `Recall` confirmed against Microsoft Learn Recall management docs |
-| **Winget Packages** (`apps.*`, `bloat.*`, `ai.remove_copilot_app`, `dev.install_nerd_font_user`) | `winget.exe list --id <Id> --exact` / `winget.exe search --id <Id> --exact` | 26300 | `XP9CXNGPPJ97XX` (Copilot) & `DEVCOM.JetBrainsMonoNerdFont` verified on host |
+| **Services** (`search.disable_wsearch_service`, `hardening.disable_wpad_service`, `services.disable_diagtrack`, `services.disable_dmwappushservice`, `services.disable_remote_registry`, `services.disable_ssdp_upnp`, `services.disable_wer`, `services.disable_xbox`, `services.disable_maps_retail`, `services.disable_spooler`, `services.disable_winrm`) | `sc.exe query <ServiceName>` | 26300 | `DiagTrack`, `dmwappushservice`, `RemoteRegistry`, `SSDPSRV`, `upnphost`, `WerSvc`, `Xbl*`, `MapsBroker`, `RetailDemo`, `Spooler`, `WinRM`, `WinHttpAutoProxySvc` |
+| **Scheduled Tasks** (`telemetry.disable_scheduled_tasks`, `telemetry.disable_extended_tasks`) | `schtasks.exe /Query /TN "<TaskPath>" /XML` | 26300 | Uses XML output (locale-independent); OS-protected tasks report `ACCESS_DENIED` |
+| **Optional Features** (`ai.disable_recall_feature`, `hardening.disable_smbv1`, `dev.enable_windows_containers`) | `dism.exe /English /Online /Get-FeatureInfo /FeatureName:<Name>` | 26300 | `SMB1Protocol`, `Containers`, `Recall` confirmed against Microsoft Learn docs |
+| **Winget Packages** (`apps.install_vscode`, `ai.remove_copilot_app`, `bloat.remove_bing_news`, `bloat.remove_bing_weather`, `bloat.remove_clipchamp`, `bloat.remove_feedback_hub`, `dev.install_nerd_font_user`) | `winget.exe list --id <Id> --exact` / `winget.exe search --id <Id> --exact` | 26300 | `XP9CXNGPPJ97XX` (Copilot) & `DEVCOM.JetBrainsMonoNerdFont` verified on host |
 | **Auditpol Subcategories** (`hardening.audit_core_subcategories`) | `auditpol.exe /get /subcategory:{GUID} /r /v` | 26300 | GUID-only arguments + numeric `SettingValue` (`0..3`) |
 | **Event Log Channels** (`hardening.event_log_sizes`, `hardening.enable_operational_logs`) | `wevtutil.exe gl "<Channel>" /f:xml` | 26300 | XML output (locale-independent) |
 | **Firewall Rule Groups** (`hardening.firewall_disable_risky_groups`) | `netsh.exe advfirewall firewall show rule group="<@FirewallAPI.dll,-ID>"` | 26300 | `@FirewallAPI.dll,-NNNNN` resource IDs only, never English display names |
-| **ICACLS / SSH ACL** (`privacy.restrict_ssh_permissions`) | `icacls.exe "<Path>"` | 26300 | SDDL ownership/ACE check via Win32 SID (`LookupAccountSid`) |
-| **Hyper-V Firewall** (`wb wsl firewall`, `chk.hyperv_firewall`) | `Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'` | 26300 | Sole PowerShell JSON boundary; unavailable under ConstrainedLanguage mode |
+| **ICACLS / SSH ACL** (`dev.fix_ssh_key_permissions`) | `icacls.exe "<Path>"` | 26300 | SDDL ownership/ACE check via Win32 SID (`LookupAccountSid`) |
+| **PowerCfg** (`power.hibernate_off`) | `powercfg.exe /availablesleepstates` | 26300 | Verifies hibernate state (`powercfg /hibernate off`) |
+| **Git Global Config** (`dev.git_sane_defaults`) | `git.exe config --global --get <key>` | 26300 | Exact key/value check without shell |
+| **Managed Config Files** (`dev.vscode_settings_defaults`, `dev.terminal_settings_defaults`) | Direct JSON/file read + SHA-256 verification | 26300 | Atomic temp-file write + reparse-point check |
+| **Hyper-V Firewall** (`wb wsl firewall`, `chk.hyperv_firewall`) | `powershell.exe -NoProfile -NonInteractive -File src/winbearable/scripts/hyperv_firewall.ps1` | 26300 | Sole PowerShell JSON boundary (SHA-256 integrity-verified `-File` script); unavailable under ConstrainedLanguage mode |
 
 ## Running Host Snapshot Capture
 Run the env-gated Windows integration suite locally before releases (`windows-latest` CI runs `windows-contracts` with contract, unit, and read-only integration tests, and `publish-winget-asset` runs on release):

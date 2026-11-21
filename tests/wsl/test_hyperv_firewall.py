@@ -6,6 +6,7 @@ import io
 import json
 import subprocess
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from winbearable.hyperv_firewall import (
     _parse_ps_setting_json,
     get_wsl_hyperv_firewall_setting,
     set_wsl_hyperv_firewall_setting,
+    verify_hyperv_script_integrity,
 )
 from winbearable.models import ObservationState
 
@@ -152,8 +154,22 @@ def test_set_wsl_hyperv_firewall_setting_dry_run_apply_and_validation() -> None:
     assert applied["verified"] is not None
     assert applied["verified"]["default_inbound_action"] == "Block"
     assert len(calls) == 2
-    assert "Set-NetFirewallHyperVVMSetting" in calls[1][-1]
-    assert "ConvertTo-Json -Compress" in calls[1][-1]
+    assert "-File" in calls[1]
+    assert any(arg.endswith("hyperv_firewall.ps1") for arg in calls[1])
+    assert "-Action" in calls[1] and "set" in calls[1]
+    assert "-Command" not in calls[1]
+
+    # Script integrity check rejects missing or tampered scripts
+    assert verify_hyperv_script_integrity().name == "hyperv_firewall.ps1"
+    tampered = Path(__file__).resolve().parent / "_tampered_hyperv_test.ps1"
+    try:
+        tampered.write_text("# tampered\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="integrity check failed"):
+            verify_hyperv_script_integrity(tampered)
+    finally:
+        tampered.unlink(missing_ok=True)
+    with pytest.raises(RuntimeError, match="missing or unsafe"):
+        verify_hyperv_script_integrity(Path(__file__).resolve().parent / "nonexistent_hyperv.ps1")
 
     # PowerShell JSON error
     err_res = set_wsl_hyperv_firewall_setting(

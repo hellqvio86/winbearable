@@ -1,6 +1,6 @@
-# winbearable — Critical Review TODO (v0.31.1 @ Python 3.15)
+# winbearable — Critical Review TODO (v0.31.2 @ Python 3.15)
 
-> **Target:** `winbearable` — **0.31.1** (remediating v0.28.0 review)
+> **Target:** `winbearable` — **0.31.2** (remediating v0.28.0 review)
 > **Runtime used for this review:** CPython **3.15.2**  
 > **Declared support:** `requires-python = ">=3.15"` · CI matrix `3.15` / `3.15t`  
 > **Catalog:** 123 tweaks · validation 0 · `mappingproxy` (immutable)  
@@ -94,7 +94,7 @@ Document and implement policy beyond PYTHON* (overrides at minimum; consider oth
 
 ---
 
-## [ ] P1-OPT-STARTUP — eager graph vs CLI snappiness
+## [x] P1-OPT-STARTUP — eager graph vs CLI snappiness
 
 **Where:** `winbearable/__init__.py`, `cli/__init__.py`, import-time `assemble_catalog` + `validate_catalog`
 
@@ -169,11 +169,11 @@ Document WSL phase vs tweak journal atomicity and recover behavior in `docs/arch
 
 Residual race between reparse check and write — document; prefer no-follow opens where Win32 allows.
 
-## [ ] P2-HYPERV-FILE  
+## [x] P2-HYPERV-FILE  
 
 Optional migration of PS to fixed `-File` script with integrity check; keep DEC-01 documented.
 
-## [ ] P2-VERIFY-MATRIX-CI  
+## [x] P2-VERIFY-MATRIX-CI  
 
 Fail CI when new non-registry identifiers lack `docs/verify-matrix.md` rows.
 

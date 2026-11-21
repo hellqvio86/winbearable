@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.31.2] - 2026-11-21
+
+### Performance
+
+- **Lazy CLI & Package Startup (`__getattr__` + `cli/schemas.py`):** Deferred heavy submodule imports (`tweaks`, `engine`, `backends`, `wsl`, `uac`, `handlers`) in `winbearable.__init__` and `winbearable.cli.__init__` using PEP 562 `__getattr__` and lightweight `cli/schemas.py`. Running `wb --help`, `wb --version`, or importing `winbearable.cli` now loads 6 lightweight modules (~0.05s) instead of the full 120-module package graph.
+- **Fixed `-File` Hyper-V Script with SHA-256 Integrity Check:** Migrated `hyperv_firewall.py` from inline `-Command` strings to a parameterized `scripts/hyperv_firewall.ps1` invoked via `-File` with pinned SHA-256 verification.
+- **Verification Matrix CI Enforcement:** Added `test_non_registry_identifiers_in_verify_matrix` in `tests/test_catalog_lint.py` and updated `docs/verify-matrix.md` to cover all non-registry catalog tweaks.
+
 ## [0.31.1] - 2026-11-21
 
 ### Bug Fixes
