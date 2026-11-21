@@ -516,3 +516,31 @@ def test_all_unsupported_profile_is_not_in_sync(
     )
     out_human = capsys.readouterr().out
     assert "IN SYNC" not in out_human
+
+
+def test_noop_apply_and_plan_omit_irreversible_warning_and_run_id_none(
+    onedrive_registry, system, cli_runner, tmp_path: Path
+) -> None:
+    """When all tweaks are already applied, `wb apply --apply` shows NO CHANGES and no irreversible warning."""
+    onedrive_registry.is_simulated = False
+    system.is_simulated = False
+    prof_path = tmp_path / "onedrive_tray.toml"
+    prof_path.write_text('name = "tray"\n[tweaks]\n"onedrive.disable_tray_autorun" = true\n', encoding="utf-8")
+
+    # First apply: executes process_stop and warns about irreversible side effect
+    code1, out1, _ = cli_runner(["apply", "--profile", str(prof_path), "--apply"])
+    assert code1 == 0
+    assert "APPLIED (run_id=" in out1
+    assert "Irreversible / best-effort side effects" in out1
+
+    # Second apply: nothing drifted -> NO CHANGES (already in sync), no run_id=None, no irreversible warning
+    code2, out2, _ = cli_runner(["apply", "--profile", str(prof_path), "--apply"])
+    assert code2 == 0
+    assert "NO CHANGES (already in sync)" in out2
+    assert "run_id=None" not in out2
+    assert "Irreversible / best-effort side effects" not in out2
+
+    # Subsequent plan: already applied -> no irreversible warning
+    code_plan, out_plan, _ = cli_runner(["plan", "--profile", str(prof_path)])
+    assert code_plan == 0
+    assert "Irreversible / best-effort side effects" not in out_plan

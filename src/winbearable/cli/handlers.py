@@ -49,6 +49,7 @@ from ..uac import (
     set_console_title,
     write_uac_output_safe,
 )
+from ..update_check import UpdateChecker, format_update_warning
 from ..wsl import WslOperationError
 from .doctor import handle_doctor
 from .handlers_apply import (
@@ -338,7 +339,16 @@ def _run_cli_body(
         handler = _COMMAND_HANDLERS.get(args.command)
         if handler is None:
             raise ValueError(f"Unknown command: {args.command}")
+        update_checker: UpdateChecker | None = None
+        if not getattr(args, "json", False) and args.command in {"status", "plan", "apply", "doctor"}:
+            update_checker = UpdateChecker(store.state_path.parent / "update_check.json")
+            update_checker.start_background_check()
         rc = handler(args, raw_argv, reg_backend, sys_backend, store, env, dry_run, deps)
+        if update_checker is not None:
+            latest = update_checker.get_available_update()
+            if latest is not None:
+                prefix = "⚠️  " if should_use_emoji(args) else ""
+                sys.stderr.write(f"{prefix}{format_update_warning(latest)}\n")
         _logger.debug(
             "Finished command %s with exit_code=%d",
             args.command,

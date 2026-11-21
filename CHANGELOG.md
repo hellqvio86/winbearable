@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.30.3] - 2026-11-21
+
+### Bug Fixes
+
+- **No-Op Apply Header & Irreversible Warning:** Display `NO CHANGES (already in sync)` instead of `APPLIED (run_id=None)` when `wb apply --apply` makes no changes, and only emit `Irreversible / best-effort side effects` warnings for tweaks that are actually `DRIFTED` or applied in the current run.
+- **Managed Device Notice Parity:** Include the managed-device notice in `wb apply` summaries just like `wb plan`.
+- **Non-Blocking Release Update Warning:** Added a 24h-cached, non-blocking PyPI release check (`src/winbearable/update_check.py`, opt-out via `WINBEARABLE_NO_UPDATE_CHECK=1`) that warns on stderr when a newer `winbearable` version is available.
+
 ## [0.30.2] - 2026-11-21
 
 ### Bug Fixes

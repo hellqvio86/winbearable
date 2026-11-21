@@ -204,7 +204,14 @@ def format_summary_markdown(
     use_emoji: bool = True,
     extra_notes: Sequence[str] = (),
 ) -> str:
-    mode_str = "DRY-RUN PLAN (no changes written)" if summary.dry_run else f"APPLIED (run_id={summary.run_id})"
+    if summary.dry_run:
+        mode_str = "DRY-RUN PLAN (no changes written)"
+    elif summary.run_id is not None:
+        mode_str = f"APPLIED (run_id={summary.run_id})"
+    elif summary.failed_ids:
+        mode_str = "FAILED (rolled back)"
+    else:
+        mode_str = "NO CHANGES (already in sync)"
     header_emoji = ("🔍 " if summary.dry_run else "🚀 ") if use_emoji else ""
     header_color = _ANSI_CYAN if summary.dry_run else (_ANSI_RED if summary.failed_ids else _ANSI_GREEN)
     title = colorize(f"# {header_emoji}winbearable — {mode_str}", _ANSI_BOLD, header_color, enabled=use_color)
@@ -278,10 +285,11 @@ def format_summary_markdown(
         f"{len(summary.skipped_edition_ids)} unsupported edition, "
         f"{len(summary.skipped_managed_ids)} skipped (managed)."
     )
+    applied_or_pending_ids = set(summary.applied_ids)
     irreversible_notes = [
         f"{item.tweak_id} ({op.operation_type}: {op.target})"
         for item in summary.results
-        if item.status in {TweakStatus.DRIFTED, TweakStatus.APPLIED}
+        if (item.status == TweakStatus.DRIFTED or item.tweak_id in applied_or_pending_ids)
         for op in item.operations
         if not op.reversible
     ]

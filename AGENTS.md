@@ -47,7 +47,7 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
 7. **Locale Independence:**
    - Windows may be Swedish, German, Japanese, etc. Prefer, in order: registry values, Win32 APIs via `ctypes` (`GetExtendedTcpTable`, `NetLocalGroupGetMembers`, `NetShareEnum`, `LookupAccountSid`), exit codes, GUID/SID/resource-ID arguments (`auditpol /subcategory:{GUID}`, firewall rule groups by `@FirewallAPI.dll,-NNNNN`), and machine formats (`/XML`, `/format:csv`, `dism /English`). Never parse localized human text. Any parser of command output gets a test with a non-English fixture.
 8. **No Runtime Network:**
-   - No runtime network except through `winget.exe` and `wsl.exe` for IDs/URLs declared in the catalog (pinned version or hash where possible). No `urllib`/`requests` in `src/winbearable`.
+   - No runtime network except through `winget.exe` and `wsl.exe` for IDs/URLs declared in the catalog (pinned version or hash where possible), and the opt-outable, non-blocking, 24h-cached PyPI release version check in `src/winbearable/update_check.py`. No other `urllib`/`requests` in `src/winbearable`.
 9. **Elevation & Restart Behaviour:**
    - Elevation only through the existing explicit `--elevate`/prompt flow in `cli.py`. No silent elevation, no restarts: reboot/sign-out/Explorer restart are reported (`requires_reboot`, `requires_explorer_restart`) and never performed automatically.
 10. **Never Weaken Core Protections:**
