@@ -15,6 +15,7 @@ from ..backends.system_native_cmd import resolve_git_exe, run_subprocess_bounded
 from ..const import DEFAULT_WSL_DISTRO
 from ..models import EnvironmentInfo
 from .config import lint_wsl_conf_lf, probe_distro_wsl_conf
+from .consts import filter_manageable_wsl_distros
 from .ini import (
     detect_wsl_policies,
     get_default_wslconfig_path,
@@ -346,7 +347,7 @@ def audit_wsl(
     policy_info = detect_wsl_policies(registry) if registry is not None else {"blocked": False, "policies": {}}
     deep_results: list[dict[str, Any]] = []
     if deep and system is not None and env.is_windows and env.wsl_distros:
-        for d in env.wsl_distros:
+        for d in filter_manageable_wsl_distros(env.wsl_distros):
             deep_results.append(deep_audit_wsl_distro(system, d))
 
     return {
