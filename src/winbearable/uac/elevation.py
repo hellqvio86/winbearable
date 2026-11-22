@@ -36,7 +36,7 @@ from .win32 import (
     resolve_trusted_system32,
 )
 
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 
 def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
@@ -175,14 +175,14 @@ def _validate_elevation_executable(
         raise UacElevationError(f"Refusing elevation target with symlink or reparse point: {path}")
     trust = assess_elevation_target_trust(resolved)
     if trust.user_writable_risk:
-        _logger.debug(
+        _LOGGER.debug(
             "UAC elevation target %s resides in %s (%s); developer/user-scope installs remain permitted.",
             resolved,
             trust.parent_dir,
             trust.reason,
         )
     else:
-        _logger.debug("UAC elevation target %s verified in %s (%s).", resolved, trust.parent_dir, trust.reason)
+        _LOGGER.debug("UAC elevation target %s verified in %s (%s).", resolved, trust.parent_dir, trust.reason)
     return resolved
 
 
@@ -288,7 +288,7 @@ def run_elevated_wb(
         elevated_args = build_elevated_cmdline_args(argv, out_path, caller_sid=caller_sid)
         resolved_exe, launch_args = resolve_elevation_target(elevated_args, executable=executable)
         params = subprocess.list2cmdline(launch_args)
-        _logger.debug(
+        _LOGGER.debug(
             "Launching elevated child via ShellExecuteExW: %s",
             resolved_exe,
             extra={

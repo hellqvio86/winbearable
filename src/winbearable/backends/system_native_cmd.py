@@ -22,7 +22,7 @@ from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS
 from .system_protocol import GIB_BYTES
 from .win32_ctypes import get_win32_dll
 
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 _KNOWN_TOOL_NAMES: dict[str, str] = {
     "auditpol.exe": "auditpol.exe",
@@ -341,7 +341,7 @@ def run_subprocess_bounded(
         else:
             stdout, stderr = proc.communicate(timeout=timeout)
         tool_label = _safe_tool_name(args)
-        _logger.debug(
+        _LOGGER.debug(
             "Subprocess completed: %s (rc=%d)",
             tool_label,
             proc.returncode,
@@ -356,7 +356,7 @@ def run_subprocess_bounded(
         return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
     except subprocess.TimeoutExpired as exc:
         tool_label = _safe_tool_name(args)
-        _logger.warning(
+        _LOGGER.warning(
             "Subprocess timed out after %.1fs: %s",
             timeout,
             tool_label,
