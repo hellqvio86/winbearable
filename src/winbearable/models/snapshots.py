@@ -234,6 +234,7 @@ class AuditpolSnapshot:
     previous_setting: str | None
     backup_csv_path: str | None = None
     post_setting: str | None = None
+    backup_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -241,6 +242,7 @@ class AuditpolSnapshot:
             "previous_setting": self.previous_setting,
             "backup_csv_path": self.backup_csv_path,
             "post_setting": self.post_setting,
+            "backup_sha256": self.backup_sha256,
         }
 
     @classmethod
@@ -248,11 +250,13 @@ class AuditpolSnapshot:
         prev = payload.get("previous_setting")
         bak = payload.get("backup_csv_path")
         post = payload.get("post_setting")
+        sha = payload.get("backup_sha256")
         return cls(
             subcategory_guid=str(payload["subcategory_guid"]),
             previous_setting=str(prev) if prev is not None else None,
             backup_csv_path=str(bak) if bak is not None else None,
             post_setting=str(post) if post is not None else None,
+            backup_sha256=str(sha) if sha is not None else None,
         )
 
 
@@ -298,6 +302,7 @@ class FirewallGroupSnapshot:
     previous_enabled: bool | None
     export_wfw_path: str | None = None
     post_enabled: bool | None = None
+    backup_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -305,6 +310,7 @@ class FirewallGroupSnapshot:
             "previous_enabled": self.previous_enabled,
             "export_wfw_path": self.export_wfw_path,
             "post_enabled": self.post_enabled,
+            "backup_sha256": self.backup_sha256,
         }
 
     @classmethod
@@ -312,11 +318,13 @@ class FirewallGroupSnapshot:
         prev = payload.get("previous_enabled")
         wfw = payload.get("export_wfw_path")
         post = payload.get("post_enabled")
+        sha = payload.get("backup_sha256")
         return cls(
             group_resource_id=str(payload["group_resource_id"]),
             previous_enabled=bool(prev) if prev is not None else None,
             export_wfw_path=str(wfw) if wfw is not None else None,
             post_enabled=bool(post) if post is not None else None,
+            backup_sha256=str(sha) if sha is not None else None,
         )
 
 
@@ -398,19 +406,23 @@ class IcaclsSnapshot:
 
     path_template: str
     backup_acl_path: str | None = None
+    backup_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path_template": self.path_template,
             "backup_acl_path": self.backup_acl_path,
+            "backup_sha256": self.backup_sha256,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> IcaclsSnapshot:
         bak = payload.get("backup_acl_path")
+        sha = payload.get("backup_sha256")
         return cls(
             path_template=str(payload["path_template"]),
             backup_acl_path=str(bak) if bak is not None else None,
+            backup_sha256=str(sha) if sha is not None else None,
         )
 
 

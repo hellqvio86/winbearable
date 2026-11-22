@@ -11,8 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import ApplyPorts, EvaluationPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import (
     EnvironmentInfo,
     ExternalDriftError,
@@ -62,7 +62,7 @@ class PlanPhase:
         profile: ProfileSpec,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
         state_store: StateStore,
         dry_run: bool,
         allow_high_risk: bool,
@@ -203,7 +203,7 @@ class MutateTweaksPhase:
         *,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
         state_store: StateStore,
         force_kill_processes: bool,
         allow_managed: bool,
@@ -284,7 +284,7 @@ class MutateWslPhase:
         *,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
         state_store: StateStore,
         wslconfig_path: Path | None,
         wsl_planner: Callable[..., Any] | None,
@@ -437,7 +437,7 @@ class FinalizeJournalPhase:
         ctx: ApplyContext,
         *,
         registry: RegistryBackend,
-        system: SystemBackend | None = None,
+        system: EvaluationPorts | None = None,
         state_store: StateStore,
     ) -> ApplySummary:
         """Finalize journal state and build ApplySummary."""

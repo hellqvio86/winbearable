@@ -110,8 +110,25 @@ class NativeAppService:
         id_pat = re.compile(rf"{prefix}{re.escape(package_id)}(?:\s{{2,}}|\s*$)", re.IGNORECASE)
         return any(id_pat.match(line) for line in lines[start_idx:])
 
+    def _guard_elevated_winget_exe(self) -> str | None:
+        winget_exe = self._resolve_winget_exe()
+        if self._check_is_admin() and self._is_user_writable_binary(winget_exe):
+            self.last_outcome = OperationOutcome(
+                status=OperationStatus.ACCESS_DENIED,
+                message=(
+                    f"Refusing to execute user-writable '{winget_exe}' while elevated; "
+                    "run package operations unelevated or install winget machine-wide."
+                ),
+                command=(winget_exe,),
+            )
+            return None
+        return winget_exe
+
     def is_winget_package_installed(self, package_id: str) -> bool:
         if self._platform != "win32":
+            return False
+        winget_exe = self._guard_elevated_winget_exe()
+        if winget_exe is None:
             return False
         cache_key = package_id.lower()
         hit, cached_installed = self._inventory_cache.get("winget_pkg", cache_key)
@@ -120,7 +137,7 @@ class NativeAppService:
         bulk_hit, bulk_out = self._inventory_cache.get("winget_bulk", "")
         if not bulk_hit:
             bulk_res = self._run_native_cmd(
-                [self._resolve_winget_exe(), "list", "--disable-interactivity", "--accept-source-agreements"],
+                [winget_exe, "list", "--disable-interactivity", "--accept-source-agreements"],
                 timeout=60.0,
             )
             if bulk_res.returncode == 0 and bulk_res.stdout.strip():
@@ -132,7 +149,7 @@ class NativeAppService:
             return installed
         res = self._run_native_cmd(
             [
-                self._resolve_winget_exe(),
+                winget_exe,
                 "list",
                 "--id",
                 package_id,
@@ -156,12 +173,15 @@ class NativeAppService:
     ) -> bool:
         if self._platform != "win32":
             return False
+        winget_exe = self._guard_elevated_winget_exe()
+        if winget_exe is None:
+            return False
         self._inventory_cache.invalidate("winget_pkg", package_id.lower())
         self._inventory_cache.invalidate("winget_bulk")
         self._inventory_cache.invalidate("vscode_ext")
         res = self._run_native_cmd(
             [
-                self._resolve_winget_exe(),
+                winget_exe,
                 "install",
                 "--id",
                 package_id,
@@ -207,12 +227,15 @@ class NativeAppService:
     def uninstall_winget_package(self, package_id: str) -> bool:
         if self._platform != "win32":
             return False
+        winget_exe = self._guard_elevated_winget_exe()
+        if winget_exe is None:
+            return False
         self._inventory_cache.invalidate("winget_pkg", package_id.lower())
         self._inventory_cache.invalidate("winget_bulk")
         self._inventory_cache.invalidate("vscode_ext")
         res = self._run_native_cmd(
             [
-                self._resolve_winget_exe(),
+                winget_exe,
                 "uninstall",
                 "--id",
                 package_id,

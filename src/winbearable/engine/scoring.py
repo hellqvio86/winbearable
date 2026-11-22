@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..backends.ports import ApplyPorts
 from ..backends.posture import safe_get_reg
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import AuditDimension, EnvironmentInfo, TweakCheckResult, TweakStatus
 from ..tweaks import get_all_tweaks
 from .evaluate import detect_tweak
@@ -50,7 +50,7 @@ def _summarize_dimension(results: list[TweakCheckResult]) -> dict[str, Any]:
 def calculate_hardening_score(
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     *,
     results: list[TweakCheckResult] | None = None,
 ) -> dict[str, Any]:

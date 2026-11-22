@@ -111,7 +111,13 @@ class ProcessAndOneDrivePort(Protocol):
     def uninstall_onedrive_client(self) -> bool: ...
 
 
-class OutcomePort(Protocol):
+class LastOutcomePort(Protocol):
+    """Minimal port for reading structured OperationOutcome after a backend call."""
+
+    last_outcome: OperationOutcome | None
+
+
+class OutcomePort(LastOutcomePort, Protocol):
     """Port for reading structured OperationOutcome and command history from a backend."""
 
     last_outcome: OperationOutcome | None
@@ -157,6 +163,47 @@ class GitAndPowerPort(Protocol):
     def set_dir_case_sensitive(self, directory: str, enabled: bool) -> bool: ...
     def is_hibernate_enabled(self, registry: RegistryBackend) -> bool | None: ...
     def set_hibernate_enabled(self, registry: RegistryBackend, enabled: bool) -> bool: ...
+
+
+class EvaluationPorts(
+    EnvironmentPort,
+    ServicePort,
+    TaskPort,
+    FeaturePort,
+    FirewallPort,
+    AuditPolicyPort,
+    AclPort,
+    PackagePort,
+    ProcessAndOneDrivePort,
+    GitAndPowerPort,
+    WslHostPort,
+    OutcomePort,
+    Protocol,
+):
+    """Capability ports required for read-only profile evaluation and scoring (excludes RegistryBackupPort)."""
+
+
+class CompensationPorts(
+    EnvironmentPort,
+    ServicePort,
+    TaskPort,
+    FeaturePort,
+    FirewallPort,
+    AuditPolicyPort,
+    AclPort,
+    PackagePort,
+    ProcessAndOneDrivePort,
+    GitAndPowerPort,
+    WslHostPort,
+    OutcomePort,
+    RegistryBackupPort,
+    Protocol,
+):
+    """Capability ports required for rollback and recovery compensation."""
+
+
+class ApplyPorts(EvaluationPorts, RegistryBackupPort, Protocol):
+    """Capability ports required for mutating apply phases and operation adapters."""
 
 
 PORT_PROTOCOLS: dict[str, type[Any]] = {

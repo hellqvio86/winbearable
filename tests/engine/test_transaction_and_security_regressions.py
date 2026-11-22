@@ -386,6 +386,7 @@ def test_recovery_rejects_crafted_paths_reparse_oversized_and_unknown_enums(tmp_
                 "run_id": "bad1",
                 "timestamp": "2026-11-22T00:00:00Z",
                 "profile_name": "p",
+                "state": "committed",
                 "applied_tweaks": [],
                 "operation_journal": [
                     {"target_id": "x", "operation_type": "evil_cmd", "tweak_id": "t", "action": "set"}
@@ -398,6 +399,7 @@ def test_recovery_rejects_crafted_paths_reparse_oversized_and_unknown_enums(tmp_
                 "run_id": "bad2",
                 "timestamp": "2026-11-22T00:00:00Z",
                 "profile_name": "p",
+                "state": "committed",
                 "applied_tweaks": [],
                 "operation_journal": [
                     {
@@ -450,3 +452,38 @@ def test_recovery_rejects_crafted_paths_reparse_oversized_and_unknown_enums(tmp_
     backup_root.mkdir()
     with pytest.raises(PermissionDeniedError, match="outside backup root"):
         validate_recovery_run_record(crafted_audit_run, backup_root=backup_root, reparse_check=lambda _p: False)
+
+    # 4. Backup SHA-256 mismatch and missing/wrong-type RunRecord fields fail closed
+    bak_in_root = backup_root / "audit.csv"
+    bak_in_root.write_text("clean", encoding="utf-8")
+    tampered_audit_run = RunRecord(
+        run_id="bad_sha",
+        timestamp="2026-11-22T00:00:00Z",
+        profile_name="p",
+        applied_tweaks=(),
+        auditpol_snapshots=(
+            AuditpolSnapshot(
+                subcategory_guid="{000}",
+                previous_setting=None,
+                backup_csv_path=str(bak_in_root),
+                backup_sha256="a" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(PermissionDeniedError, match="SHA-256 mismatch"):
+        compensate_run_record_issues(tampered_audit_run, reg, sys_b)
+    assert sys_b.command_history == []
+
+    with pytest.raises(ValueError, match="missing required field: 'state'"):
+        RunRecord.from_dict({"run_id": "r", "timestamp": "t", "profile_name": "p", "applied_tweaks": []})
+    with pytest.raises(ValueError, match="'registry_snapshots' must be a list"):
+        RunRecord.from_dict(
+            {
+                "run_id": "r",
+                "timestamp": "t",
+                "profile_name": "p",
+                "applied_tweaks": [],
+                "state": "committed",
+                "registry_snapshots": "not-a-list",
+            }
+        )

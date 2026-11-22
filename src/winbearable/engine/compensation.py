@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import ApplyPorts, CompensationPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..backends.win32_fs import is_reparse_or_symlink
 from ..models import (
     AuditpolSnapshot,
@@ -72,7 +72,7 @@ _SNAPSHOT_FIELD_BY_TYPE = SNAPSHOT_FIELD_BY_TYPE
 def collect_pre_apply_snapshots(
     evaluations: list[TweakCheckResult],
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     backup_dir: Path | None = None,
     profile_params: dict[str, dict[str, Any]] | None = None,
     *,
@@ -141,7 +141,7 @@ def compute_snapshot_fingerprints(snaps: PreApplySnapshots) -> dict[str, str]:
 def compute_dry_run_fingerprints(
     evaluations: list[TweakCheckResult],
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     profile_params: dict[str, Any] | None = None,
     expand_fn: Callable[[str], Path] | None = None,
 ) -> dict[str, str]:
@@ -168,7 +168,7 @@ def _snapshot_compensation_batches(run_record: RunRecord) -> list[tuple[str, lis
 def _compensate_wsl(
     run_record: RunRecord,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: CompensationPorts,
     force_rollback: bool,
 ) -> list[CompensationIssue]:
     issues: list[CompensationIssue] = []
@@ -330,9 +330,10 @@ def _validate_recovery_backup_file(
     *,
     label: str,
     backup_root: Path | None = None,
+    expected_sha256: str | None = None,
     reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
 ) -> None:
-    """Validate external recovery backup files against reparse points, root escape, and size limits."""
+    """Validate external recovery backup files against reparse points, root escape, size limits, and SHA-256."""
     if not raw_path:
         return
     path = Path(raw_path)
@@ -348,6 +349,10 @@ def _validate_recovery_backup_file(
             raise PermissionDeniedError(f"Refusing non-file recovery {label}: {path}")
         if path.stat().st_size > _MAX_RECOVERY_BACKUP_BYTES:
             raise PermissionDeniedError(f"Refusing oversized recovery {label} (>16 MiB): {path}")
+        if expected_sha256 is not None:
+            actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual_sha.lower() != expected_sha256.lower():
+                raise PermissionDeniedError(f"Refusing tampered recovery {label} (SHA-256 mismatch): {path}")
 
 
 def validate_recovery_run_record(
@@ -356,31 +361,52 @@ def validate_recovery_run_record(
     backup_root: Path | None = None,
     reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
 ) -> None:
-    """Validate persisted RunRecord paths and backup files before any privileged restore executes."""
+    """Validate persisted RunRecord paths, consistency, and backup files before any privileged restore executes."""
+    if not run_record.run_id.strip() or not run_record.timestamp.strip() or not run_record.profile_name.strip():
+        raise PermissionDeniedError("Refusing recovery of RunRecord with empty run_id/timestamp/profile_name.")
+    for entry in run_record.operation_journal:
+        if not entry.target_id.strip() or not entry.tweak_id.strip():
+            raise PermissionDeniedError("Refusing recovery of RunRecord with empty journal target_id/tweak_id.")
     for fs in run_record.file_snapshots:
         validate_file_spec_path(fs.path, allow_system_paths=False)
     for isnap in run_record.icacls_snapshots:
         validate_icacls_user_only_path(isnap.path_template)
         _validate_recovery_backup_file(
-            isnap.backup_acl_path, label="icacls backup", backup_root=backup_root, reparse_check=reparse_check
+            isnap.backup_acl_path,
+            label="icacls backup",
+            backup_root=backup_root,
+            expected_sha256=isnap.backup_sha256,
+            reparse_check=reparse_check,
         )
     for asnap in run_record.auditpol_snapshots:
         _validate_recovery_backup_file(
-            asnap.backup_csv_path, label="auditpol backup", backup_root=backup_root, reparse_check=reparse_check
+            asnap.backup_csv_path,
+            label="auditpol backup",
+            backup_root=backup_root,
+            expected_sha256=asnap.backup_sha256,
+            reparse_check=reparse_check,
         )
     for fsnap in run_record.firewall_group_snapshots:
         _validate_recovery_backup_file(
-            fsnap.export_wfw_path, label="firewall backup", backup_root=backup_root, reparse_check=reparse_check
+            fsnap.export_wfw_path,
+            label="firewall backup",
+            backup_root=backup_root,
+            expected_sha256=fsnap.backup_sha256,
+            reparse_check=reparse_check,
         )
     _validate_recovery_backup_file(
-        run_record.wsl_backup_path, label="wslconfig backup", backup_root=backup_root, reparse_check=reparse_check
+        run_record.wsl_backup_path,
+        label="wslconfig backup",
+        backup_root=backup_root,
+        expected_sha256=run_record.wsl_backup_sha256,
+        reparse_check=reparse_check,
     )
 
 
 def compensate_run_record_issues(
     run_record: RunRecord,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: CompensationPorts,
     restore_full_policy: bool = False,
     force_rollback: bool = False,
     skip_package_uninstall: bool = False,
@@ -437,7 +463,7 @@ def compensate_run_record_issues(
 def compensate_run_record(
     run_record: RunRecord,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: CompensationPorts,
     restore_full_policy: bool = False,
     force_rollback: bool = False,
     skip_package_uninstall: bool = False,

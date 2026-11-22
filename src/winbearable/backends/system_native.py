@@ -491,7 +491,9 @@ class NativeSystemBackend:
     def _sys32_exe(self, exe_name: str) -> str:
         return sys32_exe(exe_name, self._windll_override)
 
-    _resolve_winget_exe = staticmethod(resolve_winget_exe)
+    def _resolve_winget_exe(self) -> str:
+        return resolve_winget_exe(is_elevated=self._check_is_admin())
+
     _resolve_code_cmd = staticmethod(resolve_code_cmd)
     _resolve_git_exe = staticmethod(resolve_git_exe)
 

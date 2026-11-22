@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from ..backends.ports import ApplyPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import PlannedOperation, TweakDefinition
 from .base import OperationAdapter, require_adapter
 from .package_and_file_adapters import (
@@ -70,7 +70,7 @@ def get_operation_adapter(kind: str) -> OperationAdapter:
 def inspect_non_registry_operations(
     tweak: TweakDefinition,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     *,
     expand_fn: Callable[[str], Path] | None = None,
 ) -> tuple[list[PlannedOperation], list[str], list[str]]:

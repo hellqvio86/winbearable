@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..backends.ports import ApplyPorts, CompensationPorts, LastOutcomePort
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
 from ..models import (
     CompensationIssue,
@@ -32,8 +32,8 @@ def now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
-def raise_system_error(system: Any, message: str, *, category: str = "system_error") -> None:
-    """Raise a typed WinbearableError subclass based on SystemBackend.last_outcome."""
+def raise_system_error(system: LastOutcomePort, message: str, *, category: str = "system_error") -> None:
+    """Raise a typed WinbearableError subclass based on LastOutcomePort.last_outcome."""
     outcome = system.last_outcome
     if isinstance(outcome, OperationOutcome) and outcome.status != OperationStatus.OK:
         detail = f"{message} ({outcome.status}: {outcome.message})"
@@ -78,7 +78,7 @@ class OperationAdapter(Protocol):
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
     ) -> tuple[list[PlannedOperation], list[str], list[str]]:
         """Return (planned_operations, drifted_reasons, unverified_reasons) for this operation kind."""
 
@@ -86,7 +86,7 @@ class OperationAdapter(Protocol):
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
         backup_dir: Path | None,
         seen_ids: set[str],
     ) -> list[Any]:
@@ -97,7 +97,7 @@ class OperationAdapter(Protocol):
         tweak: TweakDefinition,
         env: EnvironmentInfo,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
         ctx: OperationApplyContext,
     ) -> list[OperationJournalEntry]:
         """Execute mutations for this operation kind and return structured journal entries."""
@@ -106,7 +106,7 @@ class OperationAdapter(Protocol):
         self,
         tweak: TweakDefinition,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
     ) -> bool:
         """Verify live state matches desired state for this operation kind."""
 
@@ -114,7 +114,7 @@ class OperationAdapter(Protocol):
         self,
         snapshots: list[Any],
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: CompensationPorts,
         *,
         force: bool = False,
         restore_full_policy: bool = False,

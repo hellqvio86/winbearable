@@ -7,8 +7,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import ApplyPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..log import get_logger
 from ..models import (
     EnvironmentInfo,
@@ -47,7 +47,7 @@ def execute_tweak_mutations(
     tweak: TweakDefinition,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     backup_dir: Path,
     exported_subtrees: set[tuple[str, str, RegistryView]],
     newly_installed_winget: list[str],
@@ -142,7 +142,7 @@ def apply_profile(
     profile: ProfileSpec,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     state_store: StateStore,
     dry_run: bool = True,
     allow_high_risk: bool = False,
@@ -214,7 +214,7 @@ def run_profile_command(
     profile: ProfileSpec,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     state_store: StateStore,
     dry_run: bool = True,
     allow_high_risk: bool = False,

@@ -2,6 +2,15 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.32.1] - 2026-11-22
+
+### Security, Architecture & Release Hardening
+
+- **Elevated-Child Win32 Env Rewrite & Executable Guard (`WB-SEC-01-R`):** Added `enforce_elevated_win32_env()` in `uac/elevation.py` to rewrite `SYSTEMROOT`, `WINDIR`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, and `PATH` from Win32 `GetSystemDirectoryW`; restricted elevated `winget.exe` / `code.cmd` resolution (`resolve_winget_exe`, `resolve_code_cmd`, `_guard_elevated_winget_exe`) to refuse `%LOCALAPPDATA%` / user-writable binaries; fixed `is_user_writable_binary` to use `ntpath` for Windows paths on POSIX hosts; and disabled `UpdateChecker` in elevated UAC children.
+- **Engine & Operations Port Boundary (`WB-ARCH-01-R`):** Replaced all `SystemBackend` imports in `src/winbearable/engine/` and `src/winbearable/operations/` with narrow capability-port protocols (`EvaluationPorts`, `ApplyPorts`, `CompensationPorts`, `LastOutcomePort`) enforced by `tests/test_catalog_lint.py`.
+- **Strict Journal Parsing & Backup SHA-256 Verification (`WB-MAINT-02-R`, `WB-SEC-03-R`, `WB-ARCH-05-R`):** Made `RunRecord.from_dict()` fail closed on missing required fields (`run_id`, `timestamp`, `profile_name`, `applied_tweaks`, `state`) and non-list collections, added `backup_sha256` / `wsl_backup_sha256` verification in `validate_recovery_run_record()`, and added consistency checks before recovery.
+- **Authenticode Signing Policy Sync (`WB-REL-03-R`):** Required `Status -eq "Valid"` (and optional `WIN_SIGNING_EXPECTED_THUMBPRINT`) in `.github/workflows/ci.yml`, aligned `docs/winget-releasing.md`, and added a CI/doc consistency test.
+
 ## [0.32.0] - 2026-11-22
 
 ### Security & Release Assurance

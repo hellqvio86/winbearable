@@ -13,7 +13,7 @@ Unsupported targets fail closed with `unsupported_build` or `unsupported_edition
 
 ## Supported Python Interpreters
 
-- **Python `>= 3.15` only** (deliberately targeting modern CPython 3.15+ including both standard GIL `3.15` and free-threaded `3.15t` builds tested in Linux CI; Windows CI currently runs standard `3.15`).
+- **Python `>= 3.15` only** (targeting final CPython 3.15+ releases, not pre-release `3.15.0b4` betas where `hypothesis` `abi3t` wheels may fail to import). Both standard GIL `3.15` and free-threaded `3.15t` builds are tested in Linux CI; Windows CI currently runs standard `3.15`. Users without Python 3.15 can use the standalone `wb.exe` portable binary from GitHub Releases / Winget.
 - All `NativeSystemBackend` and `InMemorySystemBackend` caches and outcomes use thread-local / lock-guarded storage for free-threaded safety.
 
 ## API, CLI & Schema Stability Tiers

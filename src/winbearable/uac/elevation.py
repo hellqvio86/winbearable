@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,14 +40,46 @@ from .win32 import (
 _LOGGER = get_logger(__name__)
 
 
-def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
-    """Strip forbidden Python runtime, override, and ambient redirection variables in elevated children.
+def enforce_elevated_win32_env(
+    env: MutableMapping[str, str] | None = None,
+    *,
+    kernel32: Any = None,
+) -> dict[str, str]:
+    """Rewrite win32_trusted environment variables from Win32 APIs (never trusting ambient os.environ)."""
+    target_env: MutableMapping[str, str] = env if env is not None else os.environ
+    k32 = kernel32
+    if k32 is None and sys.platform == "win32":
+        try:
+            _, k32 = get_win32_dlls(None)
+        except UacElevationError:
+            k32 = None
+    if k32 is not None and hasattr(k32, "GetSystemDirectoryW"):
+        sys32 = resolve_trusted_system32(k32)
+    elif sys.platform == "win32":
+        sys32 = r"C:\Windows\System32"
+    else:
+        return {}
 
-    Enforces `ELEVATED_ENV_POLICY`: elevated children must never inherit `PYTHON*` import hooks,
-    `WINBEARABLE_*_OVERRIDE` / `WINBEARABLE_DEBUG` knobs, or ambient path/behavior redirection
-    variables (`WINBEARABLE_STATE_PATH`, `WINBEARABLE_SETTINGS`, `WINBEARABLE_PROFILE`, `XDG_*`, etc.).
-    Non-frozen Python launches additionally pass `-I`.
-    """
+    sys_root = ntpath.dirname(ntpath.normpath(sys32))
+    drive, _ = ntpath.splitdrive(sys_root)
+    rewritten: dict[str, str] = {
+        "SYSTEMROOT": sys_root,
+        "WINDIR": sys_root,
+        "PATH": f"{sys32};{sys_root};{sys32}\\Wbem",
+    }
+    if drive:
+        rewritten["PROGRAMFILES"] = f"{drive}\\Program Files"
+        rewritten["PROGRAMFILES(X86)"] = f"{drive}\\Program Files (x86)"
+    target_env.update(rewritten)
+    return rewritten
+
+
+def sanitize_elevated_python_env(
+    env: dict[str, str] | None = None,
+    *,
+    rewrite_win32_trusted: bool | None = None,
+) -> list[str]:
+    """Strip forbidden env vars and rewrite win32_trusted roots in elevated children."""
     target_env = env if env is not None else os.environ
     removed: list[str] = []
     strip_keys = list(ELEVATED_ENV_STRIP_VARS)
@@ -60,6 +92,9 @@ def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]
         if var in target_env:
             del target_env[var]
             removed.append(var)
+    should_rewrite = (env is None) if rewrite_win32_trusted is None else rewrite_win32_trusted
+    if should_rewrite:
+        enforce_elevated_win32_env(target_env)
     return removed
 
 
