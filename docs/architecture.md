@@ -105,3 +105,11 @@ flowchart LR
 - **Module Size Caps:** Production modules under `src/winbearable/` are capped at `600` LOC, and category tweak modules under `src/winbearable/tweaks/categories/` are capped at `350` LOC (enforced by `tests/test_catalog_lint.py`).
 - **Immutable Catalogs:** `TWEAK_CATALOG` and winget package catalogs are wrapped in `types.MappingProxyType` and validated at import/test time.
 - **Verification Matrix Enforcement:** Non-registry catalog tweaks must have corresponding entries in `docs/verify-matrix.md` (enforced by `tests/test_catalog_lint.py`).
+
+## Architectural Decision Records (`docs/adr/`)
+
+- [ADR 0001: Write-Ahead Transaction Journal & Compensation Separation](adr/0001-transaction-journal.md)
+- [ADR 0002: Single Operation Registry & Explicit Reversibility](adr/0002-operation-adapters-and-registry.md)
+- [ADR 0003: Fail-Closed UAC Elevation & Parent-Resolved Environment Handoff](adr/0003-uac-elevation-trust.md)
+- [ADR 0004: Interface-Segregated Capability Ports](adr/0004-capability-ports.md)
+- [ADR 0005: WSL Host & Distro Transaction Boundary](adr/0005-wsl-transaction-boundary.md)

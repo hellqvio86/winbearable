@@ -18,6 +18,7 @@ from ..models import (
     TweakCheckResult,
     WslDistroSnapshot,
 )
+from ..models.journal import FailureOutcomeDict
 from ..operations import identity
 from ..state import StateStore
 from ..tweaks import get_tweak
@@ -225,7 +226,16 @@ class ApplyContext:
             installed_winget_packages=tuple(self.newly_installed_winget),
             installed_vscode_extensions=tuple(self.newly_installed_extensions),
             completed_operations=tuple(self.completed_ops),
-            failure_outcomes=tuple(self.failure_outcomes),
+            failure_outcomes=tuple(
+                FailureOutcomeDict(
+                    tweak_id=str(item.get("tweak_id", "")),
+                    status=str(item.get("status", "unknown")),
+                    message=str(item.get("message", "")),
+                    returncode=item.get("returncode") if isinstance(item.get("returncode"), int) else None,
+                    command=[str(c) for c in item["command"]] if isinstance(item.get("command"), list) else [],
+                )
+                for item in self.failure_outcomes
+            ),
             operation_journal=tuple(self.journal_entries),
             precondition_fingerprints=self.live_fingerprints,
             wsl_backup_path=self.wsl_backup_path,

@@ -8,6 +8,7 @@ from pathlib import Path
 import winbearable.cli as cli_pkg
 from winbearable.const import HIVE_HKCU, HIVE_HKLM, UNSUPPORTED_IOT_LTSC_EDITION_IDS, __version__
 from winbearable.models import RiskLevel
+from winbearable.operations.registry_spec import OPERATION_KIND_SPECS, ReversibilityKind
 from winbearable.profiles import load_profile
 from winbearable.tweaks import TWEAK_CATALOG, validate_catalog
 
@@ -246,67 +247,190 @@ def test_catalog_non_registry_evidence_metadata() -> None:
             assert tweak.provenance.evidence_type in valid_types
 
 
-def test_architectural_layer_boundaries() -> None:
-    """Enforce the 7-layer acyclic dependency DAG across src/winbearable modules."""
+_DEFAULT_LAYER_MAP: dict[str, int] = {
+    "const": 0,
+    "log": 1,
+    "models": 1,
+    "update_check": 1,
+    "backends": 2,
+    "hyperv_firewall": 2,
+    "packages": 3,
+    "tweaks": 3,
+    "wsl": 3,
+    "operations": 3,
+    "profiles": 4,
+    "state": 4,
+    "engine": 5,
+    "audit": 5,
+    "settings": 5,
+    "uac": 6,
+    "tui": 6,
+    "cli": 6,
+}
 
-    layer_map: dict[str, int] = {
-        "const": 0,
-        "log": 1,
-        "models": 1,
-        "update_check": 1,
-        "backends": 2,
-        "hyperv_firewall": 2,
-        "packages": 3,
-        "tweaks": 3,
-        "wsl": 3,
-        "operations": 3,
-        "profiles": 4,
-        "state": 4,
-        "engine": 5,
-        "audit": 5,
-        "settings": 5,
-        "uac": 6,
-        "tui": 6,
-        "cli": 6,
+
+def _module_name_for_file(pkg_root: Path, py_file: Path) -> str:
+    rel = py_file.relative_to(pkg_root)
+    parts = list(rel.parts)
+    if parts[-1] == "__init__.py":
+        parts = parts[:-1]
+    else:
+        parts[-1] = parts[-1].removesuffix(".py")
+    return ".".join(parts)
+
+
+_ALLOWED_DYNAMIC_IMPORT_FILES: frozenset[str] = frozenset(
+    {
+        "backends/registry_winreg.py",  # optional stdlib winreg on Windows only
+        "cli/__init__.py",  # PEP 562 lazy subcommand/symbol loading
+        "tui.py",  # optional [tui] textual extra
     }
-    pkg_root = Path(__file__).resolve().parent.parent / "src" / "winbearable"
-    violations: list[str] = []
+)
 
+
+def check_architectural_dag(
+    pkg_root: Path,
+    layer_map: dict[str, int] | None = None,
+    *,
+    pkg_name: str = "winbearable",
+) -> list[str]:
+    """Verify layer ordering, cycle freedom (DFS), and absence of dynamic imports in *pkg_root*."""
+    layers = layer_map or _DEFAULT_LAYER_MAP
+    violations: list[str] = []
+    module_files: dict[str, Path] = {}
     for py_file in sorted(pkg_root.rglob("*.py")):
         rel = py_file.relative_to(pkg_root)
-        if rel.parts == ("__init__.py",) or rel.parts == ("__main__.py",):
+        if rel.parts in {("__init__.py",), ("__main__.py",)}:
             continue
-        top_pkg = rel.parts[0].removesuffix(".py")
-        src_layer = layer_map.get(top_pkg)
-        assert src_layer is not None, f"Unregistered architectural layer for {rel}"
+        mod = _module_name_for_file(pkg_root, py_file)
+        if mod:
+            module_files[mod] = py_file
+
+    graph: dict[str, set[str]] = {mod: set() for mod in module_files}
+    for src_mod, py_file in module_files.items():
+        rel = py_file.relative_to(pkg_root)
+        src_top = rel.parts[0].removesuffix(".py")
+        src_layer = layers.get(src_top)
+        if src_layer is None:
+            violations.append(f"Unregistered architectural layer for {rel}")
+            continue
 
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         for node in ast.walk(tree):
-            imported_tops: list[str] = []
+            targets: list[str] = []
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith("winbearable."):
-                        imported_tops.append(alias.name.split(".")[1])
+                    if alias.name == pkg_name or alias.name.startswith(f"{pkg_name}."):
+                        sub = alias.name[len(pkg_name) + 1 :]
+                        if sub:
+                            targets.append(sub)
             elif isinstance(node, ast.ImportFrom):
                 if node.level > 0:
-                    # Relative import: resolve target package relative to py_file
                     cur_dir = py_file.parent
                     for _ in range(node.level - 1):
                         cur_dir = cur_dir.parent
-                    if cur_dir == pkg_root and node.module:
-                        imported_tops.append(node.module.split(".")[0])
-                    elif cur_dir != pkg_root:
-                        rel_target = cur_dir.relative_to(pkg_root)
-                        imported_tops.append(rel_target.parts[0])
-                elif node.module and node.module.startswith("winbearable."):
-                    imported_tops.append(node.module.split(".")[1])
+                    if cur_dir == pkg_root:
+                        base_parts: tuple[str, ...] = ()
+                    elif pkg_root in cur_dir.parents:
+                        base_parts = cur_dir.relative_to(pkg_root).parts
+                    else:
+                        continue
+                    if node.module:
+                        targets.append(".".join((*base_parts, *node.module.split("."))))
+                    else:
+                        for alias in node.names:
+                            if alias.name != "*":
+                                targets.append(".".join((*base_parts, alias.name)))
+                elif node.module and node.module.startswith(f"{pkg_name}."):
+                    sub = node.module[len(pkg_name) + 1 :]
+                    targets.append(sub)
+                    for alias in node.names:
+                        cand = f"{sub}.{alias.name}"
+                        if cand in module_files:
+                            targets.append(cand)
+            elif isinstance(node, ast.Call):
+                func = node.func
+                if (
+                    (isinstance(func, ast.Name) and func.id == "__import__")
+                    or (isinstance(func, ast.Attribute) and func.attr == "import_module")
+                ) and rel.as_posix() not in _ALLOWED_DYNAMIC_IMPORT_FILES:
+                    violations.append(f"{rel}:{node.lineno} uses forbidden dynamic import")
 
-            for dst_pkg in imported_tops:
-                dst_layer = layer_map.get(dst_pkg)
-                if dst_layer is not None and dst_layer > src_layer:
-                    violations.append(f"{rel} (layer {src_layer}: {top_pkg}) imports {dst_pkg} (layer {dst_layer})")
+            for target in targets:
+                dst_top = target.split(".")[0]
+                dst_layer = layers.get(dst_top)
+                if dst_layer is None:
+                    violations.append(f"{rel} imports unknown internal package {dst_top!r}")
+                elif dst_layer > src_layer:
+                    violations.append(f"{rel} (layer {src_layer}: {src_top}) imports {target} (layer {dst_layer})")
 
-    assert not violations, "Architectural layer boundary violations:\n" + "\n".join(violations)
+                resolved_dst = target if target in graph else None
+                if resolved_dst is None and "." in target:
+                    parent_mod = target.rsplit(".", 1)[0]
+                    if parent_mod in graph:
+                        resolved_dst = parent_mod
+                if resolved_dst and resolved_dst != src_mod:
+                    graph[src_mod].add(resolved_dst)
+
+    # DFS 3-color cycle detection (0=unvisited, 1=visiting, 2=done)
+    state: dict[str, int] = {}
+    stack: list[str] = []
+
+    def _dfs(node: str) -> None:
+        state[node] = 1
+        stack.append(node)
+        for nxt in sorted(graph.get(node, ())):
+            st = state.get(nxt, 0)
+            if st == 1:
+                idx = stack.index(nxt)
+                cycle = " -> ".join([*stack[idx:], nxt])
+                violations.append(f"Import cycle detected: {cycle}")
+            elif st == 0:
+                _dfs(nxt)
+        stack.pop()
+        state[node] = 2
+
+    for mod in sorted(graph):
+        if state.get(mod, 0) == 0:
+            _dfs(mod)
+
+    return violations
+
+
+def test_architectural_layer_boundaries(tmp_path: Path) -> None:
+    """Enforce the 7-layer acyclic dependency DAG across src/winbearable modules and self-test the DAG checker."""
+    pkg_root = Path(__file__).resolve().parent.parent / "src" / "winbearable"
+    violations = check_architectural_dag(pkg_root)
+    assert not violations, "Architectural DAG violations:\n" + "\n".join(violations)
+
+    # Self-test synthetic violation graphs: upward edge, same-layer cycle, relative import, unknown package
+    synth = tmp_path / "synth_pkg"
+    (synth / "const").mkdir(parents=True)
+    (synth / "cli").mkdir(parents=True)
+    (synth / "const" / "__init__.py").write_text("", encoding="utf-8")
+    (synth / "const" / "a.py").write_text("from . import b\n", encoding="utf-8")
+    (synth / "const" / "b.py").write_text("from . import a\n", encoding="utf-8")
+    (synth / "cli" / "__init__.py").write_text("", encoding="utf-8")
+    (synth / "const" / "up.py").write_text("from .. import cli\n", encoding="utf-8")
+    (synth / "const" / "unk.py").write_text("from winbearable.mystery import x\n", encoding="utf-8")
+
+    synth_violations = check_architectural_dag(synth)
+    joined = "\n".join(synth_violations)
+    assert "Import cycle detected" in joined
+    assert "imports cli (layer 6)" in joined
+    assert "unknown internal package 'mystery'" in joined
+
+
+def test_operation_registry_reversibility_matches_threat_model() -> None:
+    """OPERATION_KIND_SPECS has explicit reversibility matching docs/threat-model.md."""
+    repo_root = Path(__file__).resolve().parent.parent
+    threat_text = (repo_root / "docs" / "threat-model.md").read_text(encoding="utf-8")
+    for spec in OPERATION_KIND_SPECS:
+        assert isinstance(spec.reversibility, ReversibilityKind)
+        assert spec.compensation_policy.strip()
+    assert "`best-effort`" in threat_text
+    assert "`irreversible`" in threat_text
+    assert "`reversible`" in threat_text
 
 
 def test_no_cross_module_private_imports() -> None:

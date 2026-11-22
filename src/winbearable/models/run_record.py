@@ -8,6 +8,7 @@ from typing import Any
 from winbearable.models.enums import TransactionState
 from winbearable.models.snapshots import (
     AuditpolSnapshot,
+    FailureOutcomeDict,
     FileSnapshot,
     FirewallGroupSnapshot,
     FsutilSnapshot,
@@ -51,7 +52,7 @@ class RunRecord:
     installed_winget_packages: tuple[str, ...] = ()
     installed_vscode_extensions: tuple[str, ...] = ()
     completed_operations: tuple[str, ...] = ()
-    failure_outcomes: tuple[dict[str, Any], ...] = ()
+    failure_outcomes: tuple[FailureOutcomeDict, ...] = ()
     operation_journal: tuple[OperationJournalEntry, ...] = ()
     precondition_fingerprints: dict[str, str] | None = None
     wsl_backup_path: str | None = None
@@ -122,12 +123,24 @@ class RunRecord:
         winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
         vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
         completed_ops = tuple(str(item) for item in payload.get("completed_operations", []))
-        failure_outcomes = tuple(dict(item) for item in payload.get("failure_outcomes", []) if isinstance(item, dict))
-        op_journal = tuple(
-            OperationJournalEntry.from_dict(item)
-            for item in payload.get("operation_journal", [])
+        raw_failures = payload.get("failure_outcomes", [])
+        if not isinstance(raw_failures, list):
+            raise ValueError("RunRecord 'failure_outcomes' must be a list.")
+        failure_outcomes: tuple[FailureOutcomeDict, ...] = tuple(
+            FailureOutcomeDict(
+                tweak_id=str(item["tweak_id"]) if "tweak_id" in item else "",
+                status=str(item.get("status", "unknown")),
+                message=str(item.get("message", "")),
+                returncode=item.get("returncode") if isinstance(item.get("returncode"), int) else None,
+                command=[str(c) for c in item["command"]] if isinstance(item.get("command"), list) else [],
+            )
+            for item in raw_failures
             if isinstance(item, dict)
         )
+        raw_journal = payload.get("operation_journal", [])
+        if not isinstance(raw_journal, list):
+            raise ValueError("RunRecord 'operation_journal' must be a list.")
+        op_journal = tuple(OperationJournalEntry.from_dict(item) for item in raw_journal)
         raw_precond = payload.get("precondition_fingerprints")
         precond_fp = {str(k): str(v) for k, v in raw_precond.items()} if isinstance(raw_precond, dict) else None
         raw_wsl_backup = payload.get("wsl_backup_path")

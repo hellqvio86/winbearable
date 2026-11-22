@@ -10,7 +10,7 @@ import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from ..const import HIVE_HKLM
 from .registry import RegistryBackend
@@ -389,33 +389,44 @@ def restrict_acl_to_current_user(
     return res.returncode == 0
 
 
-class _SecBackendHost(Protocol):
-    """Narrow host protocol required by NativeSecService."""
+def is_hibernate_enabled(registry: RegistryBackend) -> bool | None:
+    val = registry.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled")
+    if val is not None and isinstance(val[0], int):
+        return val[0] == 1
+    return None
 
-    _platform: str
 
-    def _run_native_cmd(
-        self, args: list[str], input_text: str | None = None, timeout: float = 120.0
-    ) -> CommandResult: ...
-    def _get_dll(self, name: str) -> Any | None: ...
-    def _get_current_user_sid(self) -> str | None: ...
+def set_hibernate_enabled(
+    run_cmd: Callable[..., CommandResult], platform_name: str, registry: RegistryBackend, enabled: bool
+) -> bool:
+    if platform_name != "win32":
+        return False
+    flag = "on" if enabled else "off"
+    res = run_cmd([sys32_exe("powercfg.exe"), "/hibernate", flag])
+    return res.returncode == 0
 
 
 class NativeSecService:
-    """Composed service delegating auditpol, wevtutil, firewall, fsutil, and ACL operations for NativeSystemBackend."""
+    """Composed service delegating auditpol, wevtutil, firewall, fsutil, and ACL operations."""
 
-    def __init__(self, backend: _SecBackendHost) -> None:
-        self._backend = backend
-
-    @property
-    def _platform(self) -> str:
-        return self._backend._platform
+    def __init__(
+        self,
+        *,
+        platform_name: str,
+        run_cmd: Callable[..., CommandResult],
+        get_dll: Callable[[str], Any | None],
+        get_user_sid: Callable[[], str | None],
+    ) -> None:
+        self._platform = platform_name
+        self._run_cmd_fn = run_cmd
+        self._get_dll_fn = get_dll
+        self._get_user_sid_fn = get_user_sid
 
     def _run_native_cmd(self, args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
-        return self._backend._run_native_cmd(args, input_text=input_text, timeout=timeout)
+        return self._run_cmd_fn(args, input_text=input_text, timeout=timeout)
 
     def _get_dll(self, name: str) -> Any | None:
-        return self._backend._get_dll(name)
+        return self._get_dll_fn(name)
 
     def get_auditpol_subcategory(self, subcategory_guid: str) -> str | None:
         return get_auditpol_subcategory(self._run_native_cmd, self._platform, subcategory_guid)
@@ -464,9 +475,7 @@ class NativeSecService:
     _is_sddl_restricted_to_sid = staticmethod(is_sddl_restricted_to_sid)
 
     def is_ssh_acl_restricted(self, path_str: str) -> bool:
-        return is_ssh_acl_restricted(
-            self._run_native_cmd, self._platform, path_str, self._backend._get_current_user_sid
-        )
+        return is_ssh_acl_restricted(self._run_native_cmd, self._platform, path_str, self._get_user_sid_fn)
 
     def backup_acl(self, path_str: str, backup_file: Path) -> bool:
         return backup_acl(self._run_native_cmd, self._platform, path_str, backup_file)
@@ -475,6 +484,4 @@ class NativeSecService:
         return restore_acl(self._run_native_cmd, self._platform, path_str, backup_file)
 
     def restrict_acl_to_current_user(self, path_str: str) -> bool:
-        return restrict_acl_to_current_user(
-            self._run_native_cmd, self._platform, path_str, self._backend._get_current_user_sid
-        )
+        return restrict_acl_to_current_user(self._run_native_cmd, self._platform, path_str, self._get_user_sid_fn)

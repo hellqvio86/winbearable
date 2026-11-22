@@ -342,7 +342,7 @@ def test_cli_wsl_firewall_uses_injected_store_and_recover_exit_code(tmp_path: Pa
             timestamp="2026-11-18T00:00:00Z",
             profile_name="ssh",
             applied_tweaks=("dev.fix_ssh_key_permissions",),
-            icacls_snapshots=(IcaclsSnapshot(path_template="C:\\missing", backup_acl_path=None),),
+            icacls_snapshots=(IcaclsSnapshot(path_template=str(tmp_path / "missing"), backup_acl_path=None),),
             state=TransactionState.FAILED,
         )
     )

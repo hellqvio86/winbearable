@@ -390,7 +390,8 @@ We don't like Windows enough to maintain legacy workarounds or embedded/IoT quir
 
 | Target | Version / Edition | Support Status |
 | :--- | :--- | :--- |
-| **Windows 11** | `26300+` (`Professional` / standard desktop) | **Supported** |
+| **Windows 11 (Tested)** | Build `26300` (`Professional`) | **Tested & Supported** (`DEFAULT_TESTED_BUILDS`) |
+| **Windows 11 (Supported Range)** | Build `>= 26300` (`Home`/`Pro`/`Enterprise`/`Education`) | **Supported** (`MIN_SUPPORTED_BUILD`) |
 | **Windows IoT / LTSC** | `IoTEnterprise`, `IoTEnterpriseS`, `EnterpriseS` | **Unsupported (`unsupported_edition` — NO IoT/LTSC)** |
 | **Older Windows** | `< 26300` (Older Windows 11 / Windows 10) | **Unsupported (`unsupported_build`)** |
 | **Python** | `>= 3.15` (standard `3.15` & free-threaded `3.15t` no-GIL) | **Supported** |
@@ -412,7 +413,7 @@ We don't like Windows enough to maintain legacy workarounds or embedded/IoT quir
 
 CI runs two complementary test lanes in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 - **Linux (`test` on `ubuntu-latest`):** Full `pytest` suite (including `tests/test_property_invariants.py`) across Python `3.15` and free-threaded `3.15t`, plus `lint` (`ruff` + `mypy`) and `mutation-gate`.
-- **Windows (`windows-contracts` on `windows-latest`, Python `3.15`):** Selected contract, unit, and read-only Windows integration subset (`tests/contracts`, `tests/test_windows_integration.py` with `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`, `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, `tests/test_architecture_invariants.py`). `tests/test_property_invariants.py` and `3.15t` are currently Linux-only in CI.
+- **Windows (`windows-contracts` on `windows-latest`, Python `3.15`):** Selected contract, unit, property, and read-only Windows integration subset (`tests/contracts`, `tests/test_windows_integration.py` with `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`, `tests/test_property_invariants.py`, `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, `tests/test_architecture_invariants.py`). Free-threaded `3.15t` is currently Linux-only in CI.
 
 Locally, unit tests run in the Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2/Linux, and read-only Windows integration tests (`tests/test_windows_integration.py`) run on Windows 11 (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`). Every commit MUST pass the local `.githooks/pre-commit` gate before committing:
 
@@ -434,6 +435,7 @@ make release-check # lint + test + TruffleHog + Trivy
 - [UAC Security Review](docs/uac-security-review.md)
 - [Schema Versioning & Migration](docs/schema-versioning.md)
 - [Verification Matrix](docs/verify-matrix.md)
+- [Disposable-VM Acceptance Checklist](docs/vm-acceptance-checklist.md)
 - [Per-Tweak Catalog Reference](docs/tweaks-reference.md)
 - [Dependency Management](docs/dependency-management.md)
 - [Winget Releasing Guide](docs/winget-releasing.md)
