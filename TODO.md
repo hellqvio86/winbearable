@@ -56,7 +56,7 @@ Some inheritance is likely intentional (the elevated child must act on the same 
 - Normal supported user-scope installs and intentional custom state/profile configuration continue to work through documented explicit mechanisms.
 - Threat model and UAC security review describe the exact allowlist and handoff contract.
 
-## [ ] WB-SEC-02 — Make elevation-target trust fail closed or require explicit acknowledgement
+## [x] WB-SEC-02 — Make elevation-target trust fail closed or require explicit acknowledgement
 
 **Evidence / locations**
 - `src/winbearable/uac/elevation.py::assess_elevation_target_trust`

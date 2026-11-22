@@ -34,6 +34,7 @@ from .win32 import (
     get_win32_dlls,
     last_win32_error,
     resolve_trusted_system32,
+    resolve_trusted_system_roots,
 )
 
 _LOGGER = get_logger(__name__)
@@ -114,23 +115,20 @@ def assess_elevation_target_trust(
     *,
     env: dict[str, str] | None = None,
     writable_check: Callable[[Path], bool] | None = None,
+    kernel32: Any = None,
 ) -> ElevationTargetTrust:
     """Assess whether *target* resides in a system-protected location or a user-writable directory.
 
-    Dev/venv/pip/uv installs commonly run from user-writable locations (`%LOCALAPPDATA%`,
-    `%USERPROFILE%`); those are permitted with explicit diagnostic logging, whereas installs
-    under `%ProgramFiles%`, `%ProgramFiles(x86)%`, or `%SystemRoot%` require admin ACLs to modify.
+    Machine-protected installs under `%ProgramFiles%`, `%ProgramFiles(x86)%`, or `%SystemRoot%`
+    (resolved via Win32 `GetSystemDirectoryW` when available) are trusted by default; user-writable
+    locations (e.g. dev/venv/`uv` installs) are refused unless explicitly acknowledged.
     """
     env_map = env if env is not None else os.environ
     resolved = target.resolve()
     parent = resolved.parent
     norm_target = _norm_win_prefix(resolved)
 
-    trusted_roots = tuple(
-        _norm_win_prefix(raw)
-        for key in ("ProgramFiles", "ProgramFiles(x86)", "SystemRoot", "WINDIR")
-        if (raw := env_map.get(key))
-    )
+    trusted_roots = resolve_trusted_system_roots(kernel32=kernel32, env=env_map)
     in_trusted = any(norm_target == root or norm_target.startswith(root + ntpath.sep) for root in trusted_roots)
     is_writable = writable_check(parent) if writable_check is not None else os.access(parent, os.W_OK)
 
@@ -167,26 +165,61 @@ def assess_elevation_target_trust(
     )
 
 
+def _capture_file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    """Capture (st_dev, st_ino, st_size, st_mtime_ns) for TOCTOU revalidation before UAC launch."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (int(st.st_dev), int(st.st_ino), int(st.st_size), int(st.st_mtime_ns))
+
+
+def _verify_elevation_target_identity(
+    path: Path,
+    expected_identity: tuple[int, int, int, int] | None,
+    *,
+    check_symlinks: bool = True,
+    reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+) -> None:
+    """Re-verify symlink/reparse status and file identity immediately prior to ShellExecuteExW."""
+    if check_symlinks and (reparse_check(path) or any(reparse_check(p) for p in path.parents)):
+        raise UacElevationError(f"Refusing elevation target with symlink or reparse point: {path}")
+    if expected_identity is None:
+        return
+    current = _capture_file_identity(path)
+    if current is None or current != expected_identity:
+        raise UacElevationError(f"Elevation target changed between validation and launch: {path}")
+
+
 def _validate_elevation_executable(
     path: Path,
     *,
     check_symlinks: bool = True,
     reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+    allow_user_writable: bool = True,
+    kernel32: Any = None,
+    writable_check: Callable[[Path], bool] | None = None,
 ) -> Path:
-    """Resolve *path* and reject symlinks/reparse points on the target or its ancestors."""
+    """Resolve *path*, reject symlinks/reparse points, and enforce elevation-target trust policy."""
     resolved = path.resolve()
     if check_symlinks and (reparse_check(path) or any(reparse_check(p) for p in path.parents)):
         raise UacElevationError(f"Refusing elevation target with symlink or reparse point: {path}")
-    trust = assess_elevation_target_trust(resolved)
+    trust = assess_elevation_target_trust(resolved, writable_check=writable_check, kernel32=kernel32)
     if trust.user_writable_risk:
-        _LOGGER.debug(
-            "UAC elevation target %s resides in %s (%s); developer/user-scope installs remain permitted.",
+        if not allow_user_writable:
+            raise UacElevationError(
+                f"Refusing user-writable elevation target '{resolved}' ({trust.reason}). "
+                "Install to a machine-protected directory or pass --allow-user-writable-elevation-target "
+                "to acknowledge developer/user-scope elevation risk."
+            )
+        _LOGGER.warning(
+            "UAC elevation target %s resides in user-writable %s (%s); proceeding due to explicit acknowledgement.",
             resolved,
             trust.parent_dir,
             trust.reason,
         )
     else:
-        _LOGGER.debug("UAC elevation target %s verified in %s (%s).", resolved, trust.parent_dir, trust.reason)
+        _LOGGER.info("UAC elevation target %s verified in %s (%s).", resolved, trust.parent_dir, trust.reason)
     return resolved
 
 
@@ -196,6 +229,9 @@ def resolve_elevation_target(
     argv0: str | None = None,
     *,
     reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+    allow_user_writable: bool = True,
+    kernel32: Any = None,
+    writable_check: Callable[[Path], bool] | None = None,
 ) -> tuple[str, list[str]]:
     """Resolve the UAC target executable and argument list.
 
@@ -203,12 +239,29 @@ def resolve_elevation_target(
     so Windows UAC displays `wb.exe` / `winbearable` instead of `Python`.
     """
     if executable is not None:
-        target = _validate_elevation_executable(Path(executable), reparse_check=reparse_check)
+        target = _validate_elevation_executable(
+            Path(executable),
+            reparse_check=reparse_check,
+            allow_user_writable=allow_user_writable,
+            kernel32=kernel32,
+            writable_check=writable_check,
+        )
         args = elevated_args if _is_wb_launcher(target) else ["-I", "-m", "winbearable", *elevated_args]
         return str(target), args
 
     if getattr(sys, "frozen", False):
-        return str(_validate_elevation_executable(Path(sys.executable), reparse_check=reparse_check)), elevated_args
+        return (
+            str(
+                _validate_elevation_executable(
+                    Path(sys.executable),
+                    reparse_check=reparse_check,
+                    allow_user_writable=allow_user_writable,
+                    kernel32=kernel32,
+                    writable_check=writable_check,
+                )
+            ),
+            elevated_args,
+        )
 
     raw_argv0 = argv0 if argv0 is not None else (sys.argv[0] if sys.argv else "")
     if raw_argv0:
@@ -218,11 +271,33 @@ def resolve_elevation_target(
             and argv0_path.name.lower() in {"wb.exe", "winbearable.exe"}
             and argv0_path.is_file()
         ):
-            return str(_validate_elevation_executable(argv0_path, reparse_check=reparse_check)), elevated_args
+            return (
+                str(
+                    _validate_elevation_executable(
+                        argv0_path,
+                        reparse_check=reparse_check,
+                        allow_user_writable=allow_user_writable,
+                        kernel32=kernel32,
+                        writable_check=writable_check,
+                    )
+                ),
+                elevated_args,
+            )
 
     sibling_wb = Path(sys.executable).with_name("wb.exe")
     if sibling_wb.is_file():
-        return str(_validate_elevation_executable(sibling_wb, reparse_check=reparse_check)), elevated_args
+        return (
+            str(
+                _validate_elevation_executable(
+                    sibling_wb,
+                    reparse_check=reparse_check,
+                    allow_user_writable=allow_user_writable,
+                    kernel32=kernel32,
+                    writable_check=writable_check,
+                )
+            ),
+            elevated_args,
+        )
 
     # Linux/macOS virtualenvs always symlink .venv/bin/python to the base interpreter; enforce symlink check on Win32.
     return (
@@ -231,6 +306,9 @@ def resolve_elevation_target(
                 Path(sys.executable),
                 check_symlinks=(sys.platform == "win32"),
                 reparse_check=reparse_check,
+                allow_user_writable=allow_user_writable,
+                kernel32=kernel32,
+                writable_check=writable_check,
             )
         ),
         ["-I", "-m", "winbearable", *elevated_args],
@@ -269,6 +347,9 @@ def run_elevated_wb(
     cwd: str | None = None,
     windll_override: Any = None,
     timeout_ms: int | None = None,
+    *,
+    allow_user_writable: bool = False,
+    writable_check: Callable[[Path], bool] | None = None,
 ) -> tuple[int, str]:
     """Re-launch `wb` elevated via ShellExecuteExW('runas'), wait up to *timeout_ms*, and return (exit_code, output)."""
     if timeout_ms is None:
@@ -290,8 +371,21 @@ def run_elevated_wb(
     with _uac_output_dir() as tmp_dir:
         out_path = tmp_dir / "uac-output.txt"
         elevated_args = build_elevated_cmdline_args(argv, out_path, caller_sid=caller_sid)
-        resolved_exe, launch_args = resolve_elevation_target(elevated_args, executable=executable)
+        resolved_exe, launch_args = resolve_elevation_target(
+            elevated_args,
+            executable=executable,
+            allow_user_writable=allow_user_writable,
+            kernel32=kernel32,
+            writable_check=writable_check,
+        )
+        resolved_exe_path = Path(resolved_exe)
+        expected_identity = _capture_file_identity(resolved_exe_path)
         params = subprocess.list2cmdline(launch_args)
+        _verify_elevation_target_identity(
+            resolved_exe_path,
+            expected_identity,
+            check_symlinks=(sys.platform == "win32"),
+        )
         _LOGGER.debug(
             "Launching elevated child via ShellExecuteExW: %s",
             resolved_exe,
@@ -300,6 +394,7 @@ def run_elevated_wb(
                 "executable": resolved_exe,
                 "out_path": str(out_path),
                 "timeout_ms": effective_timeout_ms,
+                "allow_user_writable": allow_user_writable,
             },
         )
 

@@ -174,6 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
     )
     apply_parser.add_argument(
+        "--allow-user-writable-elevation-target",
+        dest="allow_user_writable_elevation_target",
+        action="store_true",
+        help="Acknowledge risk when elevating from a user-writable directory (e.g. dev/venv/uv install)",
+    )
+    apply_parser.add_argument(
         "--expected-fingerprints",
         dest="expected_fingerprints",
         default=None,
@@ -209,6 +215,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
     )
     rollback_parser.add_argument(
+        "--allow-user-writable-elevation-target",
+        dest="allow_user_writable_elevation_target",
+        action="store_true",
+        help="Acknowledge risk when elevating from a user-writable directory (e.g. dev/venv/uv install)",
+    )
+    rollback_parser.add_argument(
         "--force",
         action="store_true",
         help="Force snapshot restore even if post-apply external modifications are detected",
@@ -232,6 +244,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--elevate",
         action="store_true",
         help="Trigger a Windows UAC elevation prompt if not already running as Administrator",
+    )
+    recover_parser.add_argument(
+        "--allow-user-writable-elevation-target",
+        dest="allow_user_writable_elevation_target",
+        action="store_true",
+        help="Acknowledge risk when elevating from a user-writable directory (e.g. dev/venv/uv install)",
     )
     recover_parser.add_argument(
         "--force",
