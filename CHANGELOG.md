@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.32.0] - 2026-11-22
+
+### Security & Release Assurance
+
+- **Centralized Elevated-Child Environment Policy (`WB-SEC-01`):** Added `ELEVATED_ENV_POLICY` in `const.py` classifying all read environment variables, expanded `sanitize_elevated_python_env()` to strip ambient path/profile/logging/timeout redirection variables, added parent-resolved `--uac-state-path` / `--uac-settings-path` / `--profile` handoff in `relay_elevated_uac()`, and exposed non-secret `elevated_env_policy` in `wb doctor --json`.
+- **Fail-Closed Elevation Target Trust & Identity Verification (`WB-SEC-02`):** `run_elevated_wb()` now fails closed on user-writable targets unless `--allow-user-writable-elevation-target` is explicitly passed, resolves system-protected roots via Win32 `GetSystemDirectoryW` (`resolve_trusted_system_roots`), and revalidates target file identity immediately prior to `ShellExecuteExW`.
+- **CI, README & Verification Matrix Alignment (`WB-REL-01`):** Fixed stale `src/tests/` reference in `README.md`, aligned Linux (`test` across `3.15`/`3.15t`) vs. Windows (`windows-contracts` on `3.15`) CI documentation across `README.md` and `docs/verify-matrix.md`, and added `test_ci_and_docs_verification_claims_consistent`.
+
 ## [0.31.3] - 2026-11-22
 
 ### Documentation & Style

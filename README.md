@@ -294,7 +294,7 @@ wb recover --apply      # Idempotently compensate and mark ROLLED_BACK
 - **VBS, HVCI & Credential Guard (WSL2 trade-offs):** `hardening.enable_vbs_hvci` is `RiskLevel.HIGH` (requires `--i-know-what-im-doing` and a reboot, included only in `paranoid`), while Credential Guard is **observe-only** in `wb doctor`. Because VBS/HVCI/Credential Guard share the Hyper-V hypervisor with WSL2, enabling them isolates kernel/LSA memory at the cost of extra CPU, memory, and I/O overhead on constrained or nested-virtualization hosts.
 - **Name-resolution hardening & corporate VPNs:** `owner` and `paranoid` disable LLMNR, mDNS, WPAD, and NetBIOS broadcast resolution (`NodeType=2`). If you connect to a split-tunnel corporate VPN, legacy NAS/SMB appliance, or corporate PAC proxy that relies on WPAD or NetBIOS/LLMNR/mDNS fallback, override those tweaks to `false` in a custom TOML profile and run `wb rollback --apply`.
 - **Subprocess timeouts:** Set `WB_CMD_TIMEOUT=<seconds>` to override the default command timeout for slow `winget`/`dism`/`wsl` operations.
-- **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py` on the maintainer's Windows installation.
+- **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py` on the maintainer's Windows installation.
 
 ### Stable CLI Exit Codes
 
@@ -390,7 +390,8 @@ We don't like Windows enough to maintain legacy workarounds or embedded/IoT quir
 
 | Target | Version / Edition | Support Status |
 | :--- | :--- | :--- |
-| **Windows 11** | `26300+` (`Professional` / standard desktop) | **Supported** |
+| **Windows 11 (Tested)** | Build `26300` (`Professional`) | **Tested & Supported** (`DEFAULT_TESTED_BUILDS`) |
+| **Windows 11 (Supported Range)** | Build `>= 26300` (`Home`/`Pro`/`Enterprise`/`Education`) | **Supported** (`MIN_SUPPORTED_BUILD`) |
 | **Windows IoT / LTSC** | `IoTEnterprise`, `IoTEnterpriseS`, `EnterpriseS` | **Unsupported (`unsupported_edition` — NO IoT/LTSC)** |
 | **Older Windows** | `< 26300` (Older Windows 11 / Windows 10) | **Unsupported (`unsupported_build`)** |
 | **Python** | `>= 3.15` (standard `3.15` & free-threaded `3.15t` no-GIL) | **Supported** |
@@ -408,9 +409,13 @@ We don't like Windows enough to maintain legacy workarounds or embedded/IoT quir
 
 ---
 
-## Development, Dev Container & Pre-Commit Gate (`uv`)
+## Development, CI & Pre-Commit Gate (`uv`)
 
-Unit tests and full Python version matrices run locally in the free, open-source Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2/Linux, while read-only Windows integration tests (`tests/test_windows_integration.py`) can be run locally on Windows 11 (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`). Every commit MUST pass the local `.githooks/pre-commit` gate before committing:
+CI runs two complementary test lanes in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+- **Linux (`test` on `ubuntu-latest`):** Full `pytest` suite (including `tests/test_property_invariants.py`) across Python `3.15` and free-threaded `3.15t`, plus `lint` (`ruff` + `mypy`) and `mutation-gate`.
+- **Windows (`windows-contracts` on `windows-latest`, Python `3.15`):** Selected contract, unit, property, and read-only Windows integration subset (`tests/contracts`, `tests/test_windows_integration.py` with `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`, `tests/test_property_invariants.py`, `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, `tests/test_architecture_invariants.py`). Free-threaded `3.15t` is currently Linux-only in CI.
+
+Locally, unit tests run in the Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2/Linux, and read-only Windows integration tests (`tests/test_windows_integration.py`) run on Windows 11 (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`). Every commit MUST pass the local `.githooks/pre-commit` gate before committing:
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
@@ -430,6 +435,7 @@ make release-check # lint + test + TruffleHog + Trivy
 - [UAC Security Review](docs/uac-security-review.md)
 - [Schema Versioning & Migration](docs/schema-versioning.md)
 - [Verification Matrix](docs/verify-matrix.md)
+- [Disposable-VM Acceptance Checklist](docs/vm-acceptance-checklist.md)
 - [Per-Tweak Catalog Reference](docs/tweaks-reference.md)
 - [Dependency Management](docs/dependency-management.md)
 - [Winget Releasing Guide](docs/winget-releasing.md)
@@ -446,7 +452,7 @@ make release-check # lint + test + TruffleHog + Trivy
 Release archives (PyPI wheels/sdists and Winget zips) include GitHub build-provenance attestations:
 
 ```bash
-gh attestation verify winbearable-0.31.3-win-x64.zip --owner hellqvio86
+gh attestation verify winbearable-0.32.0-win-x64.zip --owner hellqvio86
 ```
 
 ---

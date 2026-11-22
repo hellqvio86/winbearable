@@ -10,6 +10,7 @@ from typing import Any
 
 from ..backends.registry import RegistryBackend
 from ..backends.system import SystemBackend
+from ..backends.win32_fs import is_reparse_or_symlink
 from ..models import (
     AuditpolSnapshot,
     CompensationIssue,
@@ -40,7 +41,7 @@ from ..operations import (
     identity,
 )
 from ..operations.package_and_file_adapters import FileConfigOperationAdapter
-from ..operations.path_policy import validate_file_spec_path
+from ..operations.path_policy import validate_file_spec_path, validate_icacls_user_only_path
 from ..operations.registry_spec import COMPENSATION_BATCH_SPECS, SNAPSHOT_FIELD_BY_TYPE
 from ..tweaks import get_tweak
 from ..wsl import get_wsl_distro_guid, probe_distro_wsl_conf
@@ -321,6 +322,61 @@ def _enrich_issue_tweak_id(issue: CompensationIssue, run_record: RunRecord) -> C
     return issue
 
 
+_MAX_RECOVERY_BACKUP_BYTES = 16 * 1024 * 1024
+
+
+def _validate_recovery_backup_file(
+    raw_path: str | None,
+    *,
+    label: str,
+    backup_root: Path | None = None,
+    reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+) -> None:
+    """Validate external recovery backup files against reparse points, root escape, and size limits."""
+    if not raw_path:
+        return
+    path = Path(raw_path)
+    if reparse_check(path) or any(reparse_check(p) for p in path.parents):
+        raise PermissionDeniedError(f"Refusing symlink or reparse-point recovery {label}: {path}")
+    resolved = path.resolve()
+    if backup_root is not None:
+        root_resolved = backup_root.resolve()
+        if not resolved.is_relative_to(root_resolved):
+            raise PermissionDeniedError(f"Refusing recovery {label} outside backup root: {resolved}")
+    if path.exists():
+        if not path.is_file():
+            raise PermissionDeniedError(f"Refusing non-file recovery {label}: {path}")
+        if path.stat().st_size > _MAX_RECOVERY_BACKUP_BYTES:
+            raise PermissionDeniedError(f"Refusing oversized recovery {label} (>16 MiB): {path}")
+
+
+def validate_recovery_run_record(
+    run_record: RunRecord,
+    *,
+    backup_root: Path | None = None,
+    reparse_check: Callable[[Path], bool] = is_reparse_or_symlink,
+) -> None:
+    """Validate persisted RunRecord paths and backup files before any privileged restore executes."""
+    for fs in run_record.file_snapshots:
+        validate_file_spec_path(fs.path, allow_system_paths=False)
+    for isnap in run_record.icacls_snapshots:
+        validate_icacls_user_only_path(isnap.path_template)
+        _validate_recovery_backup_file(
+            isnap.backup_acl_path, label="icacls backup", backup_root=backup_root, reparse_check=reparse_check
+        )
+    for asnap in run_record.auditpol_snapshots:
+        _validate_recovery_backup_file(
+            asnap.backup_csv_path, label="auditpol backup", backup_root=backup_root, reparse_check=reparse_check
+        )
+    for fsnap in run_record.firewall_group_snapshots:
+        _validate_recovery_backup_file(
+            fsnap.export_wfw_path, label="firewall backup", backup_root=backup_root, reparse_check=reparse_check
+        )
+    _validate_recovery_backup_file(
+        run_record.wsl_backup_path, label="wslconfig backup", backup_root=backup_root, reparse_check=reparse_check
+    )
+
+
 def compensate_run_record_issues(
     run_record: RunRecord,
     registry: RegistryBackend,
@@ -333,6 +389,7 @@ def compensate_run_record_issues(
     raw_issues: list[CompensationIssue] = []
     if run_record.state == TransactionState.PLANNED and not run_record.completed_operations:
         return raw_issues
+    validate_recovery_run_record(run_record)
 
     attempted_targets: set[str] | None = None
     if run_record.operation_journal:

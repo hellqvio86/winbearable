@@ -17,7 +17,6 @@ from typing import Any
 
 from ..const import (
     ENV_ADMIN_OVERRIDE,
-    ENV_CMD_TIMEOUT,
     HIVE_HKLM,
     MAX_CMD_OUTPUT_CHARS,
     REG_DWORD,
@@ -34,6 +33,8 @@ from .system_native_cmd import (
     communicate_bounded_with_truncation,
     decode_cmd_bytes,
     is_process_running_win32,
+    record_cmd_history,
+    resolve_cmd_timeout,
     resolve_code_cmd,
     resolve_git_exe,
     resolve_winget_exe,
@@ -51,6 +52,12 @@ from .system_native_sec import (
     NativeSecService,
     get_git_global_config,
     set_git_global_config,
+)
+from .system_native_sec import (
+    is_hibernate_enabled as _is_hibernate_enabled,
+)
+from .system_native_sec import (
+    set_hibernate_enabled as _set_hibernate_enabled,
 )
 from .system_protocol import CommandResult, read_service_start_state
 from .win32_ctypes import get_win32_dll
@@ -86,8 +93,25 @@ class NativeSystemBackend:
         self._outcome_local = threading.local()
         self._state_lock = threading.Lock()
         self.command_history: list[dict[str, Any]] = []
-        self._apps = NativeAppService(self)
-        self._sec = NativeSecService(self)
+        self._apps = NativeAppService(
+            platform_name=self._platform,
+            setup_candidates=self._setup_candidates,
+            inventory_cache=self._inventory_cache,
+            run_cmd=lambda *a, **kw: self._run_native_cmd(*a, **kw),
+            is_process_running=lambda name: self.is_process_running(name),
+            resolve_winget=lambda: self._resolve_winget_exe(),
+            resolve_code=lambda: self._resolve_code_cmd(),
+            is_admin=lambda: self._check_is_admin(),
+            get_outcome=lambda: self.last_outcome,
+            set_outcome=lambda v: setattr(self, "last_outcome", v),
+            is_onedrive_installed=lambda: self.is_onedrive_installed(),
+        )
+        self._sec = NativeSecService(
+            platform_name=self._platform,
+            run_cmd=lambda *a, **kw: self._run_native_cmd(*a, **kw),
+            get_dll=lambda name: self._get_dll(name),
+            get_user_sid=lambda: self._get_current_user_sid(),
+        )
 
     def invalidate_all(self) -> None:
         self._inventory_cache.invalidate_all()
@@ -110,28 +134,10 @@ class NativeSystemBackend:
             return None
 
     def _resolve_timeout(self, requested: float) -> float:
-        raw = os.environ.get(ENV_CMD_TIMEOUT)
-        if raw:
-            try:
-                val = float(raw)
-                if val > 0:
-                    return val
-            except ValueError:
-                pass
-        return requested
+        return resolve_cmd_timeout(requested)
 
     def _record_cmd_history(self, args: list[str], returncode: int, status: OperationStatus, stderr: str) -> None:
-        with self._state_lock:
-            self.command_history.append(
-                {
-                    "args": list(args),
-                    "returncode": returncode,
-                    "status": str(status),
-                    "stderr_excerpt": stderr[:300],
-                }
-            )
-            if len(self.command_history) > 50:
-                self.command_history = self.command_history[-50:]
+        record_cmd_history(self.command_history, self._state_lock, args, returncode, status, stderr)
 
     def _check_is_admin(self) -> bool:
         shell32 = self._get_dll("shell32")
@@ -490,17 +496,10 @@ class NativeSystemBackend:
     _resolve_git_exe = staticmethod(resolve_git_exe)
 
     def is_hibernate_enabled(self, registry: RegistryBackend) -> bool | None:
-        val = registry.get_value(HIVE_HKLM, r"SYSTEM\CurrentControlSet\Control\Power", "HibernateEnabled")
-        if val is not None and isinstance(val[0], int):
-            return val[0] == 1
-        return None
+        return _is_hibernate_enabled(registry)
 
     def set_hibernate_enabled(self, registry: RegistryBackend, enabled: bool) -> bool:
-        if self._platform != "win32":
-            return False
-        flag = "on" if enabled else "off"
-        res = self._run_native_cmd([self._sys32_exe("powercfg.exe"), "/hibernate", flag])
-        return res.returncode == 0
+        return _set_hibernate_enabled(self._run_native_cmd, self._platform, registry, enabled)
 
     def get_git_global_config(self, key: str) -> str | None:
         cache_key = key.strip().lower()

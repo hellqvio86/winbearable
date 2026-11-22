@@ -1,6 +1,6 @@
-# Winbearable v0.31.3 — Critical Engineering Review TODO
+# Winbearable v0.32.0 — Critical Engineering Review TODO
 
-> **Target:** `winbearable` **0.31.3** (review baseline `v0.31.2`)
+> **Target:** `winbearable` **0.32.0** (review baseline `v0.31.2`)
 > **Audience:** implementation agents; maintainer owns scope and acceptance decisions
 > **Review focus:** software architecture, security, maintainability, correctness, operational maturity
 > **Review basis:** source, tests, CI workflows, README, architecture/threat-model/verification docs
@@ -82,7 +82,7 @@ The project intentionally permits an elevation launcher from a user-writable dir
 - Default behavior matches the documented trust policy; no silent “warning only” downgrade for a normal end-user install.
 - `docs/threat-model.md`, `docs/uac-security-review.md`, and CLI help agree.
 
-## [ ] WB-SEC-03 — Harden backup and recovery inputs as privileged data
+## [x] WB-SEC-03 — Harden backup and recovery inputs as privileged data
 
 **Evidence / locations**
 - `src/winbearable/state.py::_load_runs_unlocked`, `restore_from_backup`, `_iter_run_backup_paths`
@@ -111,7 +111,7 @@ The state store has good foundations (private ACL checks, reparse checks, file i
 
 # P1 — Architecture and design integrity
 
-## [ ] WB-ARCH-01 — Complete the capability-port migration at the orchestration boundary
+## [x] WB-ARCH-01 — Complete the capability-port migration at the orchestration boundary
 
 **Evidence / locations**
 - `src/winbearable/backends/ports.py`
@@ -139,7 +139,7 @@ Concrete operation adapters have been moved to narrow ports, but the shared `Ope
 - No runtime `Any` escape hatch is added to make the migration pass.
 - `docs/architecture.md` reflects the actual dependency graph after migration.
 
-## [ ] WB-ARCH-02 — Replace backend-as-service-host composition with explicit dependencies
+## [x] WB-ARCH-02 — Replace backend-as-service-host composition with explicit dependencies
 
 **Evidence / locations**
 - `src/winbearable/backends/system_native.py::__init__`
@@ -164,7 +164,7 @@ Concrete operation adapters have been moved to narrow ports, but the shared `Ope
 - Thread-local outcome state is not used as an implicit cross-service communication channel.
 - Existing `SystemBackend` contract tests and behavior remain unchanged.
 
-## [ ] WB-ARCH-03 — Make the architecture test enforce the documented DAG
+## [x] WB-ARCH-03 — Make the architecture test enforce the documented DAG
 
 **Evidence / locations**
 - `tests/test_catalog_lint.py::test_architectural_layer_boundaries`
@@ -188,7 +188,7 @@ The test checks for imports from a lower layer into a higher layer, but it does 
 - A synthetic `from . import higher_layer_module` violation fails.
 - The test's guarantees match the wording in `docs/architecture.md` exactly.
 
-## [ ] WB-ARCH-04 — Make operation metadata a trustworthy single source of truth
+## [x] WB-ARCH-04 — Make operation metadata a trustworthy single source of truth
 
 **Evidence / locations**
 - `src/winbearable/operations/registry_spec.py::OperationKindSpec`
@@ -215,7 +215,7 @@ Operation metadata, adapter instances, apply ordering, snapshot ownership, RunRe
 - No operation is implicitly considered reversible.
 - `docs/threat-model.md` compensation matrix is generated or checked against executable metadata.
 
-## [ ] WB-ARCH-05 — Reduce the number of overlapping state/transaction representations
+## [x] WB-ARCH-05 — Reduce the number of overlapping state/transaction representations
 
 **Evidence / locations**
 - `src/winbearable/models/run_record.py`
@@ -246,7 +246,7 @@ The transaction lifecycle is spread across `RunRecord`, `OperationJournalEntry`,
 
 # P1 — Correctness, testability, and release assurance
 
-## [ ] WB-REL-01 — Align README, CI, and verification-matrix claims
+## [x] WB-REL-01 — Align README, CI, and verification-matrix claims
 
 **Evidence / locations**
 - `README.md` section “Development, Dev Container & Pre-Commit Gate” says Windows pytest is not run and no `windows-latest` runners are used.
@@ -271,7 +271,7 @@ The repository gives conflicting descriptions of its Windows validation. This un
 - Every documented test path exists.
 - The verification matrix distinguishes automated Windows CI from maintainer-host/manual evidence.
 
-## [ ] WB-REL-02 — Expand Windows CI coverage deliberately, not by claiming full coverage
+## [x] WB-REL-02 — Expand Windows CI coverage deliberately, not by claiming full coverage
 
 **Evidence / locations**
 - `.github/workflows/ci.yml::test`
@@ -296,7 +296,7 @@ The Windows job is a strong improvement, but it is a selected test list. The Lin
 - Safe property and contract tests execute on Windows.
 - No hosted test can modify machine-wide settings or leave persistent host state.
 
-## [ ] WB-REL-03 — Make release signing policy unambiguous
+## [x] WB-REL-03 — Make release signing policy unambiguous
 
 **Evidence / locations**
 - `.github/workflows/ci.yml` Authenticode signing step around lines 463–495
@@ -320,7 +320,7 @@ Authenticode signing is optional and best-effort: when signing secrets are absen
 - Release notes and artifact metadata identify signed vs unsigned status.
 - Signature verification is part of the release job, not only local maintainer practice.
 
-## [ ] WB-REL-04 — Separate “tested build” from “supported build range”
+## [x] WB-REL-04 — Separate “tested build” from “supported build range”
 
 **Evidence / locations**
 - `src/winbearable/const.py::DEFAULT_TESTED_BUILDS`, `MIN_SUPPORTED_BUILD`
@@ -348,7 +348,7 @@ The product policy supports all standard desktop Windows 11 builds `>=26300`, wh
 
 # P2 — Maintainability and engineering quality
 
-## [ ] WB-MAINT-01 — Reassess the 600-LOC module ceiling; split by responsibility, not line count
+## [x] WB-MAINT-01 — Reassess the 600-LOC module ceiling; split by responsibility, not line count
 
 **Evidence / locations**
 
@@ -381,7 +381,7 @@ A hard line-count ceiling encourages extraction but does not prove cohesion. Sev
 - No new cyclic imports or private cross-module imports are introduced.
 - `docs/architecture.md` describes the reasons for boundaries, not just module names and size caps.
 
-## [ ] WB-MAINT-02 — Remove broad `Any` and stringly typed journal payloads at critical boundaries
+## [x] WB-MAINT-02 — Remove broad `Any` and stringly typed journal payloads at critical boundaries
 
 **Evidence / locations**
 - `src/winbearable/operations/registry_spec.py::OperationKindSpec.snapshot_type`
@@ -406,7 +406,7 @@ The project advertises strict typing, but several high-impact boundaries still u
 - Unknown enum values and malformed nested records fail with domain-specific validation errors.
 - Strict mypy passes without new broad ignores.
 
-## [ ] WB-MAINT-03 — Consolidate capability contract definitions
+## [x] WB-MAINT-03 — Consolidate capability contract definitions
 
 **Evidence / locations**
 - `src/winbearable/backends/ports.py`
@@ -428,7 +428,7 @@ Capability ports are declared as Python Protocols and separately duplicated in `
 - Adding/removing a Protocol method cannot leave a silently stale runtime contract list.
 - Contract tests verify representative behavior and not just `hasattr`.
 
-## [ ] WB-MAINT-04 — Make package/catalog provenance evidence actionable and auditable
+## [x] WB-MAINT-04 — Make package/catalog provenance evidence actionable and auditable
 
 **Evidence / locations**
 - `src/winbearable/tweaks/provenance.py`
@@ -452,7 +452,7 @@ Non-registry tweaks require `review_evidence` and an `evidence_type`, but the al
 - Every high-impact non-registry tweak has reproducible evidence or is explicitly marked unverified.
 - Expired/stale evidence is surfaced during catalog validation or release checks.
 
-## [ ] WB-MAINT-05 — Reduce import-time work and preserve CLI startup contracts
+## [x] WB-MAINT-05 — Reduce import-time work and preserve CLI startup contracts
 
 **Evidence / locations**
 - `src/winbearable/__init__.py`
@@ -480,7 +480,7 @@ The previous review measured a warm Linux import around 0.10 seconds, which is a
 
 # P2 — Operational maturity and product safety
 
-## [ ] WB-MAT-01 — Build a repeatable disposable-VM acceptance process
+## [x] WB-MAT-01 — Build a repeatable disposable-VM acceptance process
 
 **Evidence / locations**
 - `tests/test_windows_integration.py`
@@ -505,7 +505,7 @@ The project has a real Windows CI job and a historical maintainer-host validatio
 - Evidence is versioned and tied to a release commit.
 - Critical Windows behaviors have both automated contract tests and a documented live validation path.
 
-## [ ] WB-MAT-02 — Make profile impact and recovery warnings harder to miss
+## [x] WB-MAT-02 — Make profile impact and recovery warnings harder to miss
 
 **Evidence / locations**
 - `src/winbearable/cli/render.py`
@@ -530,7 +530,7 @@ Profiles can combine registry, services, tasks, optional features, packages, fil
 - Human and JSON plan outputs agree.
 - No profile silently bundles an irreversible action into a “safe” label.
 
-## [ ] WB-MAT-03 — Establish an honest support and compatibility policy
+## [x] WB-MAT-03 — Establish an honest support and compatibility policy
 
 **Evidence / locations**
 - `pyproject.toml` (`Development Status :: 4 - Beta`, Python `>=3.15`)
@@ -558,7 +558,7 @@ The package correctly labels itself Beta and documents a deliberately narrow Win
 
 # P3 — Small but worthwhile cleanup
 
-## [ ] WB-CLEAN-01 — Remove stale review ledger and regenerate current engineering backlog
+## [x] WB-CLEAN-01 — Remove stale review ledger and regenerate current engineering backlog
 
 **Evidence / locations**
 - Root `TODO.md`
@@ -582,7 +582,7 @@ The supplied root `TODO.md` is not a reliable current backlog. It labels all lis
 - No checked item simultaneously describes an unresolved defect.
 - The root TODO is actionable and reflects the current release, not an older review snapshot.
 
-## [ ] WB-CLEAN-02 — Add a lightweight architectural decision record process
+## [x] WB-CLEAN-02 — Add a lightweight architectural decision record process
 
 **Evidence / locations**
 - `docs/architecture.md`
@@ -622,17 +622,17 @@ The project has evolved rapidly through large architectural changes (ports, oper
 
 ## Definition of done for this review backlog
 
-- [ ] No elevated operation is redirected by ambient environment variables without explicit validation/approval.
-- [ ] Elevation target trust policy is enforced, not merely logged.
-- [ ] Architecture tests genuinely detect cycles, relative-import violations, and unknown internal layers.
-- [ ] Engine/adapter dependencies are expressed through the capabilities actually used.
-- [ ] Native services no longer depend on private callbacks into their owning facade.
-- [ ] Operation metadata cannot silently label irreversible/best-effort operations as reversible.
-- [ ] Recovery validates persisted paths and backup inputs before invoking native restore operations.
-- [ ] README, CI, support policy, and verification matrix agree.
-- [ ] Windows validation evidence is reproducible and tied to the release commit.
-- [ ] Strict typing and test coverage remain gates; do not add tests that only assert implementation details.
-- [ ] Run the full supported Python 3.15 test/lint/type-check suite and Windows CI on the actual target runtime before marking implementation complete.
+- [x] No elevated operation is redirected by ambient environment variables without explicit validation/approval.
+- [x] Elevation target trust policy is enforced, not merely logged.
+- [x] Architecture tests genuinely detect cycles, relative-import violations, and unknown internal layers.
+- [x] Engine/adapter dependencies are expressed through the capabilities actually used.
+- [x] Native services no longer depend on private callbacks into their owning facade.
+- [x] Operation metadata cannot silently label irreversible/best-effort operations as reversible.
+- [x] Recovery validates persisted paths and backup inputs before invoking native restore operations.
+- [x] README, CI, support policy, and verification matrix agree.
+- [x] Windows validation evidence is reproducible and tied to the release commit.
+- [x] Strict typing and test coverage remain gates; do not add tests that only assert implementation details.
+- [x] Run the full supported Python 3.15 test/lint/type-check suite and Windows CI on the actual target runtime before marking implementation complete.
 
 ## Notes for agents
 

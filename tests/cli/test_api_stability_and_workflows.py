@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -28,7 +29,7 @@ from winbearable.hyperv_firewall import _parse_ps_setting_json
 from winbearable.log import configure_logging, get_logger, reset_logging
 from winbearable.models import AuditpolSnapshot, RunRecord, TransactionState
 from winbearable.operations.identity import registry_value_id
-from winbearable.operations.registry_spec import OperationKindSpec, validate_operation_registry
+from winbearable.operations.registry_spec import OperationKindSpec, ReversibilityKind, validate_operation_registry
 from winbearable.profiles import ProfileValidationError, load_profile
 from winbearable.state import StateStore
 
@@ -100,8 +101,18 @@ def test_operation_registry_validation_and_canonical_identity() -> None:
     with pytest.raises(ValueError, match="Duplicate apply_order"):
         validate_operation_registry(
             specs=(
-                OperationKindSpec(kind="a", apply_order=10),
-                OperationKindSpec(kind="b", apply_order=10),
+                OperationKindSpec(
+                    kind="a",
+                    reversibility=ReversibilityKind.REVERSIBLE,
+                    compensation_policy="snapshot_restore",
+                    apply_order=10,
+                ),
+                OperationKindSpec(
+                    kind="b",
+                    reversibility=ReversibilityKind.REVERSIBLE,
+                    compensation_policy="snapshot_restore",
+                    apply_order=10,
+                ),
             )
         )
 
@@ -265,3 +276,16 @@ def test_bulk_winget_list_cache_and_write_invalidation() -> None:
         assert len(calls) == 1
         assert sysb.uninstall_winget_package("Microsoft.VisualStudioCode") is True
         assert sysb._inventory_cache.get("winget_bulk", "") == (False, None)
+
+
+def test_cli_help_version_avoid_heavy_imports() -> None:
+    """wb --help and wb --version must not eagerly import winbearable.engine or winbearable.wsl."""
+    probe = (
+        "import sys; "
+        "from winbearable.cli.parser import build_parser; "
+        "p = build_parser(); "
+        "assert 'winbearable.engine' not in sys.modules; "
+        "assert 'winbearable.wsl' not in sys.modules"
+    )
+    res = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr

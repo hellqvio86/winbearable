@@ -25,12 +25,15 @@ uv run pytest tests/test_windows_integration.py -v
 ```
 Revalidation policy: re-run `tests/test_windows_integration.py` on every minor release or after any change to Win32 `ctypes`, `winreg`, ACLs, UAC, WSL, services, tasks, or native subprocess wrappers.
 
-## Verification Ledger (`0.30.1`)
+## Verification Ledger (`0.32.0`)
 
-Current release baseline (`0.30.1`):
-- **CI `windows-contracts` (`windows-latest`):** runs `tests/contracts`, `tests/test_windows_integration.py` (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`), `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, and `tests/test_architecture_invariants.py`.
+Automated CI vs. maintainer-host verification scope:
+- **Automated Linux CI (`test` on `ubuntu-latest`):** Runs the full `pytest` suite (including `tests/test_property_invariants.py`) on Python `3.15` and `3.15t`, plus `lint` and `mutation-gate`.
+- **Automated Windows CI (`windows-contracts` on `windows-latest`, Python `3.15`):** Runs a selected read-only/contract/property subset (`tests/contracts`, `tests/test_windows_integration.py` with `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`, `tests/test_property_invariants.py`, `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, and `tests/test_architecture_invariants.py`). Free-threaded `3.15t` is Linux-only in CI.
+- **Maintainer-Host / Manual Evidence:** Full local `.githooks/pre-commit` runs on Windows 11 (`Python 3.15.2`, `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`), the [Disposable-VM Acceptance Checklist](vm-acceptance-checklist.md), and the historical Build `26300` live-host probes below.
+- **Tested vs. Supported Builds:** `DEFAULT_TESTED_BUILDS = (26300,)` records the exact tested Windows 11 build, while `MIN_SUPPORTED_BUILD = 26300` defines the supported desktop build range (`>= 26300`).
 - **Crash-consistency harness (`tests/engine/test_crash_consistency_harness.py`):** verifies baseline restoration across all 12 reversible operation kinds in `OPERATION_KIND_SPECS`.
-- **UAC elevation trust (`src/winbearable/uac/elevation.py`):** `assess_elevation_target_trust` classifies system-protected vs user-writable elevation targets and is unit-tested in `tests/uac/test_uac_and_locale_security.py`.
+- **UAC elevation trust (`src/winbearable/uac/elevation.py`):** `assess_elevation_target_trust` and `run_elevated_wb` fail closed on user-writable targets unless explicitly acknowledged, and are unit-tested in `tests/uac/test_uac_and_locale_security.py`.
 
 ## Historical Verification Ledger (`0.22.0`)
 

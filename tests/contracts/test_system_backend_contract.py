@@ -7,7 +7,11 @@ import sys
 import pytest
 
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend, NativeSystemBackend
+from winbearable.backends.inventory_cache import InventoryCache
 from winbearable.backends.ports import assert_port_conformance
+from winbearable.backends.system_native_apps import NativeAppService
+from winbearable.backends.system_native_sec import NativeSecService
+from winbearable.backends.system_protocol import CommandResult
 from winbearable.const import HIVE_HKLM, REG_DWORD
 
 
@@ -85,3 +89,30 @@ def test_in_memory_per_port_behavioral_contracts(tmp_path) -> None:
     assert sysb.get_git_global_config("core.eol") == "lf"
     assert sysb.set_hibernate_enabled(reg, False) is True
     assert sysb.is_hibernate_enabled(reg) is False
+
+
+def test_native_services_standalone_without_backend_host() -> None:
+    """NativeAppService and NativeSecService can be instantiated and tested without NativeSystemBackend."""
+    outcomes: list[object] = []
+    app_svc = NativeAppService(
+        platform_name="win32",
+        setup_candidates=(),
+        inventory_cache=InventoryCache(),
+        run_cmd=lambda args, **_kw: CommandResult(tuple(args), 0, "ms-vscode-remote.remote-wsl\n", ""),
+        is_process_running=lambda _name: False,
+        resolve_winget=lambda: "winget.exe",
+        resolve_code=lambda: "code.cmd",
+        is_admin=lambda: False,
+        get_outcome=lambda: None,
+        set_outcome=outcomes.append,
+    )
+    assert app_svc.is_vscode_extension_installed("ms-vscode-remote.remote-wsl") is True
+
+    guid = "{00000000-0000-0000-0000-000000000000}"
+    sec_svc = NativeSecService(
+        platform_name="win32",
+        run_cmd=lambda args, **_kw: CommandResult(tuple(args), 0, f",,{guid},Success,1\n", ""),
+        get_dll=lambda _name: None,
+        get_user_sid=lambda: "S-1-5-21-1-2-3-1001",
+    )
+    assert sec_svc.get_auditpol_subcategory(guid) == "Success"

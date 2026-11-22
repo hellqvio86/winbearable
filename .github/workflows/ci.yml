@@ -177,10 +177,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Record Windows build & Python runtime
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Output "Windows Build: $($os.BuildNumber) ($($os.Caption))"
+          uv run python -c "import sys; print('Python:', sys.version)"
+
       - name: Run contract, unit & read-only Windows integration tests
         env:
           WINBEARABLE_RUN_WINDOWS_INTEGRATION: "1"
-        run: uv run pytest tests/contracts tests/test_windows_integration.py tests/audit tests/backends tests/cli tests/engine tests/operations tests/uac tests/wsl tests/test_catalog_lint.py tests/test_architecture_invariants.py -q --no-cov
+        run: uv run pytest tests/contracts tests/test_windows_integration.py tests/test_property_invariants.py tests/audit tests/backends tests/cli tests/engine tests/operations tests/uac tests/wsl tests/test_catalog_lint.py tests/test_architecture_invariants.py -q --no-cov
 
   all-checks:
     name: All Checks Passed
@@ -486,13 +493,15 @@ jobs:
               $signParams["TimestampServer"] = $env:WIN_SIGNING_TIMESTAMP_URL
             }
             $sig = Set-AuthenticodeSignature @signParams
-            if ($sig.Status -eq "UnknownError") {
-              Write-Output "::warning::Authenticode signing failed: $($sig.StatusMessage); continuing with unsigned binary."
-            } else {
-              Write-Output "Signed dist\wb\wb.exe -> Status=$($sig.Status) Thumbprint=$($cert.Thumbprint)"
+            $verified = Get-AuthenticodeSignature -FilePath "dist\wb\wb.exe"
+            if ($sig.Status -eq "UnknownError" -or $verified.Status -eq "UnknownError") {
+              Write-Error "Authenticode signing failed: $($sig.StatusMessage)"
+              exit 1
             }
+            Write-Output "Signed dist\wb\wb.exe -> Status=$($verified.Status) Thumbprint=$($cert.Thumbprint)"
           } catch {
-            Write-Output "::warning::Authenticode signing failed: $($_.Exception.Message); continuing with unsigned binary."
+            Write-Error "Authenticode signing failed: $($_.Exception.Message)"
+            exit 1
           } finally {
             $cert.Dispose()
           }

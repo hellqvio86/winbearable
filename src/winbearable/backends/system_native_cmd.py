@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..const import MAX_CMD_OUTPUT_CHARS
+from ..const import ENV_CMD_TIMEOUT, MAX_CMD_OUTPUT_CHARS
 from ..log import get_logger
 from ..models import OperationOutcome, OperationStatus
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS
@@ -45,6 +45,41 @@ _KNOWN_TOOL_NAMES: dict[str, str] = {
     "winget.exe": "winget.exe",
     "wsl.exe": "wsl.exe",
 }
+
+
+def record_cmd_history(
+    history: list[dict[str, Any]],
+    lock: Any,
+    args: list[str],
+    returncode: int,
+    status: OperationStatus,
+    stderr: str,
+) -> None:
+    """Append a bounded command-history entry under *lock*."""
+    with lock:
+        history.append(
+            {
+                "args": list(args),
+                "returncode": returncode,
+                "status": str(status),
+                "stderr_excerpt": stderr[:300],
+            }
+        )
+        if len(history) > 50:
+            del history[:-50]
+
+
+def resolve_cmd_timeout(requested: float) -> float:
+    """Return WB_CMD_TIMEOUT override if valid positive float, else *requested*."""
+    raw = os.environ.get(ENV_CMD_TIMEOUT)
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return requested
 
 
 def _safe_tool_name(args: list[str]) -> str:
