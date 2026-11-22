@@ -1,6 +1,6 @@
-# Winbearable v0.31.3 — Critical Engineering Review TODO
+# Winbearable v0.32.0 — Critical Engineering Review TODO
 
-> **Target:** `winbearable` **0.31.3** (review baseline `v0.31.2`)
+> **Target:** `winbearable` **0.32.0** (review baseline `v0.31.2`)
 > **Audience:** implementation agents; maintainer owns scope and acceptance decisions
 > **Review focus:** software architecture, security, maintainability, correctness, operational maturity
 > **Review basis:** source, tests, CI workflows, README, architecture/threat-model/verification docs

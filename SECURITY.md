@@ -14,8 +14,8 @@
 
 | Version | Supported |
 | :--- | :--- |
-| `0.31.x` | Yes |
-| `< 0.31` | No |
+| `0.32.x` | Yes |
+| `< 0.32` | No |
 
 ## Reporting a Vulnerability
 

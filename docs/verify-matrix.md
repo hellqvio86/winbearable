@@ -25,7 +25,7 @@ uv run pytest tests/test_windows_integration.py -v
 ```
 Revalidation policy: re-run `tests/test_windows_integration.py` on every minor release or after any change to Win32 `ctypes`, `winreg`, ACLs, UAC, WSL, services, tasks, or native subprocess wrappers.
 
-## Verification Ledger (`0.31.3`)
+## Verification Ledger (`0.32.0`)
 
 Automated CI vs. maintainer-host verification scope:
 - **Automated Linux CI (`test` on `ubuntu-latest`):** Runs the full `pytest` suite (including `tests/test_property_invariants.py`) on Python `3.15` and `3.15t`, plus `lint` and `mutation-gate`.

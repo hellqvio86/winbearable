@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-__version__ = "0.31.3"
+__version__ = "0.32.0"
 JSON_SCHEMA_VERSION = "2.0"
 STATE_SCHEMA_VERSION = 2
 PROFILE_SCHEMA_VERSION = 2
