@@ -65,9 +65,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_logging_args(parser, suppress_defaults=False)
     parser.add_argument("--uac-output", dest="uac_output", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--uac-caller-sid", dest="uac_caller_sid", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--uac-state-path", dest="uac_state_path", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--uac-settings-path", dest="uac_settings_path", default=None, help=argparse.SUPPRESS)
 
     log_parent = argparse.ArgumentParser(add_help=False)
     _add_logging_args(log_parent, suppress_defaults=True)
+    log_parent.add_argument("--uac-output", dest="uac_output", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    log_parent.add_argument(
+        "--uac-caller-sid", dest="uac_caller_sid", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
+    log_parent.add_argument(
+        "--uac-state-path", dest="uac_state_path", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
+    log_parent.add_argument(
+        "--uac-settings-path", dest="uac_settings_path", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -173,10 +185,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to a `wb plan --json` output file whose precondition_fingerprints must still match",
     )
-    apply_parser.add_argument("--uac-output", dest="uac_output", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    apply_parser.add_argument(
-        "--uac-caller-sid", dest="uac_caller_sid", default=argparse.SUPPRESS, help=argparse.SUPPRESS
-    )
     apply_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     add_selection_args(apply_parser)
 
@@ -204,10 +212,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Force snapshot restore even if post-apply external modifications are detected",
-    )
-    rollback_parser.add_argument("--uac-output", dest="uac_output", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    rollback_parser.add_argument(
-        "--uac-caller-sid", dest="uac_caller_sid", default=argparse.SUPPRESS, help=argparse.SUPPRESS
     )
     rollback_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
@@ -238,10 +242,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-conflicts",
         action="store_true",
         help="Mark runs with only restore_conflict items as partially_rolled_back to preserve user edits",
-    )
-    recover_parser.add_argument("--uac-output", dest="uac_output", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    recover_parser.add_argument(
-        "--uac-caller-sid", dest="uac_caller_sid", default=argparse.SUPPRESS, help=argparse.SUPPRESS
     )
     recover_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
@@ -442,12 +442,19 @@ def _absolutize_flag_value(flag: str, val: str) -> str:
 
 
 def absolutize_elevated_argv(raw_argv: list[str]) -> list[str]:
-    """Resolve relative file path arguments before UAC elevation changes CWD to System32."""
+    """Resolve relative file path arguments and strip internal UAC flags before elevation."""
     path_flags = {"--profile", "--wslconfig", "--output", "--plan-file", "--expected-fingerprints", "--log-file"}
+    internal_uac_flags = ("--uac-output", "--uac-caller-sid", "--uac-state-path", "--uac-settings-path")
     out: list[str] = []
     idx = 0
     while idx < len(raw_argv):
         tok = raw_argv[idx]
+        if tok in internal_uac_flags:
+            idx += 2 if idx + 1 < len(raw_argv) else 1
+            continue
+        if any(tok.startswith(f"{flag}=") for flag in internal_uac_flags):
+            idx += 1
+            continue
         if tok in path_flags and idx + 1 < len(raw_argv):
             val = _absolutize_flag_value(tok, raw_argv[idx + 1])
             out.extend([tok, val])

@@ -39,7 +39,7 @@ from ..models import (
     WinbearableError,
 )
 from ..profiles import ProfileValidationError, load_profile
-from ..settings import load_settings
+from ..settings import UserSettings, load_settings
 from ..state import StateStore, StateStoreError
 from ..uac import (
     UacCancelledError,
@@ -263,10 +263,15 @@ def run_cli(
 
     try:
         with out_cm, err_cm:
+            uac_settings_raw = getattr(args, "uac_settings_path", None)
             try:
-                settings = load_settings()
+                if uac_out_path is not None and uac_settings_raw is not None:
+                    settings = load_settings(path=Path(uac_settings_raw)) if uac_settings_raw else UserSettings()
+                else:
+                    settings = load_settings()
             except ProfileValidationError as exc:
                 return _handle_cli_exception(args, exc, EXIT_ERROR)
+            args._uac_resolved_settings_path = str(settings.source_path.resolve()) if settings.source_path else ""
             args.debug = bool(getattr(args, "debug", False)) or settings.debug
             if hasattr(args, "apply"):
                 if getattr(args, "dry_run_flag", False):
@@ -319,7 +324,13 @@ def _run_cli_body(
 ) -> int:
     reg_backend = registry or create_default_registry_backend()
     sys_backend = system or create_default_system_backend()
-    store = state_store or state_store_factory()
+    uac_state_raw = getattr(args, "uac_state_path", None)
+    if state_store is not None:
+        store = state_store
+    elif getattr(args, "uac_output", None) and uac_state_raw:
+        store = StateStore(Path(uac_state_raw))
+    else:
+        store = state_store_factory()
     try:
         env = sys_backend.detect_environment(reg_backend)
         dry_run = not getattr(args, "apply", False)

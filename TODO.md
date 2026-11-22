@@ -25,7 +25,7 @@ Do not start with another broad refactor. Fix the trust boundary and architectur
 
 # P1 — Security and trust boundaries
 
-## [ ] WB-SEC-01 — Define and enforce an explicit elevated-child environment policy
+## [x] WB-SEC-01 — Define and enforce an explicit elevated-child environment policy
 
 **Evidence / locations**
 - `src/winbearable/uac/elevation.py::sanitize_elevated_python_env`
