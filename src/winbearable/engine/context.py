@@ -7,8 +7,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import ApplyPorts, EvaluationPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import (
     OperationJournalEntry,
     ProfileSpec,
@@ -79,7 +79,7 @@ class ApplyContext:
                 return
         self.journal_entries.append(entry)
 
-    def populate_post_apply_states(self, registry: RegistryBackend, system: SystemBackend | None = None) -> None:
+    def populate_post_apply_states(self, registry: RegistryBackend, system: EvaluationPorts | None = None) -> None:
         """Record post-apply live states onto pre-apply snapshots across all snapshot types."""
         if self.snaps is None:
             return
@@ -156,7 +156,7 @@ class ApplyContext:
     def compensate_and_record_failure(
         self,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
         state_store: StateStore,
         error_msg: str,
         *,
@@ -195,7 +195,7 @@ class ApplyContext:
         state: TransactionState,
         registry: RegistryBackend,
         error: str | None = None,
-        system: SystemBackend | None = None,
+        system: EvaluationPorts | None = None,
     ) -> RunRecord:
         """Build a RunRecord snapshot for the current transaction state."""
         if state == TransactionState.COMMITTED:

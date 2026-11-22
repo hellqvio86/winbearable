@@ -18,6 +18,11 @@ import pytest
 from winbearable.audit import _check_listening_ports, _check_unquoted_service_paths
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+from winbearable.backends.system_native_cmd import (
+    is_user_writable_binary,
+    resolve_code_cmd,
+    resolve_winget_exe,
+)
 from winbearable.cli.handlers import run_cli
 from winbearable.cli.handlers_tools import CliDeps
 from winbearable.cli.parser import absolutize_elevated_argv
@@ -69,6 +74,7 @@ from winbearable.uac import (
 from winbearable.uac.elevation import (
     _verify_elevation_target_identity,
     assess_elevation_target_trust,
+    enforce_elevated_win32_env,
     sanitize_elevated_python_env,
 )
 from winbearable.uac.win32 import resolve_trusted_system_roots
@@ -933,3 +939,52 @@ def test_elevation_target_trust_fails_closed_and_verifies_identity(
     )
     assert rc == 0
     assert mock_uac.call_args.kwargs.get("allow_user_writable") is True
+
+
+def test_elevated_win32_env_rewrite_and_hostile_path_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """enforce_elevated_win32_env rewrites win32_trusted vars; elevated winget/code refuse hostile roots."""
+    fake_k32 = MagicMock()
+
+    def _fake_sysdir(buf: Any, _size: int) -> int:
+        buf.value = r"C:\Windows\System32"
+        return len(r"C:\Windows\System32")
+
+    fake_k32.GetSystemDirectoryW.side_effect = _fake_sysdir
+    hostile_env = {
+        "PATH": str(tmp_path / "evil_bin"),
+        "LOCALAPPDATA": str(tmp_path / "evil_local"),
+        "PROGRAMFILES": str(tmp_path / "evil_pf"),
+        "SYSTEMROOT": str(tmp_path / "evil_win"),
+        "WINDIR": str(tmp_path / "evil_win"),
+        "TEMP": str(tmp_path / "evil_tmp"),
+    }
+    rewritten = enforce_elevated_win32_env(hostile_env, kernel32=fake_k32)
+    assert rewritten["SYSTEMROOT"] == r"C:\Windows"
+    assert rewritten["WINDIR"] == r"C:\Windows"
+    assert rewritten["PROGRAMFILES"] == r"C:\Program Files"
+    assert hostile_env["PATH"].startswith(r"C:\Windows\System32;")
+    assert "evil_bin" not in hostile_env["PATH"]
+
+    # Elevated winget/code resolution never picks LOCALAPPDATA paths
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "evil_local"))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "evil_pf"))
+    monkeypatch.setenv("SYSTEMROOT", str(tmp_path / "evil_win"))
+    evil_winget = tmp_path / "evil_local" / "Microsoft" / "WindowsApps" / "winget.exe"
+    evil_winget.parent.mkdir(parents=True)
+    evil_winget.write_bytes(b"MZ")
+    assert "evil_local" not in resolve_winget_exe(is_elevated=True)
+    assert "evil_local" not in resolve_code_cmd(is_elevated=True)
+
+    # Elevated NativeSystemBackend refuses user-writable winget.exe
+    nat = NativeSystemBackend(platform_override="win32")
+    with (
+        patch.object(nat, "_check_is_admin", return_value=True),
+        patch.object(nat, "_resolve_winget_exe", return_value=str(evil_winget)),
+    ):
+        assert nat.is_winget_package_installed("Microsoft.VisualStudioCode") is False
+        assert nat.last_outcome is not None and nat.last_outcome.status.value == "access_denied"
+
+    # P3: Windows-style paths are checked with ntpath even on POSIX hosts
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Alice\AppData\Local")
+    assert is_user_writable_binary(r"C:\Users\Alice\AppData\Local\Microsoft\WindowsApps\winget.exe") is True
+    assert is_user_writable_binary(r"C:\Program Files\Microsoft VS Code\bin\code.cmd") is False

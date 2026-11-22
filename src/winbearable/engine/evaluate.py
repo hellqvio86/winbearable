@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from ..backends.ports import ApplyPorts
 from ..backends.registry import RegistryBackend, expand_registry_spec
-from ..backends.system import SystemBackend
 from ..const import ACTION_DELETE, ACTION_DELETE_KEY
 from ..log import get_logger
 from ..models import (
@@ -104,7 +104,7 @@ def detect_tweak(
     tweak: TweakDefinition,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     allow_managed: bool = True,
     *,
     expand_fn: Callable[[str], Path] | None = None,
@@ -289,7 +289,7 @@ def evaluate_profile(
     profile: ProfileSpec,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     only_ids: set[str] | None = None,
     skip_ids: set[str] | None = None,
     category_filter: str | None = None,

@@ -646,6 +646,11 @@ def test_concrete_adapters_forbid_full_system_backend_and_python_floor_is_315() 
     params_text = (repo_root / "src" / "winbearable" / "engine" / "params.py").read_text(encoding="utf-8")
     assert "SystemBackend" not in params_text, "engine/params.py must use OutcomePort/EnvironmentPort"
 
+    for subdir in ("engine", "operations"):
+        for py_file in sorted((repo_root / "src" / "winbearable" / subdir).rglob("*.py")):
+            text = py_file.read_text(encoding="utf-8")
+            assert "SystemBackend" not in text, f"{subdir}/{py_file.name} must use narrow ports, not SystemBackend"
+
 
 def test_category_modules_under_350_loc_and_cli_all_public() -> None:
     """Enforce <= 350 LOC per category tweak module and no private symbols in winbearable.cli.__all__."""
@@ -683,3 +688,8 @@ def test_ci_and_docs_verification_claims_consistent() -> None:
         assert target in readme_text, f"CI target {target} missing from README.md"
     assert "windows-contracts" in readme_text
     assert "windows-contracts" in matrix_text
+
+    winget_doc = (repo_root / "docs" / "winget-releasing.md").read_text(encoding="utf-8")
+    assert 'Status -eq "Valid"' in winget_doc
+    assert '$verified.Status -ne "Valid"' in ci_text
+    assert "continues with the unsigned zip" not in winget_doc

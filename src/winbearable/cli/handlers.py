@@ -351,7 +351,11 @@ def _run_cli_body(
         if handler is None:
             raise ValueError(f"Unknown command: {args.command}")
         update_checker: UpdateChecker | None = None
-        if not getattr(args, "json", False) and args.command in {"status", "plan", "apply", "doctor"}:
+        if (
+            not getattr(args, "json", False)
+            and not getattr(args, "uac_output", None)
+            and args.command in {"status", "plan", "apply", "doctor"}
+        ):
             update_checker = UpdateChecker(store.state_path.parent / "update_check.json")
             update_checker.start_background_check()
         rc = handler(args, raw_argv, reg_backend, sys_backend, store, env, dry_run, deps)
