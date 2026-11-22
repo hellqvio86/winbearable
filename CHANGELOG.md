@@ -2,6 +2,14 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.31.3] - 2026-11-22
+
+### Documentation & Style
+
+- **Expanded Architecture Documentation (`docs/architecture.md`):** Added a comprehensive architecture guide covering the 7-layer acyclic dependency DAG (with Mermaid diagram), capability ports and operation adapters, write-ahead transaction journal and recovery phases, security boundaries, lazy CLI startup, and module size governance.
+- **README & TODO Refresh (`README.md`, `TODO.md`):** Updated `README.md` CLI examples to reflect default-apply `wb apply`, linked all `docs/` guides (including `docs/architecture.md`, `docs/threat-model.md`, `docs/schema-versioning.md`, `docs/verify-matrix.md`, `docs/uac-security-review.md`, `docs/dependency-management.md`, and `docs/winget-releasing.md`), updated attestation version examples, and finalized `TODO.md` for `v0.31.3`.
+- **PEP 8 Logger Naming (`_LOGGER`):** Standardized module-level `_logger` singletons to `UPPER_SNAKE_CASE` (`_LOGGER`) across `src/winbearable/` and documented the convention in `AGENTS.md`.
+
 ## [0.31.2] - 2026-11-21
 
 ### Performance

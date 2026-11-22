@@ -40,7 +40,7 @@ from .params import (
 from .phases import FinalizeJournalPhase, MutateTweaksPhase, MutateWslPhase, PlanPhase
 
 _APPLY_KIND_ORDER = APPLY_KIND_ORDER
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 
 def execute_tweak_mutations(
@@ -91,7 +91,7 @@ def execute_tweak_mutations(
                 OperationOutcome(status=exc.status, message=str(exc), returncode=rc, command=cmd)
             ) from exc
         except Exception as exc:
-            _logger.error(
+            _LOGGER.error(
                 "Tweak mutation failed for %s: %s",
                 tweak.tweak_id,
                 exc,
@@ -114,7 +114,7 @@ def execute_tweak_mutations(
                     f"Post-apply verification failed for '{tweak.tweak_id}' ({adapter.kind}): "
                     f"{post_check.status} ({post_check.detail})"
                 )
-                _logger.error(
+                _LOGGER.error(
                     msg,
                     extra={
                         "event": "tweak.post_apply_verification_failed",

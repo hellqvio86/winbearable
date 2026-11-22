@@ -31,7 +31,7 @@ from .models import (
     validate_transaction_transition,
 )
 
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 
 def _iter_run_backup_paths(run: RunRecord) -> list[Path]:
@@ -433,7 +433,7 @@ class StateStore:
                 known_ids=all_known_ids,
             )
             for warning in self.last_cleanup_warnings:
-                _logger.warning(warning, extra={"event": "state.backup_cleanup_warning"})
+                _LOGGER.warning(warning, extra={"event": "state.backup_cleanup_warning"})
 
     def restore_from_backup(self) -> bool:
         """Validate and restore state.json from state.json.bak without overwriting the backup."""

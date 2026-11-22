@@ -182,7 +182,7 @@ def _handle_plan(
     return EXIT_ERROR if summary.failed_ids else EXIT_SUCCESS
 
 
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 
 def _handle_cli_exception(
@@ -190,7 +190,7 @@ def _handle_cli_exception(
 ) -> int:
     """Log structured failure details, re-raise in debug mode, or emit user-facing CLI error."""
     context = exc.to_dict() if isinstance(exc, WinbearableError) else {}
-    _logger.error(
+    _LOGGER.error(
         "CLI command failed: %s",
         exc,
         exc_info=True,
@@ -323,7 +323,7 @@ def _run_cli_body(
     try:
         env = sys_backend.detect_environment(reg_backend)
         dry_run = not getattr(args, "apply", False)
-        _logger.debug(
+        _LOGGER.debug(
             "Starting command %s",
             args.command,
             extra={
@@ -349,7 +349,7 @@ def _run_cli_body(
             if latest is not None:
                 prefix = "⚠️  " if should_use_emoji(args) else ""
                 sys.stderr.write(f"{prefix}{format_update_warning(latest)}\n")
-        _logger.debug(
+        _LOGGER.debug(
             "Finished command %s with exit_code=%d",
             args.command,
             rc,

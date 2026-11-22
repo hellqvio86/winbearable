@@ -105,6 +105,7 @@ make release-check # lint + test + TruffleHog + Trivy
 ## Pythonic Style (Write Python as a Pythonista)
 
 - **Imports at the top of the file:** Always place all `import` / `from ... import ...` statements at the top of the module (after the module docstring and `from __future__ import annotations`). Never add inline/local imports inside functions or methods unless strictly required for an optional dependency or to break an unavoidable circular import.
+- **Module-level globals and constants in `UPPER_SNAKE_CASE`:** Follow PEP 8 naming for module-level constants and shared module-level singletons (such as `_LOGGER = get_logger(__name__)`), using `UPPER_SNAKE_CASE` (with a leading underscore for module-private globals).
 - **Idiomatic, readable, "pretty" Python:** Prefer clean dataclasses, comprehensions, context managers, `pathlib.Path`, early returns, shallow nesting, and small single-purpose helpers over verbose boilerplate or deep `if/else` chains.
 - **Reuse fixtures & helpers:** Whenever setup or cleanup repeats (in tests or production code), extract shared helpers or `pytest` fixtures in `tests/conftest.py` instead of duplicating setup inline.
 
