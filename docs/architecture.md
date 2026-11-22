@@ -60,6 +60,18 @@ To keep tweak execution decoupled from concrete OS implementations and easy to t
 
 Every mutating `wb apply` run executes through four explicit phases backed by `StateStore` (`%LOCALAPPDATA%\winbearable\state.json`):
 
+```mermaid
+flowchart LR
+    Start["wb apply"] --> Plan["PlanPhase (PLANNED + snapshots)"]
+    Plan --> MutateTweaks["MutateTweaksPhase (APPLYING + checkpoints)"]
+    MutateTweaks -->|Success| MutateWsl["MutateWslPhase (.wslconfig / wsl.conf)"]
+    MutateWsl -->|Success| Finalize["FinalizeJournalPhase (COMMITTED)"]
+    MutateTweaks -->|Failure| Compensate["Compensate Attempted Targets"]
+    MutateWsl -->|Failure| Compensate
+    Compensate -->|All reverted| RolledBack["ROLLED_BACK"]
+    Compensate -->|Partial / Crash| Failed["FAILED (Run wb recover --apply)"]
+```
+
 1. **`PlanPhase`:** Validates the profile (`validate_profile_spec`), acquires the cooperative `StateStore` lock, creates a `PLANNED` `RunRecord` with pre-apply snapshots, and exports `.reg` hive backups (for admin runs) before any OS mutation.
 2. **`MutateTweaksPhase`:** Transitions the journal to `APPLYING`, executes operation adapters in `APPLY_KIND_ORDER`, and flushes per-operation checkpoints. Any failure triggers immediate compensation of attempted targets (skipping unmutated targets where `post_existed is None` and current state already matches the pre-apply snapshot).
 3. **`MutateWslPhase`:** Applies host `.wslconfig` / per-distro `/etc/wsl.conf` / Hyper-V firewall changes after recording `WslDistroSnapshot` and `.wslconfig.bak`. Internal Docker Desktop distros (`docker-desktop`, `docker-desktop-data`) are excluded.
