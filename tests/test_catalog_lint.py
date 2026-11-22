@@ -536,3 +536,26 @@ def test_category_modules_under_350_loc_and_cli_all_public() -> None:
 
     private_exports = [name for name in cli_pkg.__all__ if name.startswith("_")]
     assert not private_exports, f"Private symbols in winbearable.cli.__all__: {private_exports}"
+
+
+def test_ci_and_docs_verification_claims_consistent() -> None:
+    """README.md, docs/verify-matrix.md, and .github/workflows/ci.yml agree on CI jobs and test paths."""
+    repo_root = Path(__file__).resolve().parent.parent
+    ci_text = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    readme_text = (repo_root / "README.md").read_text(encoding="utf-8")
+    matrix_text = (repo_root / "docs" / "verify-matrix.md").read_text(encoding="utf-8")
+
+    assert "src/tests/" not in readme_text, "README.md must not reference stale src/tests/ paths"
+    for job_name in ("test:", "mutation-gate:", "windows-contracts:"):
+        assert job_name in ci_text
+
+    win_match = re.search(r"run:\s*uv run pytest\s+([^\n]+)", ci_text[ci_text.index("windows-contracts:") :])
+    assert win_match is not None, "windows-contracts pytest command not found in ci.yml"
+    win_targets = [tok for tok in win_match.group(1).split() if tok.startswith("tests/")]
+    assert win_targets, "No tests/* targets found in windows-contracts"
+    for target in win_targets:
+        assert (repo_root / target).exists(), f"CI target {target} does not exist"
+        assert target in matrix_text, f"CI target {target} missing from docs/verify-matrix.md"
+        assert target in readme_text, f"CI target {target} missing from README.md"
+    assert "windows-contracts" in readme_text
+    assert "windows-contracts" in matrix_text

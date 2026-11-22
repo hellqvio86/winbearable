@@ -294,7 +294,7 @@ wb recover --apply      # Idempotently compensate and mark ROLLED_BACK
 - **VBS, HVCI & Credential Guard (WSL2 trade-offs):** `hardening.enable_vbs_hvci` is `RiskLevel.HIGH` (requires `--i-know-what-im-doing` and a reboot, included only in `paranoid`), while Credential Guard is **observe-only** in `wb doctor`. Because VBS/HVCI/Credential Guard share the Hyper-V hypervisor with WSL2, enabling them isolates kernel/LSA memory at the cost of extra CPU, memory, and I/O overhead on constrained or nested-virtualization hosts.
 - **Name-resolution hardening & corporate VPNs:** `owner` and `paranoid` disable LLMNR, mDNS, WPAD, and NetBIOS broadcast resolution (`NodeType=2`). If you connect to a split-tunnel corporate VPN, legacy NAS/SMB appliance, or corporate PAC proxy that relies on WPAD or NetBIOS/LLMNR/mDNS fallback, override those tweaks to `false` in a custom TOML profile and run `wb rollback --apply`.
 - **Subprocess timeouts:** Set `WB_CMD_TIMEOUT=<seconds>` to override the default command timeout for slow `winget`/`dism`/`wsl` operations.
-- **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py` on the maintainer's Windows installation.
+- **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py` on the maintainer's Windows installation.
 
 ### Stable CLI Exit Codes
 
@@ -408,9 +408,13 @@ We don't like Windows enough to maintain legacy workarounds or embedded/IoT quir
 
 ---
 
-## Development, Dev Container & Pre-Commit Gate (`uv`)
+## Development, CI & Pre-Commit Gate (`uv`)
 
-Unit tests and full Python version matrices run locally in the free, open-source Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2/Linux, while read-only Windows integration tests (`tests/test_windows_integration.py`) can be run locally on Windows 11 (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`). Every commit MUST pass the local `.githooks/pre-commit` gate before committing:
+CI runs two complementary test lanes in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+- **Linux (`test` on `ubuntu-latest`):** Full `pytest` suite (including `tests/test_property_invariants.py`) across Python `3.15` and free-threaded `3.15t`, plus `lint` (`ruff` + `mypy`) and `mutation-gate`.
+- **Windows (`windows-contracts` on `windows-latest`, Python `3.15`):** Selected contract, unit, and read-only Windows integration subset (`tests/contracts`, `tests/test_windows_integration.py` with `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`, `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, `tests/test_architecture_invariants.py`). `tests/test_property_invariants.py` and `3.15t` are currently Linux-only in CI.
+
+Locally, unit tests run in the Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2/Linux, and read-only Windows integration tests (`tests/test_windows_integration.py`) run on Windows 11 (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`). Every commit MUST pass the local `.githooks/pre-commit` gate before committing:
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv

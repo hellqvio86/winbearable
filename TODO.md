@@ -246,7 +246,7 @@ The transaction lifecycle is spread across `RunRecord`, `OperationJournalEntry`,
 
 # P1 — Correctness, testability, and release assurance
 
-## [ ] WB-REL-01 — Align README, CI, and verification-matrix claims
+## [x] WB-REL-01 — Align README, CI, and verification-matrix claims
 
 **Evidence / locations**
 - `README.md` section “Development, Dev Container & Pre-Commit Gate” says Windows pytest is not run and no `windows-latest` runners are used.
