@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from ..backends import RegistryBackend, SystemBackend
 from ..const import EXIT_ERROR, EXIT_SUCCESS, HIVE_HKCU
@@ -35,9 +36,24 @@ from .render import (
 )
 
 
-def relay_elevated_uac(raw_argv: list[str], deps: CliDeps) -> int:
-    """Re-launch the CLI command elevated via UAC and forward captured output."""
-    exit_code, output_text = deps.elevate_fn(absolutize_elevated_argv(raw_argv))
+def relay_elevated_uac(
+    raw_argv: list[str],
+    deps: CliDeps,
+    *,
+    state_path: Path | None = None,
+    settings_path: str | None = None,
+    profile: str | None = None,
+) -> int:
+    """Re-launch the CLI command elevated via UAC with parent-resolved paths and forward captured output."""
+    forwarded = absolutize_elevated_argv(raw_argv)
+    if state_path is not None:
+        forwarded.extend(["--uac-state-path", str(state_path.resolve())])
+    if settings_path is not None:
+        forwarded.extend(["--uac-settings-path", settings_path])
+    if profile and not any(tok == "--profile" or tok.startswith("--profile=") for tok in forwarded):
+        cand = Path(profile)
+        forwarded.extend(["--profile", str(cand.resolve()) if cand.exists() else profile])
+    exit_code, output_text = deps.elevate_fn(forwarded)
     if output_text:
         sys.stdout.write(output_text)
         if not output_text.endswith("\n"):
@@ -114,7 +130,13 @@ def handle_apply(
                 "over-the-shoulder UAC under a different admin account will block user-scope targets.\n"
             )
         if args.elevate:
-            return relay_elevated_uac(raw_argv, deps)
+            return relay_elevated_uac(
+                raw_argv,
+                deps,
+                state_path=store.state_path,
+                settings_path=getattr(args, "_uac_resolved_settings_path", None),
+                profile=getattr(args, "profile", None),
+            )
         if not args.json and sys.stdin.isatty() and priv_summary["requires_elevation"]:
             admin_needed = priv_summary["admin_tweaks"]
             answer = input(
@@ -122,7 +144,13 @@ def handle_apply(
             )
             if answer.strip().lower() in {"", "y", "yes"}:
                 try:
-                    return relay_elevated_uac(raw_argv, deps)
+                    return relay_elevated_uac(
+                        raw_argv,
+                        deps,
+                        state_path=store.state_path,
+                        settings_path=getattr(args, "_uac_resolved_settings_path", None),
+                        profile=getattr(args, "profile", None),
+                    )
                 except UacCancelledError:
                     sys.stderr.write("UAC elevation cancelled; continuing with non-admin tweaks only.\n")
 
@@ -207,7 +235,12 @@ def handle_rollback_or_recover(
     if args.apply:
         require_windows_for_mutation(env, f"wb {args.command} --apply")
         if args.elevate and not env.is_admin and not getattr(args, "uac_output", None):
-            return relay_elevated_uac(raw_argv, deps)
+            return relay_elevated_uac(
+                raw_argv,
+                deps,
+                state_path=store.state_path,
+                settings_path=getattr(args, "_uac_resolved_settings_path", None),
+            )
     force_flag = bool(getattr(args, "force", False))
     if is_recover:
         reverted = recover_incomplete_runs(

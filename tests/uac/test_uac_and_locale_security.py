@@ -18,6 +18,9 @@ import pytest
 from winbearable.audit import _check_listening_ports, _check_unquoted_service_paths
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+from winbearable.cli.handlers import run_cli
+from winbearable.cli.handlers_tools import CliDeps
+from winbearable.cli.parser import absolutize_elevated_argv
 from winbearable.const import (
     DEFAULT_TESTED_BUILDS,
     HIVE_HKLM,
@@ -27,6 +30,7 @@ from winbearable.const import (
     WAIT_OBJECT_0,
     WAIT_TIMEOUT,
     are_env_overrides_allowed,
+    get_elevated_env_policy_summary,
 )
 from winbearable.hyperv_firewall import _parse_ps_setting_json, _powershell_exe
 from winbearable.models import (
@@ -745,3 +749,95 @@ def test_sanitize_elevated_python_env_and_override_gating(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(sys, "argv", ["wb", "apply", "--uac-output", "out.txt"])
     assert are_env_overrides_allowed(is_elevated=False) is False
+
+
+def test_elevated_child_env_policy_blocks_ambient_redirection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Elevated UAC children strip ambient redirection env vars and use parent-resolved handoff args."""
+    # 1. Policy strips all forbidden ambient redirection vars while keeping safe/trusted vars
+    poisoned_env = {
+        "PATH": r"C:\Windows\System32",
+        "NO_COLOR": "1",
+        "PYTHONPATH": r"C:\evil",
+        "PYTHONANYTHING": "1",
+        "WINBEARABLE_STATE_PATH": str(tmp_path / "evil_state.json"),
+        "WINBEARABLE_SETTINGS": str(tmp_path / "evil_settings.toml"),
+        "WINBEARABLE_PROFILE_DIR": str(tmp_path / "evil_profiles"),
+        "WINBEARABLE_CONFIG": str(tmp_path / "evil_config.toml"),
+        "WINBEARABLE_PROFILE": "paranoid",
+        "WINBEARABLE_APPLY": "1",
+        "WINBEARABLE_LOG_PATH": str(tmp_path / "evil.log"),
+        "WINBEARABLE_LOG_LEVEL": "DEBUG",
+        "WINBEARABLE_LOG_FORMAT": "text",
+        "WB_CMD_TIMEOUT": "1",
+        "WINBEARABLE_UAC_TIMEOUT_MS": "1",
+        "XDG_CONFIG_HOME": str(tmp_path / "evil_xdg_cfg"),
+        "XDG_STATE_HOME": str(tmp_path / "evil_xdg_state"),
+    }
+    summary = get_elevated_env_policy_summary(poisoned_env)
+    assert "WINBEARABLE_STATE_PATH" in summary["active_forbidden_vars"]
+    assert "NO_COLOR" in summary["active_safe_inherit_vars"]
+    assert "evil_state" not in str(summary)
+
+    removed = sanitize_elevated_python_env(poisoned_env)
+    assert "WINBEARABLE_STATE_PATH" in removed
+    assert "WINBEARABLE_SETTINGS" in removed
+    assert "WINBEARABLE_PROFILE" in removed
+    assert "XDG_CONFIG_HOME" in removed
+    assert poisoned_env == {"PATH": r"C:\Windows\System32", "NO_COLOR": "1"}
+
+    # 2. Caller-spoofed internal --uac-* flags are stripped by absolutize_elevated_argv
+    cleaned = absolutize_elevated_argv(
+        [
+            "apply",
+            "--uac-state-path",
+            str(tmp_path / "spoof_state.json"),
+            "--uac-settings-path=spoof.toml",
+            "--uac-output=spoof.txt",
+            "--uac-caller-sid",
+            "S-1-5-18",
+            "--profile",
+            "user-only",
+        ]
+    )
+    assert cleaned == ["apply", "--profile", "user-only"]
+
+    # 3. Elevated child run_cli ignores poisoned ambient env vars and uses parent-resolved paths
+    evil_state = tmp_path / "evil_state.json"
+    evil_settings = tmp_path / "evil_settings.toml"
+    evil_settings.write_text('default_profile = "paranoid"\n', encoding="utf-8")
+    evil_log = tmp_path / "evil.log"
+    parent_state = tmp_path / "parent_state.json"
+    uac_dir = tmp_path / "wb-uac-test"
+    uac_dir.mkdir()
+    uac_out = uac_dir / "uac-output.txt"
+
+    monkeypatch.setenv("WINBEARABLE_STATE_PATH", str(evil_state))
+    monkeypatch.setenv("WINBEARABLE_SETTINGS", str(evil_settings))
+    monkeypatch.setenv("WINBEARABLE_PROFILE", "paranoid")
+    monkeypatch.setenv("WINBEARABLE_LOG_PATH", str(evil_log))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "evil_xdg"))
+    monkeypatch.setattr("winbearable.uac.output.tempfile.gettempdir", lambda: str(tmp_path))
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True)
+    rc = run_cli(
+        [
+            "plan",
+            "--uac-output",
+            str(uac_out),
+            "--uac-state-path",
+            str(parent_state),
+            "--uac-settings-path",
+            "",
+            "--json",
+        ],
+        registry=reg,
+        system=sys_b,
+        deps=CliDeps(),
+    )
+    assert rc == 0
+    assert not evil_state.exists()
+    assert not evil_log.exists()
+    assert os.environ.get("WINBEARABLE_STATE_PATH") is None
+    assert os.environ.get("WINBEARABLE_SETTINGS") is None
+    assert "user-only" in uac_out.read_text(encoding="utf-8")

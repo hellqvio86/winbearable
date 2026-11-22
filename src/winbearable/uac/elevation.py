@@ -40,16 +40,20 @@ _LOGGER = get_logger(__name__)
 
 
 def sanitize_elevated_python_env(env: dict[str, str] | None = None) -> list[str]:
-    """Strip Python runtime-injection variables and test/debug overrides before spawning elevated children.
+    """Strip forbidden Python runtime, override, and ambient redirection variables in elevated children.
 
-    Policy: elevated children must never inherit `PYTHON*` import hooks or `WINBEARABLE_*_OVERRIDE` /
-    `WINBEARABLE_DEBUG` knobs from an unelevated parent. Non-frozen Python launches additionally pass `-I`.
+    Enforces `ELEVATED_ENV_POLICY`: elevated children must never inherit `PYTHON*` import hooks,
+    `WINBEARABLE_*_OVERRIDE` / `WINBEARABLE_DEBUG` knobs, or ambient path/behavior redirection
+    variables (`WINBEARABLE_STATE_PATH`, `WINBEARABLE_SETTINGS`, `WINBEARABLE_PROFILE`, `XDG_*`, etc.).
+    Non-frozen Python launches additionally pass `-I`.
     """
     target_env = env if env is not None else os.environ
     removed: list[str] = []
     strip_keys = list(ELEVATED_ENV_STRIP_VARS)
     for key in list(target_env):
-        if key.startswith("WINBEARABLE_") and key.endswith("_OVERRIDE") and key not in strip_keys:
+        if (key.startswith("PYTHON") or (key.startswith("WINBEARABLE_") and key.endswith("_OVERRIDE"))) and (
+            key not in strip_keys
+        ):
             strip_keys.append(key)
     for var in strip_keys:
         if var in target_env:
