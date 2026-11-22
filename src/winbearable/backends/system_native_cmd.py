@@ -211,7 +211,7 @@ def resolve_git_exe() -> str | None:
 
 
 def is_user_writable_binary(exe_path: str) -> bool:
-    """Return True if *exe_path* resides inside a user-writable directory or is writable on Windows."""
+    """Return True if *exe_path* (or its resolved target) resides inside a user-writable directory."""
     is_win_style = "\\" in exe_path or (len(exe_path) >= 2 and exe_path[1] == ":")
     norm_fn = ntpath.normpath if is_win_style else os.path.abspath
     case_fn = ntpath.normcase if is_win_style else os.path.normcase
@@ -221,10 +221,6 @@ def is_user_writable_binary(exe_path: str) -> bool:
     if sys.platform == "win32" or not is_win_style:
         with contextlib.suppress(OSError):
             candidates.append(str(Path(exe_path).resolve()))
-            if sys.platform == "win32" and Path(exe_path).exists():
-                parent = Path(exe_path).parent
-                if os.access(exe_path, os.W_OK) or os.access(parent, os.W_OK):
-                    return True
     roots: list[str] = []
     for env_key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "TEMP", "TMP"):
         base = os.environ.get(env_key, "").strip()
