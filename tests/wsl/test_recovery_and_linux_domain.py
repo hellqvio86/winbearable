@@ -123,7 +123,7 @@ def test_uac_elevation_and_cli_relay(tmp_path: Path) -> None:
             self.kernel32 = FakeKernel32(err=err)
 
     fake_dll = FakeWinDLL(succeed=True)
-    code, out = run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=fake_dll)
+    code, out = run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=fake_dll, allow_user_writable=True)
     assert code == 0
     assert out.replace("\r\n", "\n") == "Elevated OK\n"
     assert fake_dll.shell32.last_verb == "runas"
@@ -135,7 +135,7 @@ def test_uac_elevation_and_cli_relay(tmp_path: Path) -> None:
         patch.object(ctypes, "get_last_error", return_value=ERROR_CANCELLED, create=True),
         pytest.raises(UacCancelledError),
     ):
-        run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=cancelled_dll)
+        run_elevated_wb(["apply", "--apply", "--elevate"], windll_override=cancelled_dll, allow_user_writable=True)
 
     # 4. CLI --elevate triggers run_elevated_wb when non-admin on Windows
     tmp = tmp_path

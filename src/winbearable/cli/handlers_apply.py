@@ -43,6 +43,7 @@ def relay_elevated_uac(
     state_path: Path | None = None,
     settings_path: str | None = None,
     profile: str | None = None,
+    allow_user_writable: bool = False,
 ) -> int:
     """Re-launch the CLI command elevated via UAC with parent-resolved paths and forward captured output."""
     forwarded = absolutize_elevated_argv(raw_argv)
@@ -53,7 +54,10 @@ def relay_elevated_uac(
     if profile and not any(tok == "--profile" or tok.startswith("--profile=") for tok in forwarded):
         cand = Path(profile)
         forwarded.extend(["--profile", str(cand.resolve()) if cand.exists() else profile])
-    exit_code, output_text = deps.elevate_fn(forwarded)
+    if allow_user_writable:
+        exit_code, output_text = deps.elevate_fn(forwarded, allow_user_writable=True)
+    else:
+        exit_code, output_text = deps.elevate_fn(forwarded)
     if output_text:
         sys.stdout.write(output_text)
         if not output_text.endswith("\n"):
@@ -136,6 +140,7 @@ def handle_apply(
                 state_path=store.state_path,
                 settings_path=getattr(args, "_uac_resolved_settings_path", None),
                 profile=getattr(args, "profile", None),
+                allow_user_writable=bool(getattr(args, "allow_user_writable_elevation_target", False)),
             )
         if not args.json and sys.stdin.isatty() and priv_summary["requires_elevation"]:
             admin_needed = priv_summary["admin_tweaks"]
@@ -150,6 +155,7 @@ def handle_apply(
                         state_path=store.state_path,
                         settings_path=getattr(args, "_uac_resolved_settings_path", None),
                         profile=getattr(args, "profile", None),
+                        allow_user_writable=bool(getattr(args, "allow_user_writable_elevation_target", False)),
                     )
                 except UacCancelledError:
                     sys.stderr.write("UAC elevation cancelled; continuing with non-admin tweaks only.\n")
@@ -240,6 +246,7 @@ def handle_rollback_or_recover(
                 deps,
                 state_path=store.state_path,
                 settings_path=getattr(args, "_uac_resolved_settings_path", None),
+                allow_user_writable=bool(getattr(args, "allow_user_writable_elevation_target", False)),
             )
     force_flag = bool(getattr(args, "force", False))
     if is_recover:

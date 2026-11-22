@@ -52,6 +52,7 @@ from winbearable.operations import (
     merge_file_content,
 )
 from winbearable.profiles import load_profile
+from winbearable.state import StateStore
 from winbearable.tweaks import get_tweak
 from winbearable.uac import (
     UacElevationError,
@@ -65,7 +66,12 @@ from winbearable.uac import (
     set_console_title,
     write_uac_output_safe,
 )
-from winbearable.uac.elevation import assess_elevation_target_trust, sanitize_elevated_python_env
+from winbearable.uac.elevation import (
+    _verify_elevation_target_identity,
+    assess_elevation_target_trust,
+    sanitize_elevated_python_env,
+)
+from winbearable.uac.win32 import resolve_trusted_system_roots
 from winbearable.wsl import prepare_wsl_plan
 
 
@@ -118,7 +124,9 @@ def test_uac_error_paths_and_cmdline_stripping(tmp_path: Path, monkeypatch: pyte
         patch.object(ctypes, "get_last_error", return_value=0, create=True),
         pytest.raises(UacElevationError, match="Win32 error 5"),
     ):
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll)
+        run_elevated_wb(
+            ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll, allow_user_writable=True
+        )
 
     # GetExitCodeProcess failure raises UacElevationError
     fake_windll2 = MagicMock()
@@ -138,7 +146,9 @@ def test_uac_error_paths_and_cmdline_stripping(tmp_path: Path, monkeypatch: pyte
         inst.hProcess = 123
         mock_sei_cls.return_value = inst
         with patch.object(ctypes, "sizeof", return_value=64), patch.object(ctypes, "byref"):
-            run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll2)
+            run_elevated_wb(
+                ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll2, allow_user_writable=True
+            )
 
 
 def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,7 +232,9 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
         inst = MagicMock()
         inst.hProcess = None
         mock_sei_cls.return_value = inst
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=null_handle_dll)
+        run_elevated_wb(
+            ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=null_handle_dll, allow_user_writable=True
+        )
 
     # 4. WAIT_TIMEOUT terminates child, waits grace period, closes handle, and warns to run doctor/recover
     timeout_dll = MagicMock()
@@ -237,7 +249,13 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
         inst = MagicMock()
         inst.hProcess = 456
         mock_sei_cls.return_value = inst
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=timeout_dll, timeout_ms=250)
+        run_elevated_wb(
+            ["apply"],
+            executable=str(tmp_path / "wb.exe"),
+            windll_override=timeout_dll,
+            timeout_ms=250,
+            allow_user_writable=True,
+        )
     timeout_dll.kernel32.TerminateProcess.assert_called_once_with(456, 1)
     timeout_dll.kernel32.CloseHandle.assert_called_once_with(456)
 
@@ -256,7 +274,9 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
         inst = MagicMock()
         inst.hProcess = 789
         mock_sei_cls.return_value = inst
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=failed_dll)
+        run_elevated_wb(
+            ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=failed_dll, allow_user_writable=True
+        )
     failed_dll.kernel32.CloseHandle.assert_called_once_with(789)
 
     # 6. Bounded output helper handles absent file and truncates oversized output
@@ -334,7 +354,7 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
             return 1
 
     fake_dll = type("FakeDLL", (), {"shell32": _FakeShell32(), "kernel32": _FakeKernel32()})()
-    run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_dll)
+    run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_dll, allow_user_writable=True)
     assert captured_dirs and captured_dirs[0].lower().endswith("\\system32")
 
     # bin/publish_winget.py passes token in WINGET_CREATE_GITHUB_TOKEN env var, not argv
@@ -608,7 +628,9 @@ def test_uac_timeout_reports_non_terminated_process_truthfully() -> None:
         kernel32 = _FakeKernel32()
 
     with pytest.raises(UacTimeoutError, match="could not be terminated"), patch("sys.platform", "win32"):
-        run_elevated_wb(["apply"], executable="wb.exe", windll_override=_FakeWindll(), timeout_ms=100)
+        run_elevated_wb(
+            ["apply"], executable="wb.exe", windll_override=_FakeWindll(), timeout_ms=100, allow_user_writable=True
+        )
 
 
 def test_deprecated_tweak_alias_resolves_with_warning(tmp_path: Path) -> None:
@@ -841,3 +863,73 @@ def test_elevated_child_env_policy_blocks_ambient_redirection(tmp_path: Path, mo
     assert os.environ.get("WINBEARABLE_STATE_PATH") is None
     assert os.environ.get("WINBEARABLE_SETTINGS") is None
     assert "user-only" in uac_out.read_text(encoding="utf-8")
+
+
+def test_elevation_target_trust_fails_closed_and_verifies_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_elevated_wb fails closed on user-writable targets, resists SystemRoot spoofing, and detects TOCTOU."""
+    # 1. Fail closed on user-writable target unless allow_user_writable=True
+    user_wb = tmp_path / "wb.exe"
+    user_wb.write_bytes(b"MZ")
+    fake_dll = MagicMock()
+    fake_dll.shell32.ShellExecuteExW.return_value = 0
+    with pytest.raises(UacElevationError, match="Refusing user-writable elevation target"):
+        run_elevated_wb(
+            ["apply"],
+            executable=str(user_wb),
+            windll_override=fake_dll,
+            writable_check=lambda _p: True,
+        )
+    fake_dll.shell32.ShellExecuteExW.assert_not_called()
+
+    # 2. Machine-protected (non-writable) target is permitted without allow_user_writable
+    fake_dll_ok = MagicMock()
+    fake_dll_ok.shell32.ShellExecuteExW.return_value = 0
+    fake_dll_ok.kernel32.GetLastError.return_value = 5
+    with (
+        patch.object(ctypes, "get_last_error", return_value=0, create=True),
+        pytest.raises(UacElevationError, match="Win32 error 5"),
+    ):
+        run_elevated_wb(
+            ["apply"],
+            executable=str(user_wb),
+            windll_override=fake_dll_ok,
+            writable_check=lambda _p: False,
+        )
+    fake_dll_ok.shell32.ShellExecuteExW.assert_called_once()
+
+    # 3. Poisoned SystemRoot / WINDIR cannot spoof trusted roots when GetSystemDirectoryW is present
+    fake_k32 = MagicMock()
+
+    def _fake_get_sys_dir(buf: Any, _size: int) -> int:
+        buf.value = r"C:\Windows\System32"
+        return len(r"C:\Windows\System32")
+
+    fake_k32.GetSystemDirectoryW.side_effect = _fake_get_sys_dir
+    poisoned_env = {
+        "SystemRoot": str(tmp_path / "evil_windows"),
+        "WINDIR": str(tmp_path / "evil_windows"),
+    }
+    roots = resolve_trusted_system_roots(kernel32=fake_k32, env=poisoned_env)
+    assert any(r.endswith(r"c:\windows") for r in roots)
+    assert not any("evil_windows" in r for r in roots)
+
+    # 4. File identity change between validation and launch fails closed
+    with pytest.raises(UacElevationError, match="changed between validation and launch"):
+        _verify_elevation_target_identity(user_wb, (1, 2, 999999, 123456), check_symlinks=False)
+
+    # 5. CLI --allow-user-writable-elevation-target forwards allow_user_writable=True to elevate_fn
+    reg = InMemoryRegistryBackend()
+    non_admin_win = InMemorySystemBackend(is_windows=True, is_admin=False)
+    store = StateStore(tmp_path / "state.json")
+    mock_uac = MagicMock(return_value=(0, "OK\n"))
+    rc = run_cli(
+        ["apply", "--profile", "owner", "--elevate", "--allow-user-writable-elevation-target"],
+        registry=reg,
+        system=non_admin_win,
+        state_store=store,
+        deps=CliDeps(elevate_fn=mock_uac),
+    )
+    assert rc == 0
+    assert mock_uac.call_args.kwargs.get("allow_user_writable") is True
