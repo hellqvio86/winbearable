@@ -26,6 +26,7 @@
 >
 > We don't like Windows either. That's why `winbearable` (`wb`) is shamelessly opinionated:
 > - **Only the Windows 11 We Are On (`26H2+`, Build `>= 26300` — NO IoT, NO LTSC):** We only support the current Windows 11 desktop installation we run on (`Build >= 26300`). We do **not** support Windows IoT (`IoTEnterprise` / `IoTEnterpriseS`), Windows LTSC (`EnterpriseS`), Windows Server, Windows 10, or older Windows 11 builds (`< 26300`). Maintaining one version of Windows is painful enough.
+> - **Python `>= 3.15` Only (Free-Threaded `3.15t` / No-GIL Ready):** `winbearable` requires **Python `3.15+`** (`requires-python = ">=3.15"`) and is tested on both standard `3.15` and free-threaded **`3.15t` (no-GIL)** builds with thread-local outcome isolation and lock-guarded caches/state.
 > - **Native Python (Zero PowerShell for Core Tweaks):** Core tweaks and audits use Python's standard library (`winreg`, `ctypes`, `tomllib`) and direct Win32 binaries (`wsl.exe`, `winget.exe`, `sc.exe`, `taskkill.exe`) with `shell=False`, so they work even when corporate AppLocker/WDAC locks PowerShell into Constrained Language Mode. The sole optional exception is `wb wsl firewall`, which uses `NetSecurity` PowerShell cmdlets and gracefully reports unavailable under CLM.
 > - **Kills the Annoying OneDrive Tray Icon:** Terminates `OneDrive.exe`, deletes the `HKCU\...\Run\OneDrive` autorun key so it stops haunting your system tray, unpins OneDrive from File Explorer, blocks it via machine policy when admin, and can uninstall it outright.
 > - **Installs VS Code + Remote-WSL on the Windows Side:** Automatically installs `Microsoft.VisualStudioCode` (in user scope, no admin needed) plus the `ms-vscode-remote.remote-wsl` extension so typing `code .` in your WSL `bash` shell just works.
@@ -383,15 +384,17 @@ See [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md) fo
 
 ---
 
-## Windows Build & Edition Support Policy
+## Windows & Python Support Policy
 
-We don't like Windows enough to maintain legacy workarounds or embedded/IoT quirks. **Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT and LTSC are strictly unsupported.**
+We don't like Windows enough to maintain legacy workarounds or embedded/IoT quirks. **Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) and Python `>= 3.15` (including free-threaded `3.15t` without the GIL) are supported. Windows IoT, LTSC, and Python `< 3.15` are strictly unsupported.**
 
-| Build / Edition | OS Release | Support Status |
+| Target | Version / Edition | Support Status |
 | :--- | :--- | :--- |
-| `26300+` (`Professional` / standard desktop) | Windows 11 `26H2+` (maintainer build) | **Supported** |
-| `IoTEnterprise`, `IoTEnterpriseS`, `EnterpriseS` (IoT / LTSC) | Windows IoT / LTSC (any build) | **Unsupported (`unsupported_edition` — NO IoT/LTSC)** |
-| `< 26300` | Older Windows 11 / Windows 10 | **Unsupported (`unsupported_build`)** |
+| **Windows 11** | `26300+` (`Professional` / standard desktop) | **Supported** |
+| **Windows IoT / LTSC** | `IoTEnterprise`, `IoTEnterpriseS`, `EnterpriseS` | **Unsupported (`unsupported_edition` — NO IoT/LTSC)** |
+| **Older Windows** | `< 26300` (Older Windows 11 / Windows 10) | **Unsupported (`unsupported_build`)** |
+| **Python** | `>= 3.15` (standard `3.15` & free-threaded `3.15t` no-GIL) | **Supported** |
+| **Older Python** | `< 3.15` (3.14 and earlier) | **Unsupported** |
 
 ---
 
