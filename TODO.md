@@ -1,12 +1,12 @@
-# winbearable — Critical Review TODO (v0.31.2 @ Python 3.15)
+# winbearable — Critical Review TODO (v0.31.3 @ Python 3.15)
 
-> **Target:** `winbearable` — **0.31.2** (remediating v0.28.0 review)
+> **Target:** `winbearable` — **0.31.3** (all v0.28.0–v0.31.2 review items completed)
 > **Runtime used for this review:** CPython **3.15.2**  
 > **Declared support:** `requires-python = ">=3.15"` · CI matrix `3.15` / `3.15t`  
 > **Catalog:** 123 tweaks · validation 0 · `mappingproxy` (immutable)  
 > **Schemas:** JSON **2.0** · state v2 · profile v2  
 > **Focus:** architecture, maintainability, security, optimization  
-> **Audience:** implementation agents  
+> **Status:** All P0, P1, and P2 items below are **completed and verified** (`[x]`).  
 
 ---
 
@@ -35,7 +35,7 @@ On **3.15**, the package imports cleanly, catalog validates, and the major bound
 | `_ps_quote("test';drop")` | **ValueError** (reject, not blind escape) |
 | Package/winget catalogs | `mappingproxy` · 16 trusted IDs |
 
-**Not “done”:** ambient **admin/build env overrides** survive elevation sanitization; score path still does **123× `detect_tweak`**; docs still advertise **3.14** in places while code requires **3.15**.
+**Completed in v0.31.x:** Elevated env sanitization strips `WINBEARABLE_ADMIN_OVERRIDE` / `WINBEARABLE_BUILD_OVERRIDE` / `WINBEARABLE_DEBUG`, scoring reuses a single `detect_tweak` pass, and all docs/manifests are aligned on Python **3.15 / 3.15t**.
 
 ---
 

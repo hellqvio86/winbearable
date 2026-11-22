@@ -157,14 +157,14 @@ Preview every exact registry key, value, and `winget` package `wb` will touch (d
 
 ```cmd
 wb plan --profile user-only
-wb apply --profile user-only --apply
+wb apply --profile user-only
 ```
 
 If you have Administrator rights on the machine (personal PC or unlocked local admin on an ex-work PC), open **`cmd` as Administrator** (`Ctrl + Shift + Enter`) and apply the `owner` profile instead:
 
 ```cmd
 wb plan --profile owner
-wb apply --profile owner --apply
+wb apply --profile owner
 ```
 
 ### Step 3: Give WSL2 75% of Host RAM & Drop Into Your `bash` Shell
@@ -323,7 +323,7 @@ To preview and apply the **most aggressive (`paranoid`)** profile (from an eleva
 
 ```cmd
 wb plan --profile paranoid
-wb apply --profile paranoid --apply --elevate --i-know-what-im-doing --allow-irreversible
+wb apply --profile paranoid --elevate --i-know-what-im-doing --allow-irreversible
 ```
 
 ### Running Audits & Status Checks from WSL2
@@ -407,12 +407,12 @@ We don't like Windows enough to maintain legacy workarounds or embedded/IoT quir
 
 ## Development, Dev Container & Pre-Commit Gate (`uv`)
 
-We do **not** run `pytest` on native Windows Python or pay Microsoft for `windows-latest` CI runners. All development and test execution (including when developing on a Windows host via WSL2/Docker) runs inside the free, open-source Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or Linux host, and every commit MUST pass the local `.githooks/pre-commit` gate before committing:
+Unit tests and full Python version matrices run locally in the free, open-source Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2/Linux, while read-only Windows integration tests (`tests/test_windows_integration.py`) can be run locally on Windows 11 (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`). Every commit MUST pass the local `.githooks/pre-commit` gate before committing:
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
 make hooks         # Install mandatory .githooks/pre-commit hook
-make pre-commit    # Run format check + ruff lint + mypy + pytest (>=80%) + TruffleHog + Trivy
+make pre-commit    # Run format check + ruff lint + mypy + pytest (>=89%) + TruffleHog + Trivy
 make lint          # ruff check + ruff format --check
 make test          # mypy --strict + pytest-cov (enforces >=80% coverage) + badge generation
 make release-check # lint + test + TruffleHog + Trivy
@@ -420,10 +420,17 @@ make release-check # lint + test + TruffleHog + Trivy
 
 ## Documentation
 
+- [Architecture & Public API Policy](docs/architecture.md)
 - [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md)
 - [Support & Compatibility Policy](docs/support-policy.md)
-- [Project Roadmap & TODO](TODO.md)
+- [Threat Model](docs/threat-model.md)
+- [UAC Security Review](docs/uac-security-review.md)
+- [Schema Versioning & Migration](docs/schema-versioning.md)
+- [Verification Matrix](docs/verify-matrix.md)
 - [Per-Tweak Catalog Reference](docs/tweaks-reference.md)
+- [Dependency Management](docs/dependency-management.md)
+- [Winget Releasing Guide](docs/winget-releasing.md)
+- [Project Roadmap & TODO](TODO.md)
 - [Frequently Asked Questions (FAQ)](docs/faq.md)
 - [Ex-Work PC Ownership & Reset Checklist](docs/ex-work-pc-checklist.md)
 - [Linux Person's Windows Cheat Sheet](docs/linux-to-windows-cheatsheet.md)
@@ -436,7 +443,7 @@ make release-check # lint + test + TruffleHog + Trivy
 Release archives (PyPI wheels/sdists and Winget zips) include GitHub build-provenance attestations:
 
 ```bash
-gh attestation verify winbearable-0.27.0-win-x64.zip --owner hellqvio86
+gh attestation verify winbearable-0.31.3-win-x64.zip --owner hellqvio86
 ```
 
 ---
