@@ -46,7 +46,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
@@ -90,7 +90,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
@@ -136,7 +136,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
@@ -165,7 +165,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
@@ -177,10 +177,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Record Windows build & Python runtime
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Output "Windows Build: $($os.BuildNumber) ($($os.Caption))"
+          uv run python -c "import sys; print('Python:', sys.version)"
+
       - name: Run contract, unit & read-only Windows integration tests
         env:
           WINBEARABLE_RUN_WINDOWS_INTEGRATION: "1"
-        run: uv run pytest tests/contracts tests/test_windows_integration.py tests/audit tests/backends tests/cli tests/engine tests/operations tests/uac tests/wsl tests/test_catalog_lint.py tests/test_architecture_invariants.py -q --no-cov
+        run: uv run pytest tests/contracts tests/test_windows_integration.py tests/test_property_invariants.py tests/audit tests/backends tests/cli tests/engine tests/operations tests/uac tests/wsl tests/test_catalog_lint.py tests/test_architecture_invariants.py -q --no-cov
 
   all-checks:
     name: All Checks Passed
@@ -258,7 +265,7 @@ jobs:
 
       - name: Install uv
         if: steps.check_version.outputs.changed == 'true'
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
@@ -349,7 +356,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
@@ -434,7 +441,7 @@ jobs:
           ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
@@ -466,9 +473,11 @@ jobs:
           WIN_SIGNING_CERT_PFX_B64: ${{ secrets.WIN_SIGNING_CERT_PFX_B64 }}
           WIN_SIGNING_CERT_PASSWORD: ${{ secrets.WIN_SIGNING_CERT_PASSWORD }}
           WIN_SIGNING_TIMESTAMP_URL: ${{ vars.WIN_SIGNING_TIMESTAMP_URL }}
+          WIN_SIGNING_EXPECTED_THUMBPRINT: ${{ vars.WIN_SIGNING_EXPECTED_THUMBPRINT }}
         run: |
           if (-not $env:WIN_SIGNING_CERT_PFX_B64 -or -not $env:WIN_SIGNING_CERT_PASSWORD) {
-            Write-Output "::notice::WIN_SIGNING_CERT_PFX_B64 / WIN_SIGNING_CERT_PASSWORD not set; skipping Authenticode signing."
+            Write-Output "::notice::WIN_SIGNING_CERT_PFX_B64 / WIN_SIGNING_CERT_PASSWORD not set; skipping Authenticode signing (unsigned build)."
+            "SIGNATURE_STATUS=unsigned" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             exit 0
           }
           $pfxBytes = [Convert]::FromBase64String($env:WIN_SIGNING_CERT_PFX_B64)
@@ -486,13 +495,20 @@ jobs:
               $signParams["TimestampServer"] = $env:WIN_SIGNING_TIMESTAMP_URL
             }
             $sig = Set-AuthenticodeSignature @signParams
-            if ($sig.Status -eq "UnknownError") {
-              Write-Output "::warning::Authenticode signing failed: $($sig.StatusMessage); continuing with unsigned binary."
-            } else {
-              Write-Output "Signed dist\wb\wb.exe -> Status=$($sig.Status) Thumbprint=$($cert.Thumbprint)"
+            $verified = Get-AuthenticodeSignature -FilePath "dist\wb\wb.exe"
+            if ($sig.Status -ne "Valid" -or $verified.Status -ne "Valid") {
+              Write-Error "Authenticode signing failed: Status=$($verified.Status) $($sig.StatusMessage)"
+              exit 1
             }
+            if ($env:WIN_SIGNING_EXPECTED_THUMBPRINT -and ($verified.SignerCertificate.Thumbprint -ne $env:WIN_SIGNING_EXPECTED_THUMBPRINT)) {
+              Write-Error "Signer thumbprint mismatch: got $($verified.SignerCertificate.Thumbprint), expected $env:WIN_SIGNING_EXPECTED_THUMBPRINT"
+              exit 1
+            }
+            "SIGNATURE_STATUS=signed" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Output "Signed dist\wb\wb.exe -> Status=$($verified.Status) Thumbprint=$($cert.Thumbprint)"
           } catch {
-            Write-Output "::warning::Authenticode signing failed: $($_.Exception.Message); continuing with unsigned binary."
+            Write-Error "Authenticode signing failed: $($_.Exception.Message)"
+            exit 1
           } finally {
             $cert.Dispose()
           }

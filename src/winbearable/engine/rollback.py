@@ -5,8 +5,8 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import replace
 
+from ..backends.ports import CompensationPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import RollbackConflictError, RollbackFailureError, RunRecord, TransactionState
 from ..state import StateStore
 from .compensation import compensate_run_record_issues
@@ -16,7 +16,7 @@ from .params import IncompleteJournalError, require_native_backends
 def rollback_runs(
     state_store: StateStore,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: CompensationPorts,
     to_run_id: str | None = None,
     dry_run: bool = True,
     allow_simulated: bool = False,
@@ -43,7 +43,7 @@ def rollback_runs(
 def recover_incomplete_runs(
     state_store: StateStore,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: CompensationPorts,
     dry_run: bool = True,
     allow_simulated: bool = False,
     force: bool = False,
@@ -118,7 +118,7 @@ def recover_incomplete_runs(
 def _rollback_runs_impl(
     state_store: StateStore,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: CompensationPorts,
     to_run_id: str | None = None,
     dry_run: bool = True,
     restore_full_policy: bool = False,

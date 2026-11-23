@@ -8,6 +8,7 @@ from typing import Any
 from winbearable.models.enums import TransactionState
 from winbearable.models.snapshots import (
     AuditpolSnapshot,
+    FailureOutcomeDict,
     FileSnapshot,
     FirewallGroupSnapshot,
     FsutilSnapshot,
@@ -51,10 +52,11 @@ class RunRecord:
     installed_winget_packages: tuple[str, ...] = ()
     installed_vscode_extensions: tuple[str, ...] = ()
     completed_operations: tuple[str, ...] = ()
-    failure_outcomes: tuple[dict[str, Any], ...] = ()
+    failure_outcomes: tuple[FailureOutcomeDict, ...] = ()
     operation_journal: tuple[OperationJournalEntry, ...] = ()
     precondition_fingerprints: dict[str, str] | None = None
     wsl_backup_path: str | None = None
+    wsl_backup_sha256: str | None = None
     wslconfig_path: str | None = None
     wslconfig_existed: bool | None = None
     wslconfig_post_sha256: str | None = None
@@ -91,6 +93,7 @@ class RunRecord:
             "operation_journal": [entry.to_dict() for entry in self.operation_journal],
             "precondition_fingerprints": self.precondition_fingerprints,
             "wsl_backup_path": self.wsl_backup_path,
+            "wsl_backup_sha256": self.wsl_backup_sha256,
             "wslconfig_path": self.wslconfig_path,
             "wslconfig_existed": self.wslconfig_existed,
             "wslconfig_post_sha256": self.wslconfig_post_sha256,
@@ -102,46 +105,71 @@ class RunRecord:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> RunRecord:
-        """Deserialize run record from dictionary."""
-        reg_snaps = tuple(RegistryValueSnapshot.from_dict(item) for item in payload.get("registry_snapshots", []))
-        reg_key_snaps = tuple(RegistryKeySnapshot.from_dict(item) for item in payload.get("registry_key_snapshots", []))
-        svc_snaps = tuple(ServiceSnapshot.from_dict(item) for item in payload.get("service_snapshots", []))
-        task_snaps = tuple(ScheduledTaskSnapshot.from_dict(item) for item in payload.get("task_snapshots", []))
-        feat_snaps = tuple(OptionalFeatureSnapshot.from_dict(item) for item in payload.get("feature_snapshots", []))
-        auditpol_snaps = tuple(AuditpolSnapshot.from_dict(item) for item in payload.get("auditpol_snapshots", []))
-        wevtutil_snaps = tuple(WevtutilSnapshot.from_dict(item) for item in payload.get("wevtutil_snapshots", []))
-        fw_snaps = tuple(FirewallGroupSnapshot.from_dict(item) for item in payload.get("firewall_group_snapshots", []))
-        fsutil_snaps = tuple(FsutilSnapshot.from_dict(item) for item in payload.get("fsutil_snapshots", []))
-        powercfg_snaps = tuple(PowercfgSnapshot.from_dict(item) for item in payload.get("powercfg_snapshots", []))
-        git_snaps = tuple(GitConfigSnapshot.from_dict(item) for item in payload.get("git_config_snapshots", []))
-        icacls_snaps = tuple(IcaclsSnapshot.from_dict(item) for item in payload.get("icacls_snapshots", []))
-        hv_snaps = tuple(
-            HypervFirewallSnapshot.from_dict(item) for item in payload.get("hyperv_firewall_snapshots", [])
-        )
-        file_snaps = tuple(FileSnapshot.from_dict(item) for item in payload.get("file_snapshots", []))
-        winget_pkgs = tuple(str(item) for item in payload.get("installed_winget_packages", []))
-        vscode_exts = tuple(str(item) for item in payload.get("installed_vscode_extensions", []))
-        completed_ops = tuple(str(item) for item in payload.get("completed_operations", []))
-        failure_outcomes = tuple(dict(item) for item in payload.get("failure_outcomes", []) if isinstance(item, dict))
-        op_journal = tuple(
-            OperationJournalEntry.from_dict(item)
-            for item in payload.get("operation_journal", [])
+        """Deserialize run record from dictionary, failing closed on missing required fields or invalid types."""
+        if not isinstance(payload, dict):
+            raise ValueError("RunRecord payload must be a JSON object.")
+        for req_key in ("run_id", "timestamp", "profile_name", "applied_tweaks", "state"):
+            if req_key not in payload:
+                raise ValueError(f"RunRecord missing required field: {req_key!r}")
+
+        def _require_list(key: str) -> list[Any]:
+            val = payload.get(key, [])
+            if not isinstance(val, list):
+                raise ValueError(f"RunRecord {key!r} must be a list.")
+            return val
+
+        raw_applied = payload["applied_tweaks"]
+        if not isinstance(raw_applied, list):
+            raise ValueError("RunRecord 'applied_tweaks' must be a list.")
+
+        reg_snaps = tuple(RegistryValueSnapshot.from_dict(item) for item in _require_list("registry_snapshots"))
+        reg_key_snaps = tuple(RegistryKeySnapshot.from_dict(item) for item in _require_list("registry_key_snapshots"))
+        svc_snaps = tuple(ServiceSnapshot.from_dict(item) for item in _require_list("service_snapshots"))
+        task_snaps = tuple(ScheduledTaskSnapshot.from_dict(item) for item in _require_list("task_snapshots"))
+        feat_snaps = tuple(OptionalFeatureSnapshot.from_dict(item) for item in _require_list("feature_snapshots"))
+        auditpol_snaps = tuple(AuditpolSnapshot.from_dict(item) for item in _require_list("auditpol_snapshots"))
+        wevtutil_snaps = tuple(WevtutilSnapshot.from_dict(item) for item in _require_list("wevtutil_snapshots"))
+        fw_snaps = tuple(FirewallGroupSnapshot.from_dict(item) for item in _require_list("firewall_group_snapshots"))
+        fsutil_snaps = tuple(FsutilSnapshot.from_dict(item) for item in _require_list("fsutil_snapshots"))
+        powercfg_snaps = tuple(PowercfgSnapshot.from_dict(item) for item in _require_list("powercfg_snapshots"))
+        git_snaps = tuple(GitConfigSnapshot.from_dict(item) for item in _require_list("git_config_snapshots"))
+        icacls_snaps = tuple(IcaclsSnapshot.from_dict(item) for item in _require_list("icacls_snapshots"))
+        hv_snaps = tuple(HypervFirewallSnapshot.from_dict(item) for item in _require_list("hyperv_firewall_snapshots"))
+        file_snaps = tuple(FileSnapshot.from_dict(item) for item in _require_list("file_snapshots"))
+        winget_pkgs = tuple(str(item) for item in _require_list("installed_winget_packages"))
+        vscode_exts = tuple(str(item) for item in _require_list("installed_vscode_extensions"))
+        completed_ops = tuple(str(item) for item in _require_list("completed_operations"))
+        raw_failures = _require_list("failure_outcomes")
+        failure_outcomes: tuple[FailureOutcomeDict, ...] = tuple(
+            FailureOutcomeDict(
+                tweak_id=str(item["tweak_id"]) if "tweak_id" in item else "",
+                status=str(item.get("status", "unknown")),
+                message=str(item.get("message", "")),
+                returncode=item.get("returncode") if isinstance(item.get("returncode"), int) else None,
+                command=[str(c) for c in item["command"]] if isinstance(item.get("command"), list) else [],
+            )
+            for item in raw_failures
             if isinstance(item, dict)
         )
+        raw_journal = _require_list("operation_journal")
+        op_journal = tuple(OperationJournalEntry.from_dict(item) for item in raw_journal)
         raw_precond = payload.get("precondition_fingerprints")
         precond_fp = {str(k): str(v) for k, v in raw_precond.items()} if isinstance(raw_precond, dict) else None
         raw_wsl_backup = payload.get("wsl_backup_path")
+        raw_wsl_sha = payload.get("wsl_backup_sha256")
         raw_wslconfig = payload.get("wslconfig_path")
         raw_wslconfig_existed = payload.get("wslconfig_existed")
         raw_wslconfig_post_sha = payload.get("wslconfig_post_sha256")
-        raw_state = payload.get("state", TransactionState.COMMITTED)
+        raw_state = payload["state"]
+        if raw_state is None or not isinstance(raw_state, (str, TransactionState)):
+            raise ValueError(f"Invalid RunRecord state: {raw_state!r}")
         raw_error = payload.get("error")
         return cls(
             run_id=str(payload["run_id"]),
             timestamp=str(payload["timestamp"]),
             profile_name=str(payload["profile_name"]),
-            applied_tweaks=tuple(str(item) for item in payload.get("applied_tweaks", [])),
-            planned_tweaks=tuple(str(item) for item in payload.get("planned_tweaks", [])),
+            applied_tweaks=tuple(str(item) for item in raw_applied),
+            planned_tweaks=tuple(str(item) for item in _require_list("planned_tweaks")),
             registry_snapshots=reg_snaps,
             registry_key_snapshots=reg_key_snaps,
             service_snapshots=svc_snaps,
@@ -163,11 +191,12 @@ class RunRecord:
             operation_journal=op_journal,
             precondition_fingerprints=precond_fp,
             wsl_backup_path=str(raw_wsl_backup) if raw_wsl_backup is not None else None,
+            wsl_backup_sha256=str(raw_wsl_sha) if raw_wsl_sha is not None else None,
             wslconfig_path=str(raw_wslconfig) if raw_wslconfig is not None else None,
             wslconfig_existed=bool(raw_wslconfig_existed) if raw_wslconfig_existed is not None else None,
             wslconfig_post_sha256=str(raw_wslconfig_post_sha) if raw_wslconfig_post_sha is not None else None,
             wsl_distro_snapshots=tuple(
-                WslDistroSnapshot.from_dict(item) for item in payload.get("wsl_distro_snapshots", [])
+                WslDistroSnapshot.from_dict(item) for item in _require_list("wsl_distro_snapshots")
             ),
             state=TransactionState(str(raw_state)),
             error=str(raw_error) if raw_error is not None else None,

@@ -18,6 +18,14 @@ import pytest
 from winbearable.audit import _check_listening_ports, _check_unquoted_service_paths
 from winbearable.backends.registry import InMemoryRegistryBackend
 from winbearable.backends.system import CommandResult, InMemorySystemBackend, NativeSystemBackend
+from winbearable.backends.system_native_cmd import (
+    is_user_writable_binary,
+    resolve_code_cmd,
+    resolve_winget_exe,
+)
+from winbearable.cli.handlers import run_cli
+from winbearable.cli.handlers_tools import CliDeps
+from winbearable.cli.parser import absolutize_elevated_argv
 from winbearable.const import (
     DEFAULT_TESTED_BUILDS,
     HIVE_HKLM,
@@ -27,6 +35,7 @@ from winbearable.const import (
     WAIT_OBJECT_0,
     WAIT_TIMEOUT,
     are_env_overrides_allowed,
+    get_elevated_env_policy_summary,
 )
 from winbearable.hyperv_firewall import _parse_ps_setting_json, _powershell_exe
 from winbearable.models import (
@@ -48,6 +57,7 @@ from winbearable.operations import (
     merge_file_content,
 )
 from winbearable.profiles import load_profile
+from winbearable.state import StateStore
 from winbearable.tweaks import get_tweak
 from winbearable.uac import (
     UacElevationError,
@@ -61,7 +71,13 @@ from winbearable.uac import (
     set_console_title,
     write_uac_output_safe,
 )
-from winbearable.uac.elevation import assess_elevation_target_trust, sanitize_elevated_python_env
+from winbearable.uac.elevation import (
+    _verify_elevation_target_identity,
+    assess_elevation_target_trust,
+    enforce_elevated_win32_env,
+    sanitize_elevated_python_env,
+)
+from winbearable.uac.win32 import resolve_trusted_system_roots
 from winbearable.wsl import prepare_wsl_plan
 
 
@@ -114,7 +130,9 @@ def test_uac_error_paths_and_cmdline_stripping(tmp_path: Path, monkeypatch: pyte
         patch.object(ctypes, "get_last_error", return_value=0, create=True),
         pytest.raises(UacElevationError, match="Win32 error 5"),
     ):
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll)
+        run_elevated_wb(
+            ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll, allow_user_writable=True
+        )
 
     # GetExitCodeProcess failure raises UacElevationError
     fake_windll2 = MagicMock()
@@ -134,7 +152,9 @@ def test_uac_error_paths_and_cmdline_stripping(tmp_path: Path, monkeypatch: pyte
         inst.hProcess = 123
         mock_sei_cls.return_value = inst
         with patch.object(ctypes, "sizeof", return_value=64), patch.object(ctypes, "byref"):
-            run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll2)
+            run_elevated_wb(
+                ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_windll2, allow_user_writable=True
+            )
 
 
 def test_uac_target_resolution_and_console_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,7 +238,9 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
         inst = MagicMock()
         inst.hProcess = None
         mock_sei_cls.return_value = inst
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=null_handle_dll)
+        run_elevated_wb(
+            ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=null_handle_dll, allow_user_writable=True
+        )
 
     # 4. WAIT_TIMEOUT terminates child, waits grace period, closes handle, and warns to run doctor/recover
     timeout_dll = MagicMock()
@@ -233,7 +255,13 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
         inst = MagicMock()
         inst.hProcess = 456
         mock_sei_cls.return_value = inst
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=timeout_dll, timeout_ms=250)
+        run_elevated_wb(
+            ["apply"],
+            executable=str(tmp_path / "wb.exe"),
+            windll_override=timeout_dll,
+            timeout_ms=250,
+            allow_user_writable=True,
+        )
     timeout_dll.kernel32.TerminateProcess.assert_called_once_with(456, 1)
     timeout_dll.kernel32.CloseHandle.assert_called_once_with(456)
 
@@ -252,7 +280,9 @@ def test_uac_bounded_wait_signatures_and_output_limits(tmp_path: Path) -> None:
         inst = MagicMock()
         inst.hProcess = 789
         mock_sei_cls.return_value = inst
-        run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=failed_dll)
+        run_elevated_wb(
+            ["apply"], executable=str(tmp_path / "wb.exe"), windll_override=failed_dll, allow_user_writable=True
+        )
     failed_dll.kernel32.CloseHandle.assert_called_once_with(789)
 
     # 6. Bounded output helper handles absent file and truncates oversized output
@@ -330,7 +360,7 @@ def test_absolute_binary_paths_no_cwd_search_and_winget_token_env(
             return 1
 
     fake_dll = type("FakeDLL", (), {"shell32": _FakeShell32(), "kernel32": _FakeKernel32()})()
-    run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_dll)
+    run_elevated_wb(["apply"], executable=str(tmp_path / "wb.exe"), windll_override=fake_dll, allow_user_writable=True)
     assert captured_dirs and captured_dirs[0].lower().endswith("\\system32")
 
     # bin/publish_winget.py passes token in WINGET_CREATE_GITHUB_TOKEN env var, not argv
@@ -604,7 +634,9 @@ def test_uac_timeout_reports_non_terminated_process_truthfully() -> None:
         kernel32 = _FakeKernel32()
 
     with pytest.raises(UacTimeoutError, match="could not be terminated"), patch("sys.platform", "win32"):
-        run_elevated_wb(["apply"], executable="wb.exe", windll_override=_FakeWindll(), timeout_ms=100)
+        run_elevated_wb(
+            ["apply"], executable="wb.exe", windll_override=_FakeWindll(), timeout_ms=100, allow_user_writable=True
+        )
 
 
 def test_deprecated_tweak_alias_resolves_with_warning(tmp_path: Path) -> None:
@@ -745,3 +777,214 @@ def test_sanitize_elevated_python_env_and_override_gating(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(sys, "argv", ["wb", "apply", "--uac-output", "out.txt"])
     assert are_env_overrides_allowed(is_elevated=False) is False
+
+
+def test_elevated_child_env_policy_blocks_ambient_redirection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Elevated UAC children strip ambient redirection env vars and use parent-resolved handoff args."""
+    # 1. Policy strips all forbidden ambient redirection vars while keeping safe/trusted vars
+    poisoned_env = {
+        "PATH": r"C:\Windows\System32",
+        "NO_COLOR": "1",
+        "PYTHONPATH": r"C:\evil",
+        "PYTHONANYTHING": "1",
+        "WINBEARABLE_STATE_PATH": str(tmp_path / "evil_state.json"),
+        "WINBEARABLE_SETTINGS": str(tmp_path / "evil_settings.toml"),
+        "WINBEARABLE_PROFILE_DIR": str(tmp_path / "evil_profiles"),
+        "WINBEARABLE_CONFIG": str(tmp_path / "evil_config.toml"),
+        "WINBEARABLE_PROFILE": "paranoid",
+        "WINBEARABLE_APPLY": "1",
+        "WINBEARABLE_LOG_PATH": str(tmp_path / "evil.log"),
+        "WINBEARABLE_LOG_LEVEL": "DEBUG",
+        "WINBEARABLE_LOG_FORMAT": "text",
+        "WB_CMD_TIMEOUT": "1",
+        "WINBEARABLE_UAC_TIMEOUT_MS": "1",
+        "XDG_CONFIG_HOME": str(tmp_path / "evil_xdg_cfg"),
+        "XDG_STATE_HOME": str(tmp_path / "evil_xdg_state"),
+    }
+    summary = get_elevated_env_policy_summary(poisoned_env)
+    assert "WINBEARABLE_STATE_PATH" in summary["active_forbidden_vars"]
+    assert "NO_COLOR" in summary["active_safe_inherit_vars"]
+    assert "evil_state" not in str(summary)
+
+    removed = sanitize_elevated_python_env(poisoned_env)
+    assert "WINBEARABLE_STATE_PATH" in removed
+    assert "WINBEARABLE_SETTINGS" in removed
+    assert "WINBEARABLE_PROFILE" in removed
+    assert "XDG_CONFIG_HOME" in removed
+    assert poisoned_env == {"PATH": r"C:\Windows\System32", "NO_COLOR": "1"}
+
+    # 2. Caller-spoofed internal --uac-* flags are stripped by absolutize_elevated_argv
+    cleaned = absolutize_elevated_argv(
+        [
+            "apply",
+            "--uac-state-path",
+            str(tmp_path / "spoof_state.json"),
+            "--uac-settings-path=spoof.toml",
+            "--uac-output=spoof.txt",
+            "--uac-caller-sid",
+            "S-1-5-18",
+            "--profile",
+            "user-only",
+        ]
+    )
+    assert cleaned == ["apply", "--profile", "user-only"]
+
+    # 3. Elevated child run_cli ignores poisoned ambient env vars and uses parent-resolved paths
+    evil_state = tmp_path / "evil_state.json"
+    evil_settings = tmp_path / "evil_settings.toml"
+    evil_settings.write_text('default_profile = "paranoid"\n', encoding="utf-8")
+    evil_log = tmp_path / "evil.log"
+    parent_state = tmp_path / "parent_state.json"
+    uac_dir = tmp_path / "wb-uac-test"
+    uac_dir.mkdir()
+    uac_out = uac_dir / "uac-output.txt"
+
+    monkeypatch.setenv("WINBEARABLE_STATE_PATH", str(evil_state))
+    monkeypatch.setenv("WINBEARABLE_SETTINGS", str(evil_settings))
+    monkeypatch.setenv("WINBEARABLE_PROFILE", "paranoid")
+    monkeypatch.setenv("WINBEARABLE_LOG_PATH", str(evil_log))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "evil_xdg"))
+    monkeypatch.setattr("winbearable.uac.output.tempfile.gettempdir", lambda: str(tmp_path))
+
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True)
+    rc = run_cli(
+        [
+            "plan",
+            "--uac-output",
+            str(uac_out),
+            "--uac-state-path",
+            str(parent_state),
+            "--uac-settings-path",
+            "",
+            "--json",
+        ],
+        registry=reg,
+        system=sys_b,
+        deps=CliDeps(),
+    )
+    assert rc == 0
+    assert not evil_state.exists()
+    assert not evil_log.exists()
+    assert os.environ.get("WINBEARABLE_STATE_PATH") is None
+    assert os.environ.get("WINBEARABLE_SETTINGS") is None
+    assert "user-only" in uac_out.read_text(encoding="utf-8")
+
+
+def test_elevation_target_trust_fails_closed_and_verifies_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_elevated_wb fails closed on user-writable targets, resists SystemRoot spoofing, and detects TOCTOU."""
+    # 1. Fail closed on user-writable target unless allow_user_writable=True
+    user_wb = tmp_path / "wb.exe"
+    user_wb.write_bytes(b"MZ")
+    fake_dll = MagicMock()
+    fake_dll.shell32.ShellExecuteExW.return_value = 0
+    with pytest.raises(UacElevationError, match="Refusing user-writable elevation target"):
+        run_elevated_wb(
+            ["apply"],
+            executable=str(user_wb),
+            windll_override=fake_dll,
+            writable_check=lambda _p: True,
+        )
+    fake_dll.shell32.ShellExecuteExW.assert_not_called()
+
+    # 2. Machine-protected (non-writable) target is permitted without allow_user_writable
+    fake_dll_ok = MagicMock()
+    fake_dll_ok.shell32.ShellExecuteExW.return_value = 0
+    fake_dll_ok.kernel32.GetLastError.return_value = 5
+    with (
+        patch.object(ctypes, "get_last_error", return_value=0, create=True),
+        pytest.raises(UacElevationError, match="Win32 error 5"),
+    ):
+        run_elevated_wb(
+            ["apply"],
+            executable=str(user_wb),
+            windll_override=fake_dll_ok,
+            writable_check=lambda _p: False,
+        )
+    fake_dll_ok.shell32.ShellExecuteExW.assert_called_once()
+
+    # 3. Poisoned SystemRoot / WINDIR cannot spoof trusted roots when GetSystemDirectoryW is present
+    fake_k32 = MagicMock()
+
+    def _fake_get_sys_dir(buf: Any, _size: int) -> int:
+        buf.value = r"C:\Windows\System32"
+        return len(r"C:\Windows\System32")
+
+    fake_k32.GetSystemDirectoryW.side_effect = _fake_get_sys_dir
+    poisoned_env = {
+        "SystemRoot": str(tmp_path / "evil_windows"),
+        "WINDIR": str(tmp_path / "evil_windows"),
+    }
+    roots = resolve_trusted_system_roots(kernel32=fake_k32, env=poisoned_env)
+    assert any(r.endswith(r"c:\windows") for r in roots)
+    assert not any("evil_windows" in r for r in roots)
+
+    # 4. File identity change between validation and launch fails closed
+    with pytest.raises(UacElevationError, match="changed between validation and launch"):
+        _verify_elevation_target_identity(user_wb, (1, 2, 999999, 123456), check_symlinks=False)
+
+    # 5. CLI --allow-user-writable-elevation-target forwards allow_user_writable=True to elevate_fn
+    reg = InMemoryRegistryBackend()
+    non_admin_win = InMemorySystemBackend(is_windows=True, is_admin=False)
+    store = StateStore(tmp_path / "state.json")
+    mock_uac = MagicMock(return_value=(0, "OK\n"))
+    rc = run_cli(
+        ["apply", "--profile", "owner", "--elevate", "--allow-user-writable-elevation-target"],
+        registry=reg,
+        system=non_admin_win,
+        state_store=store,
+        deps=CliDeps(elevate_fn=mock_uac),
+    )
+    assert rc == 0
+    assert mock_uac.call_args.kwargs.get("allow_user_writable") is True
+
+
+def test_elevated_win32_env_rewrite_and_hostile_path_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """enforce_elevated_win32_env rewrites win32_trusted vars; elevated winget/code refuse hostile roots."""
+    fake_k32 = MagicMock()
+
+    def _fake_sysdir(buf: Any, _size: int) -> int:
+        buf.value = r"C:\Windows\System32"
+        return len(r"C:\Windows\System32")
+
+    fake_k32.GetSystemDirectoryW.side_effect = _fake_sysdir
+    hostile_env = {
+        "PATH": str(tmp_path / "evil_bin"),
+        "LOCALAPPDATA": str(tmp_path / "evil_local"),
+        "PROGRAMFILES": str(tmp_path / "evil_pf"),
+        "SYSTEMROOT": str(tmp_path / "evil_win"),
+        "WINDIR": str(tmp_path / "evil_win"),
+        "TEMP": str(tmp_path / "evil_tmp"),
+    }
+    rewritten = enforce_elevated_win32_env(hostile_env, kernel32=fake_k32)
+    assert rewritten["SYSTEMROOT"] == r"C:\Windows"
+    assert rewritten["WINDIR"] == r"C:\Windows"
+    assert rewritten["PROGRAMFILES"] == r"C:\Program Files"
+    assert hostile_env["PATH"].startswith(r"C:\Windows\System32;")
+    assert "evil_bin" not in hostile_env["PATH"]
+
+    # Elevated winget/code resolution never picks LOCALAPPDATA paths
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "evil_local"))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "evil_pf"))
+    monkeypatch.setenv("SYSTEMROOT", str(tmp_path / "evil_win"))
+    evil_winget = tmp_path / "evil_local" / "Microsoft" / "WindowsApps" / "winget.exe"
+    evil_winget.parent.mkdir(parents=True)
+    evil_winget.write_bytes(b"MZ")
+    assert "evil_local" not in resolve_winget_exe(is_elevated=True)
+    assert "evil_local" not in resolve_code_cmd(is_elevated=True)
+
+    # Elevated NativeSystemBackend refuses user-writable winget.exe
+    nat = NativeSystemBackend(platform_override="win32")
+    with (
+        patch.object(nat, "_check_is_admin", return_value=True),
+        patch.object(nat, "_resolve_winget_exe", return_value=str(evil_winget)),
+    ):
+        assert nat.is_winget_package_installed("Microsoft.VisualStudioCode") is False
+        assert nat.last_outcome is not None and nat.last_outcome.status.value == "access_denied"
+
+    # P3: Windows-style paths are checked with ntpath even on POSIX hosts
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Alice\AppData\Local")
+    assert is_user_writable_binary(r"C:\Users\Alice\AppData\Local\Microsoft\WindowsApps\winget.exe") is True
+    assert is_user_writable_binary(r"C:\Program Files\Microsoft VS Code\bin\code.cmd") is False

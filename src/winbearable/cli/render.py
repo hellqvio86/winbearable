@@ -16,6 +16,7 @@ from ..engine import ApplySummary
 from ..log import sanitize_for_terminal
 from ..models import EnvironmentInfo, TweakStatus, UnsupportedPlatformError
 from ..tweaks import TWEAK_CATALOG, resolve_tweak_id
+from .schemas import JSON_SCHEMAS, add_selection_args
 
 _ANSI_RESET = "\x1b[0m"
 _ANSI_BOLD = "\x1b[1m"
@@ -204,7 +205,14 @@ def format_summary_markdown(
     use_emoji: bool = True,
     extra_notes: Sequence[str] = (),
 ) -> str:
-    mode_str = "DRY-RUN PLAN (no changes written)" if summary.dry_run else f"APPLIED (run_id={summary.run_id})"
+    if summary.dry_run:
+        mode_str = "DRY-RUN PLAN (no changes written)"
+    elif summary.run_id is not None:
+        mode_str = f"APPLIED (run_id={summary.run_id})"
+    elif summary.failed_ids:
+        mode_str = "FAILED (rolled back)"
+    else:
+        mode_str = "NO CHANGES (already in sync)"
     header_emoji = ("🔍 " if summary.dry_run else "🚀 ") if use_emoji else ""
     header_color = _ANSI_CYAN if summary.dry_run else (_ANSI_RED if summary.failed_ids else _ANSI_GREEN)
     title = colorize(f"# {header_emoji}winbearable — {mode_str}", _ANSI_BOLD, header_color, enabled=use_color)
@@ -278,10 +286,11 @@ def format_summary_markdown(
         f"{len(summary.skipped_edition_ids)} unsupported edition, "
         f"{len(summary.skipped_managed_ids)} skipped (managed)."
     )
+    applied_or_pending_ids = set(summary.applied_ids)
     irreversible_notes = [
         f"{item.tweak_id} ({op.operation_type}: {op.target})"
         for item in summary.results
-        if item.status in {TweakStatus.DRIFTED, TweakStatus.APPLIED}
+        if (item.status == TweakStatus.DRIFTED or item.tweak_id in applied_or_pending_ids)
         for op in item.operations
         if not op.reversible
     ]
@@ -342,9 +351,15 @@ def build_summary_notes(
     wsl_enabled: bool,
     *,
     managed_notice: bool = False,
+    incomplete_run_ids: Sequence[str] = (),
 ) -> list[str]:
     """Build trailing informational notes shared by `wb plan` and `wb apply`."""
     notes: list[str] = []
+    if incomplete_run_ids:
+        notes.append(
+            f"Warning: incomplete transaction(s) detected ({', '.join(incomplete_run_ids)}). "
+            "Run `wb recover --apply` (or `wb rollback --incomplete --apply`) before applying new changes."
+        )
     if managed_notice:
         notes.append(
             "Notice: managed device detected (domain/Entra/MDM) — machine-scope tweaks skipped "
@@ -394,190 +409,8 @@ def parse_id_list(raw: str | None) -> set[str] | None:
     return resolved_ids
 
 
-def add_selection_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--only", default=None, help="Comma-separated tweak IDs to evaluate/apply")
-    p.add_argument("--skip", default=None, help="Comma-separated tweak IDs to skip")
-    p.add_argument("--category", default=None, help="Filter tweaks by category")
-    p.add_argument(
-        "--allow-managed",
-        action="store_true",
-        help="Allow machine-scope tweaks on domain/Entra/MDM-managed devices",
-    )
-    p.add_argument(
-        "--allow-external-profiles",
-        action="store_true",
-        help="Allow profile include/extends references outside the profile directory",
-    )
-
-
-JSON_SCHEMAS: dict[str, dict[str, Any]] = {
-    "profile": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "winbearable Profile (JSON / TOML) v2",
-        "type": "object",
-        "required": ["name"],
-        "properties": {
-            "schema_version": {"type": "integer", "minimum": 1},
-            "name": {"type": "string"},
-            "description": {"type": "string"},
-            "extends": {"type": "string"},
-            "include": {"type": "array", "items": {"type": "string"}},
-            "wsl": {"type": "object"},
-            "tweaks": {"type": "object", "additionalProperties": {"type": "boolean"}},
-            "packages": {"type": "object"},
-            "params": {"type": "object"},
-        },
-        "additionalProperties": False,
-    },
-    "plan": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb plan / apply --json",
-        "type": "object",
-        "required": [
-            "schema_version",
-            "profile_name",
-            "dry_run",
-            "plan_digest",
-            "applied_ids",
-            "precondition_fingerprints",
-            "results",
-        ],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "profile_name": {"type": "string"},
-            "dry_run": {"type": "boolean"},
-            "run_id": {"type": ["string", "null"]},
-            "plan_digest": {"type": "string"},
-            "precondition_fingerprints": {"type": "object"},
-            "applied_ids": {"type": "array", "items": {"type": "string"}},
-            "rolled_back_ids": {"type": "array", "items": {"type": "string"}},
-            "already_applied_ids": {"type": "array", "items": {"type": "string"}},
-            "skipped_policy_ids": {"type": "array", "items": {"type": "string"}},
-            "skipped_admin_ids": {"type": "array", "items": {"type": "string"}},
-            "skipped_build_ids": {"type": "array", "items": {"type": "string"}},
-            "skipped_edition_ids": {"type": "array", "items": {"type": "string"}},
-            "skipped_managed_ids": {"type": "array", "items": {"type": "string"}},
-            "failed_ids": {"type": "array", "items": {"type": "string"}},
-            "results": {"type": "array", "items": {"type": "object"}},
-            "wsl_result": {"type": ["object", "null"]},
-            "in_sync": {"type": "boolean"},
-            "sync_reasons": {"type": "array", "items": {"type": "string"}},
-            "applicable": {"type": "integer", "minimum": 0},
-            "skipped": {"type": "integer", "minimum": 0},
-            "skipped_reasons": {"type": "array", "items": {"type": "string"}},
-        },
-    },
-    "status": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb status --json",
-        "type": "object",
-        "required": ["schema_version", "profile", "environment", "results"],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "profile": {"type": "string"},
-            "environment": {"type": "object"},
-            "results": {"type": "array", "items": {"type": "object"}},
-            "in_sync": {"type": "boolean"},
-            "sync_reasons": {"type": "array", "items": {"type": "string"}},
-            "applicable": {"type": "integer", "minimum": 0},
-            "skipped": {"type": "integer", "minimum": 0},
-            "skipped_reasons": {"type": "array", "items": {"type": "string"}},
-        },
-    },
-    "doctor": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb doctor --json",
-        "type": "object",
-        "required": [
-            "schema_version",
-            "version",
-            "environment",
-            "managed",
-            "blockers",
-            "audit",
-            "wsl",
-            "refugee_summary",
-        ],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "version": {"type": "string"},
-            "environment": {"type": "object"},
-            "managed": {"type": "object"},
-            "blockers": {"type": "array", "items": {"type": "object"}},
-            "wsl": {"type": "object"},
-            "audit": {"type": "object"},
-            "security_findings": {"type": "array", "items": {"type": "object"}},
-            "defender_smartscreen_posture": {"type": "object"},
-            "vbs_credential_guard_posture": {"type": "object"},
-            "refugee_summary": {"type": "object"},
-            "incomplete_runs": {"type": "array", "items": {"type": "object"}},
-            "command_history": {"type": "array", "items": {"type": "object"}},
-            "last_outcome": {"type": ["object", "null"]},
-        },
-    },
-    "list": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb list --json",
-        "type": "object",
-        "required": ["schema_version", "count", "tweaks"],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "count": {"type": "integer", "minimum": 0},
-            "tweaks": {"type": "array", "items": {"type": "object"}},
-        },
-    },
-    "audit": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb audit --json",
-        "type": "object",
-        "required": ["schema_version", "environment", "hardening_score", "security_findings"],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "environment": {"type": "object"},
-            "hardening_score": {"type": "object"},
-            "security_findings": {"type": "array", "items": {"type": "object"}},
-            "defender_smartscreen_posture": {"type": "object"},
-            "vbs_credential_guard_posture": {"type": "object"},
-        },
-    },
-    "show": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb show --json",
-        "type": "object",
-        "required": ["schema_version", "tweak_id", "category", "title", "risk", "requires_admin"],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "tweak_id": {"type": "string"},
-            "category": {"type": "string"},
-            "title": {"type": "string"},
-            "description": {"type": "string"},
-            "risk": {"type": "string"},
-            "requires_admin": {"type": "boolean"},
-            "irreversible": {"type": "boolean"},
-            "operations": {"type": "array", "items": {"type": "object"}},
-            "used_by_profiles": {"type": "array", "items": {"type": "string"}},
-        },
-    },
-    "rollback": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb rollback --json",
-        "type": "object",
-        "required": ["schema_version", "dry_run", "reverted_runs"],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "dry_run": {"type": "boolean"},
-            "reverted_runs": {"type": "array", "items": {"type": "object"}},
-        },
-    },
-    "recover": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "wb recover --json",
-        "type": "object",
-        "required": ["schema_version", "dry_run", "reverted_runs"],
-        "properties": {
-            "schema_version": {"type": "string", "const": JSON_SCHEMA_VERSION},
-            "dry_run": {"type": "boolean"},
-            "reverted_runs": {"type": "array", "items": {"type": "object"}},
-        },
-    },
-}
+__all__ = [
+    "JSON_SCHEMAS",
+    "STATUS_COLORS",
+    "add_selection_args",
+]

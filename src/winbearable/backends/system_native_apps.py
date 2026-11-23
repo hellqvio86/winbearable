@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
 
 from ..models import OperationOutcome, OperationStatus
 from .inventory_cache import InventoryCache
@@ -13,66 +13,60 @@ from .system_native_cmd import is_user_writable_binary
 from .system_protocol import CommandResult
 
 
-class _AppBackendHost(Protocol):
-    """Narrow host protocol required by NativeAppService."""
-
-    _platform: str
-    _setup_candidates: tuple[str, ...]
-    _inventory_cache: InventoryCache
-    last_outcome: OperationOutcome | None
-
-    def _run_native_cmd(
-        self, args: list[str], input_text: str | None = None, timeout: float = 120.0
-    ) -> CommandResult: ...
-    def is_process_running(self, process_name: str) -> bool: ...
-    def is_onedrive_installed(self) -> bool: ...
-    def _resolve_winget_exe(self) -> str: ...
-    def _resolve_code_cmd(self) -> str: ...
-    def _check_is_admin(self) -> bool: ...
-
-
 class NativeAppService:
-    """Composed service providing OneDrive, Winget, and VS Code extension operations for NativeSystemBackend."""
+    """Composed service providing OneDrive, Winget, and VS Code extension operations with explicit dependencies."""
 
     _is_user_writable_binary = staticmethod(is_user_writable_binary)
 
-    def __init__(self, backend: _AppBackendHost) -> None:
-        self._backend = backend
-
-    @property
-    def _platform(self) -> str:
-        return self._backend._platform
-
-    @property
-    def _setup_candidates(self) -> tuple[str, ...]:
-        return self._backend._setup_candidates
-
-    @property
-    def _inventory_cache(self) -> InventoryCache:
-        return self._backend._inventory_cache
+    def __init__(
+        self,
+        *,
+        platform_name: str,
+        setup_candidates: tuple[str, ...],
+        inventory_cache: InventoryCache,
+        run_cmd: Callable[..., CommandResult],
+        is_process_running: Callable[[str], bool],
+        resolve_winget: Callable[[], str],
+        resolve_code: Callable[[], str],
+        is_admin: Callable[[], bool],
+        get_outcome: Callable[[], OperationOutcome | None],
+        set_outcome: Callable[[OperationOutcome | None], None],
+        is_onedrive_installed: Callable[[], bool] | None = None,
+    ) -> None:
+        self._platform = platform_name
+        self._setup_candidates = setup_candidates
+        self._inventory_cache = inventory_cache
+        self._run_cmd_fn = run_cmd
+        self._is_process_running_fn = is_process_running
+        self._resolve_winget_fn = resolve_winget
+        self._resolve_code_fn = resolve_code
+        self._is_admin_fn = is_admin
+        self._get_outcome_fn = get_outcome
+        self._set_outcome_fn = set_outcome
+        self._is_onedrive_installed_fn = is_onedrive_installed or self.is_onedrive_installed
 
     @property
     def last_outcome(self) -> OperationOutcome | None:
-        return self._backend.last_outcome
+        return self._get_outcome_fn()
 
     @last_outcome.setter
     def last_outcome(self, value: OperationOutcome | None) -> None:
-        self._backend.last_outcome = value
+        self._set_outcome_fn(value)
 
     def _run_native_cmd(self, args: list[str], input_text: str | None = None, timeout: float = 120.0) -> CommandResult:
-        return self._backend._run_native_cmd(args, input_text=input_text, timeout=timeout)
+        return self._run_cmd_fn(args, input_text=input_text, timeout=timeout)
 
     def is_process_running(self, process_name: str) -> bool:
-        return self._backend.is_process_running(process_name)
+        return self._is_process_running_fn(process_name)
 
     def _resolve_winget_exe(self) -> str:
-        return self._backend._resolve_winget_exe()
+        return self._resolve_winget_fn()
 
     def _resolve_code_cmd(self) -> str:
-        return self._backend._resolve_code_cmd()
+        return self._resolve_code_fn()
 
     def _check_is_admin(self) -> bool:
-        return self._backend._check_is_admin()
+        return self._is_admin_fn()
 
     def is_onedrive_installed(self) -> bool:
         if self._platform != "win32":
@@ -97,7 +91,7 @@ class NativeAppService:
                 res = self._run_native_cmd([candidate, "/uninstall"])
                 if res.returncode != 0:
                     return False
-                return not bool(self._backend.is_onedrive_installed())
+                return not self._is_onedrive_installed_fn()
         return False
 
     @staticmethod
@@ -116,8 +110,25 @@ class NativeAppService:
         id_pat = re.compile(rf"{prefix}{re.escape(package_id)}(?:\s{{2,}}|\s*$)", re.IGNORECASE)
         return any(id_pat.match(line) for line in lines[start_idx:])
 
+    def _guard_elevated_winget_exe(self) -> str | None:
+        winget_exe = self._resolve_winget_exe()
+        if self._check_is_admin() and self._is_user_writable_binary(winget_exe):
+            self.last_outcome = OperationOutcome(
+                status=OperationStatus.ACCESS_DENIED,
+                message=(
+                    f"Refusing to execute user-writable '{winget_exe}' while elevated; "
+                    "run package operations unelevated or install winget machine-wide."
+                ),
+                command=(winget_exe,),
+            )
+            return None
+        return winget_exe
+
     def is_winget_package_installed(self, package_id: str) -> bool:
         if self._platform != "win32":
+            return False
+        winget_exe = self._guard_elevated_winget_exe()
+        if winget_exe is None:
             return False
         cache_key = package_id.lower()
         hit, cached_installed = self._inventory_cache.get("winget_pkg", cache_key)
@@ -126,7 +137,7 @@ class NativeAppService:
         bulk_hit, bulk_out = self._inventory_cache.get("winget_bulk", "")
         if not bulk_hit:
             bulk_res = self._run_native_cmd(
-                [self._resolve_winget_exe(), "list", "--disable-interactivity", "--accept-source-agreements"],
+                [winget_exe, "list", "--disable-interactivity", "--accept-source-agreements"],
                 timeout=60.0,
             )
             if bulk_res.returncode == 0 and bulk_res.stdout.strip():
@@ -138,7 +149,7 @@ class NativeAppService:
             return installed
         res = self._run_native_cmd(
             [
-                self._resolve_winget_exe(),
+                winget_exe,
                 "list",
                 "--id",
                 package_id,
@@ -162,12 +173,15 @@ class NativeAppService:
     ) -> bool:
         if self._platform != "win32":
             return False
+        winget_exe = self._guard_elevated_winget_exe()
+        if winget_exe is None:
+            return False
         self._inventory_cache.invalidate("winget_pkg", package_id.lower())
         self._inventory_cache.invalidate("winget_bulk")
         self._inventory_cache.invalidate("vscode_ext")
         res = self._run_native_cmd(
             [
-                self._resolve_winget_exe(),
+                winget_exe,
                 "install",
                 "--id",
                 package_id,
@@ -213,12 +227,15 @@ class NativeAppService:
     def uninstall_winget_package(self, package_id: str) -> bool:
         if self._platform != "win32":
             return False
+        winget_exe = self._guard_elevated_winget_exe()
+        if winget_exe is None:
+            return False
         self._inventory_cache.invalidate("winget_pkg", package_id.lower())
         self._inventory_cache.invalidate("winget_bulk")
         self._inventory_cache.invalidate("vscode_ext")
         res = self._run_native_cmd(
             [
-                self._resolve_winget_exe(),
+                winget_exe,
                 "uninstall",
                 "--id",
                 package_id,

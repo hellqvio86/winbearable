@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import io
+import ntpath
 import os
 import shutil
 import subprocess
@@ -15,14 +16,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..const import MAX_CMD_OUTPUT_CHARS
+from ..const import ENV_CMD_TIMEOUT, MAX_CMD_OUTPUT_CHARS
 from ..log import get_logger
 from ..models import OperationOutcome, OperationStatus
 from .consts import DEFAULT_CMD_TIMEOUT, MAX_DIAGNOSTIC_CHARS
 from .system_protocol import GIB_BYTES
 from .win32_ctypes import get_win32_dll
 
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 _KNOWN_TOOL_NAMES: dict[str, str] = {
     "auditpol.exe": "auditpol.exe",
@@ -45,6 +46,41 @@ _KNOWN_TOOL_NAMES: dict[str, str] = {
     "winget.exe": "winget.exe",
     "wsl.exe": "wsl.exe",
 }
+
+
+def record_cmd_history(
+    history: list[dict[str, Any]],
+    lock: Any,
+    args: list[str],
+    returncode: int,
+    status: OperationStatus,
+    stderr: str,
+) -> None:
+    """Append a bounded command-history entry under *lock*."""
+    with lock:
+        history.append(
+            {
+                "args": list(args),
+                "returncode": returncode,
+                "status": str(status),
+                "stderr_excerpt": stderr[:300],
+            }
+        )
+        if len(history) > 50:
+            del history[:-50]
+
+
+def resolve_cmd_timeout(requested: float) -> float:
+    """Return WB_CMD_TIMEOUT override if valid positive float, else *requested*."""
+    raw = os.environ.get(ENV_CMD_TIMEOUT)
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return requested
 
 
 def _safe_tool_name(args: list[str]) -> str:
@@ -74,8 +110,19 @@ def sys32_exe(exe_name: str, windll_override: Any = None) -> str:
     return f"{sys_root}{sep}System32{sep}{exe_name}"
 
 
-def resolve_winget_exe() -> str:
-    """Resolve winget.exe from %LOCALAPPDATA%\\Microsoft\\WindowsApps first, then trusted PATH."""
+def resolve_winget_exe(*, is_elevated: bool = False) -> str:
+    """Resolve winget.exe from machine-wide paths when elevated, or %LOCALAPPDATA%\\Microsoft\\WindowsApps when user."""
+    prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+    if is_elevated:
+        machine_candidates = (
+            Path(sys_root) / "System32" / "winget.exe",
+            Path(prog) / "WindowsApps" / "winget.exe",
+        )
+        for cand in machine_candidates:
+            if cand.is_file():
+                return str(cand)
+        return str(machine_candidates[0])
     local_app = os.environ.get("LOCALAPPDATA", "")
     if local_app:
         cand = Path(local_app) / "Microsoft" / "WindowsApps" / "winget.exe"
@@ -87,10 +134,12 @@ def resolve_winget_exe() -> str:
     )
 
 
-def resolve_code_cmd() -> str:
-    """Resolve VS Code CLI (code.cmd) from trusted install directories first, then trusted PATH."""
-    local_app = os.environ.get("LOCALAPPDATA", "")
+def resolve_code_cmd(*, is_elevated: bool = False) -> str:
+    """Resolve VS Code CLI (code.cmd) from machine-wide Program Files when elevated, else user/machine dirs."""
     prog = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    if is_elevated:
+        return str(Path(prog) / "Microsoft VS Code" / "bin" / "code.cmd")
+    local_app = os.environ.get("LOCALAPPDATA", "")
     candidates = [
         Path(local_app) / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd" if local_app else None,
         Path(prog) / "Microsoft VS Code" / "bin" / "code.cmd",
@@ -163,9 +212,15 @@ def resolve_git_exe() -> str | None:
 
 def is_user_writable_binary(exe_path: str) -> bool:
     """Return True if *exe_path* (or its resolved target) resides inside a user-writable directory."""
-    candidates = [os.path.abspath(exe_path)]
-    with contextlib.suppress(OSError):
-        candidates.append(str(Path(exe_path).resolve()))
+    is_win_style = "\\" in exe_path or (len(exe_path) >= 2 and exe_path[1] == ":")
+    norm_fn = ntpath.normpath if is_win_style else os.path.abspath
+    case_fn = ntpath.normcase if is_win_style else os.path.normcase
+    sep = "\\" if is_win_style else os.sep
+
+    candidates = [norm_fn(exe_path)]
+    if sys.platform == "win32" or not is_win_style:
+        with contextlib.suppress(OSError):
+            candidates.append(str(Path(exe_path).resolve()))
     roots: list[str] = []
     for env_key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "TEMP", "TMP"):
         base = os.environ.get(env_key, "").strip()
@@ -175,9 +230,9 @@ def is_user_writable_binary(exe_path: str) -> bool:
     home_parent = Path.home().parent
     if home_parent.name.lower() == "users":
         roots.append(str(home_parent))
-    norm_roots = [os.path.normcase(os.path.abspath(r)).rstrip("\\/") + os.sep for r in roots]
+    norm_roots = [case_fn(norm_fn(r)).rstrip("\\/") + sep for r in roots]
     for cand in candidates:
-        norm = os.path.normcase(cand)
+        norm = case_fn(cand)
         if any(norm.startswith(root) for root in norm_roots):
             return True
     return False
@@ -341,7 +396,7 @@ def run_subprocess_bounded(
         else:
             stdout, stderr = proc.communicate(timeout=timeout)
         tool_label = _safe_tool_name(args)
-        _logger.debug(
+        _LOGGER.debug(
             "Subprocess completed: %s (rc=%d)",
             tool_label,
             proc.returncode,
@@ -356,7 +411,7 @@ def run_subprocess_bounded(
         return subprocess.CompletedProcess(args=args, returncode=proc.returncode, stdout=stdout, stderr=stderr)
     except subprocess.TimeoutExpired as exc:
         tool_label = _safe_tool_name(args)
-        _logger.warning(
+        _LOGGER.warning(
             "Subprocess timed out after %.1fs: %s",
             timeout,
             tool_label,

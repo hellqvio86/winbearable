@@ -2,6 +2,8 @@
 
 import io
 import json
+import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -9,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+import winbearable
+import winbearable.cli
 from winbearable.backends import InMemoryRegistryBackend, InMemorySystemBackend
 from winbearable.cli import CliDeps, main, run_cli
 from winbearable.cli.render import escape_md_cell as _escape_md_cell
@@ -69,14 +73,18 @@ def test_plan_apply_status_rollback_flow(
     assert code_md == 0
     assert "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run [OneDrive]" in stdout_md
 
-    # 2. Apply (human markdown & JSON)
-    code_dry, stdout_dry, _ = cli_runner(["apply", "--profile", "user-only"])
+    # 2. Apply (plan/dry-run flags, then default apply in JSON)
+    code_dry, stdout_dry, _ = cli_runner(["apply", "--profile", "user-only", "--dry-run"])
     assert code_dry == 0
     assert "DRY-RUN PLAN" in stdout_dry
 
+    code_plan_flag, stdout_plan_flag, _ = cli_runner(["apply", "--profile", "user-only", "--plan", "--json"])
+    assert code_plan_flag == 0
+    assert json.loads(stdout_plan_flag)["dry_run"]
+
     onedrive_registry.is_simulated = False
     system.is_simulated = False
-    code, stdout, _ = cli_runner(["apply", "--profile", "user-only", "--apply", "--json"])
+    code, stdout, _ = cli_runner(["apply", "--profile", "user-only", "--json"])
     assert code == 0
     apply_data = json.loads(stdout)
     assert not (apply_data["dry_run"])
@@ -516,3 +524,56 @@ def test_all_unsupported_profile_is_not_in_sync(
     )
     out_human = capsys.readouterr().out
     assert "IN SYNC" not in out_human
+
+
+def test_noop_apply_and_plan_omit_irreversible_warning_and_run_id_none(
+    onedrive_registry, system, cli_runner, tmp_path: Path
+) -> None:
+    """When all tweaks are already applied, `wb apply --apply` shows NO CHANGES and no irreversible warning."""
+    onedrive_registry.is_simulated = False
+    system.is_simulated = False
+    prof_path = tmp_path / "onedrive_tray.toml"
+    prof_path.write_text('name = "tray"\n[tweaks]\n"onedrive.disable_tray_autorun" = true\n', encoding="utf-8")
+
+    # First apply: executes process_stop and warns about irreversible side effect
+    code1, out1, _ = cli_runner(["apply", "--profile", str(prof_path), "--apply"])
+    assert code1 == 0
+    assert "APPLIED (run_id=" in out1
+    assert "Irreversible / best-effort side effects" in out1
+
+    # Second apply: nothing drifted -> NO CHANGES (already in sync), no run_id=None, no irreversible warning
+    code2, out2, _ = cli_runner(["apply", "--profile", str(prof_path), "--apply"])
+    assert code2 == 0
+    assert "NO CHANGES (already in sync)" in out2
+    assert "run_id=None" not in out2
+    assert "Irreversible / best-effort side effects" not in out2
+
+    # Subsequent plan: already applied -> no irreversible warning
+    code_plan, out_plan, _ = cli_runner(["plan", "--profile", str(prof_path)])
+    assert code_plan == 0
+    assert "Irreversible / best-effort side effects" not in out_plan
+
+
+def test_lazy_package_and_cli_startup_avoids_heavy_imports() -> None:
+    """`import winbearable.cli` and `wb --help` avoid loading tweaks/engine/wsl/backends, while __getattr__ works."""
+    probe = (
+        "import sys, winbearable, winbearable.cli; "
+        "from winbearable.cli.parser import build_parser; "
+        "p = build_parser(); "
+        "loaded = sorted(m for m in sys.modules if m.startswith('winbearable')); "
+        "assert 'winbearable.tweaks' not in sys.modules, loaded; "
+        "assert 'winbearable.engine' not in sys.modules, loaded; "
+        "assert 'winbearable.wsl' not in sys.modules, loaded; "
+        "assert 'winbearable.backends' not in sys.modules, loaded; "
+        "assert callable(winbearable.get_all_tweaks); "
+        "assert callable(winbearable.cli.run_cli)"
+    )
+    res = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+
+    assert "ApplySummary" in dir(winbearable)
+    assert "run_cli" in dir(winbearable.cli)
+    with pytest.raises(AttributeError):
+        _ = winbearable.nonexistent_symbol_xyz  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        _ = winbearable.cli.nonexistent_symbol_xyz  # type: ignore[attr-defined]

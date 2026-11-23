@@ -39,7 +39,7 @@ from ..models import (
     WinbearableError,
 )
 from ..profiles import ProfileValidationError, load_profile
-from ..settings import load_settings
+from ..settings import UserSettings, load_settings
 from ..state import StateStore, StateStoreError
 from ..uac import (
     UacCancelledError,
@@ -49,6 +49,7 @@ from ..uac import (
     set_console_title,
     write_uac_output_safe,
 )
+from ..update_check import UpdateChecker, format_update_warning
 from ..wsl import WslOperationError
 from .doctor import handle_doctor
 from .handlers_apply import (
@@ -166,6 +167,7 @@ def _handle_plan(
             summary,
             profile.wsl.enabled,
             managed_notice=is_managed_device(env) and not allow_managed,
+            incomplete_run_ids=[rec.run_id for rec in store.get_incomplete_runs()],
         )
         sys.stdout.write(
             format_summary_markdown(
@@ -180,7 +182,7 @@ def _handle_plan(
     return EXIT_ERROR if summary.failed_ids else EXIT_SUCCESS
 
 
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 
 def _handle_cli_exception(
@@ -188,7 +190,7 @@ def _handle_cli_exception(
 ) -> int:
     """Log structured failure details, re-raise in debug mode, or emit user-facing CLI error."""
     context = exc.to_dict() if isinstance(exc, WinbearableError) else {}
-    _logger.error(
+    _LOGGER.error(
         "CLI command failed: %s",
         exc,
         exc_info=True,
@@ -261,15 +263,20 @@ def run_cli(
 
     try:
         with out_cm, err_cm:
+            uac_settings_raw = getattr(args, "uac_settings_path", None)
             try:
-                settings = load_settings()
+                if uac_out_path is not None and uac_settings_raw is not None:
+                    settings = load_settings(path=Path(uac_settings_raw)) if uac_settings_raw else UserSettings()
+                else:
+                    settings = load_settings()
             except ProfileValidationError as exc:
                 return _handle_cli_exception(args, exc, EXIT_ERROR)
+            args._uac_resolved_settings_path = str(settings.source_path.resolve()) if settings.source_path else ""
             args.debug = bool(getattr(args, "debug", False)) or settings.debug
             if hasattr(args, "apply"):
                 if getattr(args, "dry_run_flag", False):
                     args.apply = False
-                elif settings.default_apply:
+                elif args.command == "apply" or settings.default_apply:
                     args.apply = True
             if args.command in {"status", "plan", "apply", "tui"} and getattr(args, "profile", None) is None:
                 args.profile = settings.default_profile
@@ -317,11 +324,17 @@ def _run_cli_body(
 ) -> int:
     reg_backend = registry or create_default_registry_backend()
     sys_backend = system or create_default_system_backend()
-    store = state_store or state_store_factory()
+    uac_state_raw = getattr(args, "uac_state_path", None)
+    if state_store is not None:
+        store = state_store
+    elif getattr(args, "uac_output", None) and uac_state_raw:
+        store = StateStore(Path(uac_state_raw))
+    else:
+        store = state_store_factory()
     try:
         env = sys_backend.detect_environment(reg_backend)
         dry_run = not getattr(args, "apply", False)
-        _logger.debug(
+        _LOGGER.debug(
             "Starting command %s",
             args.command,
             extra={
@@ -337,8 +350,21 @@ def _run_cli_body(
         handler = _COMMAND_HANDLERS.get(args.command)
         if handler is None:
             raise ValueError(f"Unknown command: {args.command}")
+        update_checker: UpdateChecker | None = None
+        if (
+            not getattr(args, "json", False)
+            and not getattr(args, "uac_output", None)
+            and args.command in {"status", "plan", "apply", "doctor"}
+        ):
+            update_checker = UpdateChecker(store.state_path.parent / "update_check.json")
+            update_checker.start_background_check()
         rc = handler(args, raw_argv, reg_backend, sys_backend, store, env, dry_run, deps)
-        _logger.debug(
+        if update_checker is not None:
+            latest = update_checker.get_available_update()
+            if latest is not None:
+                prefix = "⚠️  " if should_use_emoji(args) else ""
+                sys.stderr.write(f"{prefix}{format_update_warning(latest)}\n")
+        _LOGGER.debug(
             "Finished command %s with exit_code=%d",
             args.command,
             rc,

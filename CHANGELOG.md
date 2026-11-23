@@ -2,6 +2,66 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.32.1] - 2026-11-22
+
+### Security, Architecture & Release Hardening
+
+- **Elevated-Child Win32 Env Rewrite & Executable Guard (`WB-SEC-01-R`):** Added `enforce_elevated_win32_env()` in `uac/elevation.py` to rewrite `SYSTEMROOT`, `WINDIR`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, and `PATH` from Win32 `GetSystemDirectoryW`; restricted elevated `winget.exe` / `code.cmd` resolution (`resolve_winget_exe`, `resolve_code_cmd`, `_guard_elevated_winget_exe`) to refuse `%LOCALAPPDATA%` / user-writable binaries; fixed `is_user_writable_binary` to use `ntpath` for Windows paths on POSIX hosts; and disabled `UpdateChecker` in elevated UAC children.
+- **Engine & Operations Port Boundary (`WB-ARCH-01-R`):** Replaced all `SystemBackend` imports in `src/winbearable/engine/` and `src/winbearable/operations/` with narrow capability-port protocols (`EvaluationPorts`, `ApplyPorts`, `CompensationPorts`, `LastOutcomePort`) enforced by `tests/test_catalog_lint.py`.
+- **Strict Journal Parsing & Backup SHA-256 Verification (`WB-MAINT-02-R`, `WB-SEC-03-R`, `WB-ARCH-05-R`):** Made `RunRecord.from_dict()` fail closed on missing required fields (`run_id`, `timestamp`, `profile_name`, `applied_tweaks`, `state`) and non-list collections, added `backup_sha256` / `wsl_backup_sha256` verification in `validate_recovery_run_record()`, and added consistency checks before recovery.
+- **Authenticode Signing Policy Sync (`WB-REL-03-R`):** Required `Status -eq "Valid"` (and optional `WIN_SIGNING_EXPECTED_THUMBPRINT`) in `.github/workflows/ci.yml`, aligned `docs/winget-releasing.md`, and added a CI/doc consistency test.
+
+## [0.32.0] - 2026-11-22
+
+### Security & Release Assurance
+
+- **Centralized Elevated-Child Environment Policy (`WB-SEC-01`):** Added `ELEVATED_ENV_POLICY` in `const.py` classifying all read environment variables, expanded `sanitize_elevated_python_env()` to strip ambient path/profile/logging/timeout redirection variables, added parent-resolved `--uac-state-path` / `--uac-settings-path` / `--profile` handoff in `relay_elevated_uac()`, and exposed non-secret `elevated_env_policy` in `wb doctor --json`.
+- **Fail-Closed Elevation Target Trust & Identity Verification (`WB-SEC-02`):** `run_elevated_wb()` now fails closed on user-writable targets unless `--allow-user-writable-elevation-target` is explicitly passed, resolves system-protected roots via Win32 `GetSystemDirectoryW` (`resolve_trusted_system_roots`), and revalidates target file identity immediately prior to `ShellExecuteExW`.
+- **CI, README & Verification Matrix Alignment (`WB-REL-01`):** Fixed stale `src/tests/` reference in `README.md`, aligned Linux (`test` across `3.15`/`3.15t`) vs. Windows (`windows-contracts` on `3.15`) CI documentation across `README.md` and `docs/verify-matrix.md`, and added `test_ci_and_docs_verification_claims_consistent`.
+
+## [0.31.3] - 2026-11-22
+
+### Documentation & Style
+
+- **Expanded Architecture Documentation (`docs/architecture.md`):** Added a comprehensive architecture guide covering the 7-layer acyclic dependency DAG (with Mermaid diagram), capability ports and operation adapters, write-ahead transaction journal and recovery phases, security boundaries, lazy CLI startup, and module size governance.
+- **README & TODO Refresh (`README.md`, `TODO.md`):** Updated `README.md` CLI examples to reflect default-apply `wb apply`, linked all `docs/` guides (including `docs/architecture.md`, `docs/threat-model.md`, `docs/schema-versioning.md`, `docs/verify-matrix.md`, `docs/uac-security-review.md`, `docs/dependency-management.md`, and `docs/winget-releasing.md`), updated attestation version examples, and finalized `TODO.md` for `v0.31.3`.
+- **PEP 8 Logger Naming (`_LOGGER`):** Standardized module-level `_logger` singletons to `UPPER_SNAKE_CASE` (`_LOGGER`) across `src/winbearable/` and documented the convention in `AGENTS.md`.
+
+## [0.31.2] - 2026-11-21
+
+### Performance
+
+- **Lazy CLI & Package Startup (`__getattr__` + `cli/schemas.py`):** Deferred heavy submodule imports (`tweaks`, `engine`, `backends`, `wsl`, `uac`, `handlers`) in `winbearable.__init__` and `winbearable.cli.__init__` using PEP 562 `__getattr__` and lightweight `cli/schemas.py`. Running `wb --help`, `wb --version`, or importing `winbearable.cli` now loads 6 lightweight modules (~0.05s) instead of the full 120-module package graph.
+- **Fixed `-File` Hyper-V Script with SHA-256 Integrity Check:** Migrated `hyperv_firewall.py` from inline `-Command` strings to a parameterized `scripts/hyperv_firewall.ps1` invoked via `-File` with pinned SHA-256 verification.
+- **Verification Matrix CI Enforcement:** Added `test_non_registry_identifiers_in_verify_matrix` in `tests/test_catalog_lint.py` and updated `docs/verify-matrix.md` to cover all non-registry catalog tweaks.
+
+## [0.31.1] - 2026-11-21
+
+### Bug Fixes
+
+- **Skip Internal Docker Desktop WSL Distros:** Exclude `docker-desktop` and `docker-desktop-data` from `/etc/wsl.conf` planning, applying, and deep WSL audits so `wb` never overwrites Docker Desktop's internal WSL configuration (`systemd=true` / `Devices cgroup` conflict).
+
+## [0.31.0] - 2026-11-21
+
+### Breaking / Behavior Changes
+
+- **`wb apply` Applies by Default (`--plan` / `--dry-run` for Preview):** `wb apply` now applies changes by default without requiring `--apply` (`--apply` remains accepted for backwards compatibility). Pass `--plan` or `--dry-run` to preview changes without mutating the system. `wb rollback`, `wb recover`, `wb migrate`, and `wb wsl` remain dry-run by default.
+
+## [0.30.3] - 2026-11-21
+
+### Bug Fixes
+
+- **No-Op Apply Header & Irreversible Warning:** Display `NO CHANGES (already in sync)` instead of `APPLIED (run_id=None)` when `wb apply --apply` makes no changes, and only emit `Irreversible / best-effort side effects` warnings for tweaks that are actually `DRIFTED` or applied in the current run.
+- **Managed Device Notice Parity:** Include the managed-device notice in `wb apply` summaries just like `wb plan`.
+- **Non-Blocking Release Update Warning:** Added a 24h-cached, non-blocking PyPI release check (`src/winbearable/update_check.py`, opt-out via `WINBEARABLE_NO_UPDATE_CHECK=1`) that warns on stderr when a newer `winbearable` version is available.
+
+## [0.30.2] - 2026-11-21
+
+### Bug Fixes
+
+- **Idempotent Registry Compensation on Unmutated Targets:** Skip `restore_snapshot` / `restore_key_snapshot` during failure rollback and `wb recover` when `post_existed` is `None` and the registry target already matches its pre-apply state, preventing `Access is denied` errors on protected policy keys from wedging transactions in `FAILED`.
+- **Dry-Run Incomplete Transaction Warning:** Surface a trailing warning in `wb plan` and dry-run `wb apply` when incomplete transactions exist in `state.json` that would block `--apply`.
+
 ## [0.26.0] - 2026-11-20
 
 ### CLI Output, Sync Status & JSON Automation

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import ntpath
 import os
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 from ..const import ERROR_CANCELLED as ERROR_CANCELLED
@@ -117,13 +120,46 @@ def last_win32_error(kernel32: Any) -> int:
 
 def resolve_trusted_system32(kernel32: Any) -> str:
     """Resolve System32 using Win32 GetSystemDirectoryW with environment fallback."""
-    if hasattr(kernel32, "GetSystemDirectoryW"):
+    if kernel32 is not None and hasattr(kernel32, "GetSystemDirectoryW"):
         buf = ctypes.create_unicode_buffer(260)
         length = int(kernel32.GetSystemDirectoryW(buf, len(buf)))
         if 0 < length < len(buf) and buf.value:
             return buf.value
     sys_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
     return f"{sys_root.rstrip('/\\')}\\System32"
+
+
+def resolve_trusted_system_roots(
+    kernel32: Any = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return normalized Windows system-protected root prefixes, preferring Win32 GetSystemDirectoryW."""
+    roots: list[str] = []
+    k32 = kernel32
+    if k32 is None and sys.platform == "win32" and env is None:
+        with contextlib.suppress(UacElevationError):
+            _, k32 = get_win32_dlls(None)
+    if k32 is not None and hasattr(k32, "GetSystemDirectoryW"):
+        sys32 = resolve_trusted_system32(k32)
+        sys_root = ntpath.dirname(ntpath.normpath(sys32))
+        drive, _ = ntpath.splitdrive(sys_root)
+        roots.append(sys_root)
+        if drive:
+            roots.extend((f"{drive}\\Program Files", f"{drive}\\Program Files (x86)"))
+    env_map = env if env is not None else os.environ
+    for key in ("ProgramFiles", "ProgramFiles(x86)", "SystemRoot", "WINDIR"):
+        raw = env_map.get(key)
+        if raw and not (roots and key in {"SystemRoot", "WINDIR"}):
+            roots.append(raw)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for root in roots:
+        norm = ntpath.normcase(ntpath.normpath(root))
+        if norm and norm not in seen:
+            seen.add(norm)
+            unique.append(norm)
+    return tuple(unique)
 
 
 def get_console_title(windll_override: Any = None) -> str | None:

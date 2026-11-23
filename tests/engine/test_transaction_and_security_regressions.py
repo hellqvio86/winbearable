@@ -17,10 +17,16 @@ from winbearable.cli.parser import absolutize_elevated_argv, build_parser
 from winbearable.cli.render import JSON_SCHEMAS
 from winbearable.const import EXIT_BLOCKED, HIVE_HKCU, REG_DWORD, STATE_SCHEMA_VERSION
 from winbearable.engine import compensate_run_record, evaluate_profile
-from winbearable.engine.compensation import compute_dry_run_fingerprints, compute_snapshot_fingerprints
+from winbearable.engine.compensation import (
+    compensate_run_record_issues,
+    compute_dry_run_fingerprints,
+    compute_snapshot_fingerprints,
+    validate_recovery_run_record,
+)
 from winbearable.models import (
     AuditpolSnapshot,
     EnvironmentInfo,
+    FileSnapshot,
     FirewallGroupSnapshot,
     FsutilSnapshot,
     GitConfigSnapshot,
@@ -366,3 +372,118 @@ def test_uac_output_dir_inherits_temp_acl_and_cleans_up() -> None:
 
     with pytest.raises(UacElevationError, match="reparse"), _uac_output_dir(reparse_check=lambda _p: True):
         pass
+
+
+def test_recovery_rejects_crafted_paths_reparse_oversized_and_unknown_enums(tmp_path: Path) -> None:
+    """Crafted RunRecord/journal payloads fail closed before any native restore command runs."""
+    reg = InMemoryRegistryBackend()
+    sys_b = InMemorySystemBackend(is_windows=True, is_admin=True)
+
+    # 1. Unknown operation_type / outcome in OperationJournalEntry raises ValueError
+    with pytest.raises(ValueError, match="Unknown operation_type"):
+        RunRecord.from_dict(
+            {
+                "run_id": "bad1",
+                "timestamp": "2026-11-22T00:00:00Z",
+                "profile_name": "p",
+                "state": "committed",
+                "applied_tweaks": [],
+                "operation_journal": [
+                    {"target_id": "x", "operation_type": "evil_cmd", "tweak_id": "t", "action": "set"}
+                ],
+            }
+        )
+    with pytest.raises(ValueError, match="Unknown outcome"):
+        RunRecord.from_dict(
+            {
+                "run_id": "bad2",
+                "timestamp": "2026-11-22T00:00:00Z",
+                "profile_name": "p",
+                "state": "committed",
+                "applied_tweaks": [],
+                "operation_journal": [
+                    {
+                        "target_id": "x",
+                        "operation_type": "registry",
+                        "tweak_id": "t",
+                        "action": "set",
+                        "outcome": "bogus",
+                    }
+                ],
+            }
+        )
+
+    # 2. Outside-root FileSnapshot fails closed before any mutation/command runs
+    crafted_file_run = RunRecord(
+        run_id="bad_file",
+        timestamp="2026-11-22T00:00:00Z",
+        profile_name="p",
+        applied_tweaks=(),
+        file_snapshots=(
+            FileSnapshot(
+                path=r"C:\Windows\System32\drivers\etc\hosts",
+                existed=True,
+                previous_content="",
+                sha256="0" * 64,
+                post_sha256="1" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(PermissionDeniedError):
+        compensate_run_record_issues(crafted_file_run, reg, sys_b)
+    assert sys_b.command_history == []
+
+    # 3. Reparse-point or outside-backup-root backup file fails closed
+    evil_bak = tmp_path / "evil.csv"
+    evil_bak.write_text("x", encoding="utf-8")
+    crafted_audit_run = RunRecord(
+        run_id="bad_bak",
+        timestamp="2026-11-22T00:00:00Z",
+        profile_name="p",
+        applied_tweaks=(),
+        auditpol_snapshots=(
+            AuditpolSnapshot(subcategory_guid="{000}", previous_setting=None, backup_csv_path=str(evil_bak)),
+        ),
+    )
+    with pytest.raises(PermissionDeniedError, match="reparse-point"):
+        validate_recovery_run_record(crafted_audit_run, reparse_check=lambda _p: True)
+
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    with pytest.raises(PermissionDeniedError, match="outside backup root"):
+        validate_recovery_run_record(crafted_audit_run, backup_root=backup_root, reparse_check=lambda _p: False)
+
+    # 4. Backup SHA-256 mismatch and missing/wrong-type RunRecord fields fail closed
+    bak_in_root = backup_root / "audit.csv"
+    bak_in_root.write_text("clean", encoding="utf-8")
+    tampered_audit_run = RunRecord(
+        run_id="bad_sha",
+        timestamp="2026-11-22T00:00:00Z",
+        profile_name="p",
+        applied_tweaks=(),
+        auditpol_snapshots=(
+            AuditpolSnapshot(
+                subcategory_guid="{000}",
+                previous_setting=None,
+                backup_csv_path=str(bak_in_root),
+                backup_sha256="a" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(PermissionDeniedError, match="SHA-256 mismatch"):
+        compensate_run_record_issues(tampered_audit_run, reg, sys_b)
+    assert sys_b.command_history == []
+
+    with pytest.raises(ValueError, match="missing required field: 'state'"):
+        RunRecord.from_dict({"run_id": "r", "timestamp": "t", "profile_name": "p", "applied_tweaks": []})
+    with pytest.raises(ValueError, match="'registry_snapshots' must be a list"):
+        RunRecord.from_dict(
+            {
+                "run_id": "r",
+                "timestamp": "t",
+                "profile_name": "p",
+                "applied_tweaks": [],
+                "state": "committed",
+                "registry_snapshots": "not-a-list",
+            }
+        )

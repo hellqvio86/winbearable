@@ -7,8 +7,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import ApplyPorts, EvaluationPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..models import (
     OperationJournalEntry,
     ProfileSpec,
@@ -18,6 +18,7 @@ from ..models import (
     TweakCheckResult,
     WslDistroSnapshot,
 )
+from ..models.journal import FailureOutcomeDict
 from ..operations import identity
 from ..state import StateStore
 from ..tweaks import get_tweak
@@ -78,7 +79,7 @@ class ApplyContext:
                 return
         self.journal_entries.append(entry)
 
-    def populate_post_apply_states(self, registry: RegistryBackend, system: SystemBackend | None = None) -> None:
+    def populate_post_apply_states(self, registry: RegistryBackend, system: EvaluationPorts | None = None) -> None:
         """Record post-apply live states onto pre-apply snapshots across all snapshot types."""
         if self.snaps is None:
             return
@@ -155,7 +156,7 @@ class ApplyContext:
     def compensate_and_record_failure(
         self,
         registry: RegistryBackend,
-        system: SystemBackend,
+        system: ApplyPorts,
         state_store: StateStore,
         error_msg: str,
         *,
@@ -194,7 +195,7 @@ class ApplyContext:
         state: TransactionState,
         registry: RegistryBackend,
         error: str | None = None,
-        system: SystemBackend | None = None,
+        system: EvaluationPorts | None = None,
     ) -> RunRecord:
         """Build a RunRecord snapshot for the current transaction state."""
         if state == TransactionState.COMMITTED:
@@ -225,7 +226,16 @@ class ApplyContext:
             installed_winget_packages=tuple(self.newly_installed_winget),
             installed_vscode_extensions=tuple(self.newly_installed_extensions),
             completed_operations=tuple(self.completed_ops),
-            failure_outcomes=tuple(self.failure_outcomes),
+            failure_outcomes=tuple(
+                FailureOutcomeDict(
+                    tweak_id=str(item.get("tweak_id", "")),
+                    status=str(item.get("status", "unknown")),
+                    message=str(item.get("message", "")),
+                    returncode=item.get("returncode") if isinstance(item.get("returncode"), int) else None,
+                    command=[str(c) for c in item["command"]] if isinstance(item.get("command"), list) else [],
+                )
+                for item in self.failure_outcomes
+            ),
             operation_journal=tuple(self.journal_entries),
             precondition_fingerprints=self.live_fingerprints,
             wsl_backup_path=self.wsl_backup_path,

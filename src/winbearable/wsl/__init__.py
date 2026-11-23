@@ -27,6 +27,11 @@ from winbearable.wsl.config import (
     prepare_wsl_plan,
     probe_distro_wsl_conf,
 )
+from winbearable.wsl.consts import (
+    INTERNAL_WSL_DISTROS,
+    filter_manageable_wsl_distros,
+    is_internal_wsl_distro,
+)
 from winbearable.wsl.ini import (
     KEY_VALUE_RE,
     SECTION_HEADER_RE,
@@ -57,6 +62,7 @@ from winbearable.wsl.lifecycle import (
 )
 
 __all__ = [
+    "INTERNAL_WSL_DISTROS",
     "KEY_VALUE_RE",
     "SECTION_HEADER_RE",
     "WSL_LINUX_SYSCTL_CONF",
@@ -84,11 +90,13 @@ __all__ = [
     "detect_wsl_package_manager",
     "detect_wsl_policies",
     "export_wsl_distro",
+    "filter_manageable_wsl_distros",
     "format_host_memory_gib",
     "get_default_wslconfig_path",
     "get_wsl_distro_guid",
     "import_wsl_distro",
     "install_wsl_distro",
+    "is_internal_wsl_distro",
     "is_wsl_version_outdated",
     "lint_wsl_conf_lf",
     "merge_ini_preserving_comments",

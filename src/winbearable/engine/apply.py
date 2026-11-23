@@ -7,8 +7,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from ..backends.ports import ApplyPorts
 from ..backends.registry import RegistryBackend
-from ..backends.system import SystemBackend
 from ..log import get_logger
 from ..models import (
     EnvironmentInfo,
@@ -40,14 +40,14 @@ from .params import (
 from .phases import FinalizeJournalPhase, MutateTweaksPhase, MutateWslPhase, PlanPhase
 
 _APPLY_KIND_ORDER = APPLY_KIND_ORDER
-_logger = get_logger(__name__)
+_LOGGER = get_logger(__name__)
 
 
 def execute_tweak_mutations(
     tweak: TweakDefinition,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     backup_dir: Path,
     exported_subtrees: set[tuple[str, str, RegistryView]],
     newly_installed_winget: list[str],
@@ -91,7 +91,7 @@ def execute_tweak_mutations(
                 OperationOutcome(status=exc.status, message=str(exc), returncode=rc, command=cmd)
             ) from exc
         except Exception as exc:
-            _logger.error(
+            _LOGGER.error(
                 "Tweak mutation failed for %s: %s",
                 tweak.tweak_id,
                 exc,
@@ -114,7 +114,7 @@ def execute_tweak_mutations(
                     f"Post-apply verification failed for '{tweak.tweak_id}' ({adapter.kind}): "
                     f"{post_check.status} ({post_check.detail})"
                 )
-                _logger.error(
+                _LOGGER.error(
                     msg,
                     extra={
                         "event": "tweak.post_apply_verification_failed",
@@ -142,7 +142,7 @@ def apply_profile(
     profile: ProfileSpec,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     state_store: StateStore,
     dry_run: bool = True,
     allow_high_risk: bool = False,
@@ -214,7 +214,7 @@ def run_profile_command(
     profile: ProfileSpec,
     env: EnvironmentInfo,
     registry: RegistryBackend,
-    system: SystemBackend,
+    system: ApplyPorts,
     state_store: StateStore,
     dry_run: bool = True,
     allow_high_risk: bool = False,

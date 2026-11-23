@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from ..models import (
@@ -23,23 +24,45 @@ from ..models import (
 )
 
 
+class ReversibilityKind(StrEnum):
+    """Explicit reversibility classification for every operation kind (no permissive default)."""
+
+    REVERSIBLE = "reversible"
+    BEST_EFFORT = "best_effort"
+    IRREVERSIBLE = "irreversible"
+    NON_MUTATING = "non_mutating"
+
+
 @dataclass(frozen=True)
 class OperationKindSpec:
     """Declarative metadata binding an operation kind to its snapshot type, RunRecord field, and ordering."""
 
     kind: str
+    reversibility: ReversibilityKind
+    compensation_policy: str
     snapshot_type: type[Any] | None = None
     pre_apply_field: str | None = None
     run_record_field: str | None = None
     apply_order: int | None = None
     compensate_order: int | None = None
-    reversible: bool = True
+
+    @property
+    def reversible(self) -> bool:
+        """Return True only when this operation kind is fully reversible."""
+        return self.reversibility == ReversibilityKind.REVERSIBLE
 
 
 OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
-    OperationKindSpec(kind="process_stop", apply_order=10),
+    OperationKindSpec(
+        kind="process_stop",
+        reversibility=ReversibilityKind.BEST_EFFORT,
+        compensation_policy="none_best_effort",
+        apply_order=10,
+    ),
     OperationKindSpec(
         kind="registry",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=RegistryValueSnapshot,
         pre_apply_field="registry",
         run_record_field="registry_snapshots",
@@ -48,6 +71,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="registry",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=RegistryKeySnapshot,
         pre_apply_field="registry_keys",
         run_record_field="registry_key_snapshots",
@@ -55,6 +80,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="service",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=ServiceSnapshot,
         pre_apply_field="services",
         run_record_field="service_snapshots",
@@ -63,6 +90,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="scheduled_task",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=ScheduledTaskSnapshot,
         pre_apply_field="tasks",
         run_record_field="task_snapshots",
@@ -71,15 +100,24 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="optional_feature",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=OptionalFeatureSnapshot,
         pre_apply_field="features",
         run_record_field="feature_snapshots",
         apply_order=50,
         compensate_order=100,
     ),
-    OperationKindSpec(kind="winget_package", apply_order=60),
+    OperationKindSpec(
+        kind="winget_package",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="uninstall_newly_installed",
+        apply_order=60,
+    ),
     OperationKindSpec(
         kind="auditpol",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=AuditpolSnapshot,
         pre_apply_field="auditpol",
         run_record_field="auditpol_snapshots",
@@ -88,6 +126,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="wevtutil",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=WevtutilSnapshot,
         pre_apply_field="wevtutil",
         run_record_field="wevtutil_snapshots",
@@ -96,6 +136,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="firewall_group",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=FirewallGroupSnapshot,
         pre_apply_field="firewall_groups",
         run_record_field="firewall_group_snapshots",
@@ -104,6 +146,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="fsutil_case_sensitive",
+        reversibility=ReversibilityKind.BEST_EFFORT,
+        compensation_policy="snapshot_restore_best_effort",
         snapshot_type=FsutilSnapshot,
         pre_apply_field="fsutil",
         run_record_field="fsutil_snapshots",
@@ -112,6 +156,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="powercfg_hibernate",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=PowercfgSnapshot,
         pre_apply_field="powercfg",
         run_record_field="powercfg_snapshots",
@@ -120,6 +166,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="git_config",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=GitConfigSnapshot,
         pre_apply_field="git_config",
         run_record_field="git_config_snapshots",
@@ -128,6 +176,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="icacls_acl",
+        reversibility=ReversibilityKind.BEST_EFFORT,
+        compensation_policy="snapshot_restore_best_effort",
         snapshot_type=IcaclsSnapshot,
         pre_apply_field="icacls",
         run_record_field="icacls_snapshots",
@@ -136,6 +186,8 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="file_config",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=FileSnapshot,
         pre_apply_field="files",
         run_record_field="file_snapshots",
@@ -144,12 +196,19 @@ OPERATION_KIND_SPECS: tuple[OperationKindSpec, ...] = (
     ),
     OperationKindSpec(
         kind="hyperv_firewall",
+        reversibility=ReversibilityKind.REVERSIBLE,
+        compensation_policy="snapshot_restore",
         snapshot_type=HypervFirewallSnapshot,
         pre_apply_field="hyperv_firewall",
         run_record_field="hyperv_firewall_snapshots",
         compensate_order=10,
     ),
-    OperationKindSpec(kind="onedrive_uninstall", apply_order=150),
+    OperationKindSpec(
+        kind="onedrive_uninstall",
+        reversibility=ReversibilityKind.IRREVERSIBLE,
+        compensation_policy="none_irreversible",
+        apply_order=150,
+    ),
 )
 
 APPLY_KIND_ORDER: tuple[str, ...] = tuple(
@@ -178,7 +237,7 @@ def validate_operation_registry(
     specs: tuple[OperationKindSpec, ...] = OPERATION_KIND_SPECS,
     adapter_kinds: set[str] | None = None,
 ) -> None:
-    """Validate that *specs* has no duplicate snapshot ownership, missing compensation metadata, or duplicate orders."""
+    """Validate snapshot ownership, explicit reversibility, compensation policy, and ordering."""
     seen_snapshots: set[type[Any]] = set()
     seen_apply_orders: set[int] = set()
     seen_comp_orders: set[int] = set()
@@ -187,6 +246,12 @@ def validate_operation_registry(
     for spec in specs:
         if not spec.kind:
             raise ValueError("OperationKindSpec.kind must be non-empty.")
+        if not isinstance(spec.reversibility, ReversibilityKind):
+            raise ValueError(f"OperationKindSpec {spec.kind} must declare a ReversibilityKind.")
+        if not spec.compensation_policy.strip():
+            raise ValueError(f"OperationKindSpec {spec.kind} must declare a non-empty compensation_policy.")
+        if spec.reversibility == ReversibilityKind.IRREVERSIBLE and spec.compensate_order is not None:
+            raise ValueError(f"Irreversible operation {spec.kind} cannot declare a compensate_order.")
         registered_kinds.add(spec.kind)
         if spec.snapshot_type is not None:
             if spec.snapshot_type in seen_snapshots:

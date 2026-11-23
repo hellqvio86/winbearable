@@ -26,6 +26,7 @@
 >
 > We don't like Windows either. That's why `winbearable` (`wb`) is shamelessly opinionated:
 > - **Only the Windows 11 We Are On (`26H2+`, Build `>= 26300` — NO IoT, NO LTSC):** We only support the current Windows 11 desktop installation we run on (`Build >= 26300`). We do **not** support Windows IoT (`IoTEnterprise` / `IoTEnterpriseS`), Windows LTSC (`EnterpriseS`), Windows Server, Windows 10, or older Windows 11 builds (`< 26300`). Maintaining one version of Windows is painful enough.
+> - **Python `>= 3.15` Only (Free-Threaded `3.15t` / No-GIL Ready):** `winbearable` requires **Python `3.15+`** (`requires-python = ">=3.15"`) and is tested on both standard `3.15` and free-threaded **`3.15t` (no-GIL)** builds with thread-local outcome isolation and lock-guarded caches/state.
 > - **Native Python (Zero PowerShell for Core Tweaks):** Core tweaks and audits use Python's standard library (`winreg`, `ctypes`, `tomllib`) and direct Win32 binaries (`wsl.exe`, `winget.exe`, `sc.exe`, `taskkill.exe`) with `shell=False`, so they work even when corporate AppLocker/WDAC locks PowerShell into Constrained Language Mode. The sole optional exception is `wb wsl firewall`, which uses `NetSecurity` PowerShell cmdlets and gracefully reports unavailable under CLM.
 > - **Kills the Annoying OneDrive Tray Icon:** Terminates `OneDrive.exe`, deletes the `HKCU\...\Run\OneDrive` autorun key so it stops haunting your system tray, unpins OneDrive from File Explorer, blocks it via machine policy when admin, and can uninstall it outright.
 > - **Installs VS Code + Remote-WSL on the Windows Side:** Automatically installs `Microsoft.VisualStudioCode` (in user scope, no admin needed) plus the `ms-vscode-remote.remote-wsl` extension so typing `code .` in your WSL `bash` shell just works.
@@ -118,37 +119,9 @@ wb --version
 
 ## 🎨 CLI in Action
 
-```ansi
-$ wb doctor
-\u001b[1;36mwinbearable v0.27.0 — Doctor Report\u001b[0m
-OS: Windows (Build 26300, Display: 26H2, Edition: Professional)
-Admin: False | Domain: absent (medium) | Entra: disabled (high) | MDM: enabled (medium)
-Defender: enabled (high) | Secure Boot: enabled (medium) | BitLocker: enabled (low)
-WSL Installed: True (Version: 3.0.5.0, Distros: Ubuntu, docker-desktop, AlmaLinux-10)
-Security Posture: 4/48 (8.3%, confidence=partial)
-Comfort & Privacy Preferences: Privacy 2/24 | Usability 7/40 | Developer 5/11
-Defender PUA: enabled (confidence=partial, source=local) | SmartScreen: unset (confidence=unknown, managed_by_wb=False)
-VBS/HVCI/Credential Guard: vbs=enabled | hvci=enabled | credential_guard=unset (opt-in only)
-Linux Refugee Summary: build_supported=True | enterprise_leftovers=True | policy_blocked=4 | mirrored=True | hyperv_fw_avail=True
-```
+![wb doctor output](docs/assets/wb-doctor.png)
 
-```ansi
-$ wb plan --profile user-only
-\u001b[1;36m# 🔍 winbearable — DRY-RUN PLAN (no changes written)\u001b[0m
-Profile: `user-only`
-Plan Digest: `1fa85b10f2f4bb1d`
-
-| Status | Tweak ID | Risk | Admin | Consequences | Operations & Transitions |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `\u001b[32mapplied\u001b[0m` | `apps.install_vscode` | `\u001b[32mlow\u001b[0m` | no | reversible | [winget_package] Microsoft.VisualStudioCode (scope=user): installed -> installed |
-| `\u001b[33mdrifted\u001b[0m` | `search.disable_bing` | `\u001b[32mlow\u001b[0m` | no | reversible | [registry] HKCU\...\Explorer [DisableSearchBoxSuggestions]: <absent> -> 1 |
-| `\u001b[33mdrifted\u001b[0m` | `explorer.classic_context_menu` | `\u001b[32mlow\u001b[0m` | no | reversible, EXPLORER RESTART | [registry] HKCU\...\InprocServer32 [(Default)]: <absent> -> '' |
-| `\u001b[33mdrifted\u001b[0m` | `hardening.disable_wsh_user` | `\u001b[33mmedium\u001b[0m` | no | reversible | [registry] HKCU\...\Windows Script Host\Settings [Enabled]: <absent> -> 0 |
-
-Summary: 13 to apply / applied, 4 already applied, 13 drifted, 0 failed, 0 skipped (needs admin), 0 blocked by policy
-💡 Run with `--apply` to execute these changes (registry backups and rollback state will be recorded).
-\u001b[1;33m⚠️ Sync Status: OUT OF SYNC (13 drifted)\u001b[0m
-```
+![wb plan --profile user-only output](docs/assets/wb-plan.png)
 
 ---
 
@@ -185,14 +158,14 @@ Preview every exact registry key, value, and `winget` package `wb` will touch (d
 
 ```cmd
 wb plan --profile user-only
-wb apply --profile user-only --apply
+wb apply --profile user-only
 ```
 
 If you have Administrator rights on the machine (personal PC or unlocked local admin on an ex-work PC), open **`cmd` as Administrator** (`Ctrl + Shift + Enter`) and apply the `owner` profile instead:
 
 ```cmd
 wb plan --profile owner
-wb apply --profile owner --apply
+wb apply --profile owner
 ```
 
 ### Step 3: Give WSL2 75% of Host RAM & Drop Into Your `bash` Shell
@@ -321,7 +294,7 @@ wb recover --apply      # Idempotently compensate and mark ROLLED_BACK
 - **VBS, HVCI & Credential Guard (WSL2 trade-offs):** `hardening.enable_vbs_hvci` is `RiskLevel.HIGH` (requires `--i-know-what-im-doing` and a reboot, included only in `paranoid`), while Credential Guard is **observe-only** in `wb doctor`. Because VBS/HVCI/Credential Guard share the Hyper-V hypervisor with WSL2, enabling them isolates kernel/LSA memory at the cost of extra CPU, memory, and I/O overhead on constrained or nested-virtualization hosts.
 - **Name-resolution hardening & corporate VPNs:** `owner` and `paranoid` disable LLMNR, mDNS, WPAD, and NetBIOS broadcast resolution (`NodeType=2`). If you connect to a split-tunnel corporate VPN, legacy NAS/SMB appliance, or corporate PAC proxy that relies on WPAD or NetBIOS/LLMNR/mDNS fallback, override those tweaks to `false` in a custom TOML profile and run `wb rollback --apply`.
 - **Subprocess timeouts:** Set `WB_CMD_TIMEOUT=<seconds>` to override the default command timeout for slow `winget`/`dism`/`wsl` operations.
-- **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest src/tests/test_windows_integration.py` on the maintainer's Windows installation.
+- **Maintainer Windows validation checklist:** Before tagging a release, run `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1 pytest tests/test_windows_integration.py` on the maintainer's Windows installation.
 
 ### Stable CLI Exit Codes
 
@@ -351,7 +324,7 @@ To preview and apply the **most aggressive (`paranoid`)** profile (from an eleva
 
 ```cmd
 wb plan --profile paranoid
-wb apply --profile paranoid --apply --elevate --i-know-what-im-doing --allow-irreversible
+wb apply --profile paranoid --elevate --i-know-what-im-doing --allow-irreversible
 ```
 
 ### Running Audits & Status Checks from WSL2
@@ -401,7 +374,8 @@ Precedence (highest to lowest): **CLI flag** → **environment variable** → **
 | `--log-format {json,text}` | `WINBEARABLE_LOG_FORMAT` | `stderr` log format (default: `json`). |
 | `--log-file PATH` | `WINBEARABLE_LOG_PATH` | Append rotating JSONL logs to a file. |
 | `--no-color` / `--no-emoji` | `NO_COLOR` / `NO_EMOJI` | Disable ANSI colors or emoji output. |
-| `--apply` | — | Mutate the system (all commands are dry-run without `--apply`). |
+| `--apply` | — | Mutate the system (default for `wb apply`; required for `rollback`/`recover`/`wsl`/`migrate`). |
+| `--plan` / `--dry-run` | — | Preview changes without modifying the system. |
 | `--allow-managed` | — | Allow machine-scope tweaks on domain/Entra/MDM-managed devices. |
 | `--elevate` | — | Trigger a UAC prompt if not already running as Administrator. |
 | `--json` | — | Emit machine-readable JSON output. |
@@ -410,15 +384,18 @@ See [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md) fo
 
 ---
 
-## Windows Build & Edition Support Policy
+## Windows & Python Support Policy
 
-We don't like Windows enough to maintain legacy workarounds or embedded/IoT quirks. **Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) is supported. Windows IoT and LTSC are strictly unsupported.**
+We don't like Windows enough to maintain legacy workarounds or embedded/IoT quirks. **Only the maintainer's current Windows 11 desktop installation (`26H2+`, Build `>= 26300`) and Python `>= 3.15` (including free-threaded `3.15t` without the GIL) are supported. Windows IoT, LTSC, and Python `< 3.15` are strictly unsupported.**
 
-| Build / Edition | OS Release | Support Status |
+| Target | Version / Edition | Support Status |
 | :--- | :--- | :--- |
-| `26300+` (`Professional` / standard desktop) | Windows 11 `26H2+` (maintainer build) | **Supported** |
-| `IoTEnterprise`, `IoTEnterpriseS`, `EnterpriseS` (IoT / LTSC) | Windows IoT / LTSC (any build) | **Unsupported (`unsupported_edition` — NO IoT/LTSC)** |
-| `< 26300` | Older Windows 11 / Windows 10 | **Unsupported (`unsupported_build`)** |
+| **Windows 11 (Tested)** | Build `26300` (`Professional`) | **Tested & Supported** (`DEFAULT_TESTED_BUILDS`) |
+| **Windows 11 (Supported Range)** | Build `>= 26300` (`Home`/`Pro`/`Enterprise`/`Education`) | **Supported** (`MIN_SUPPORTED_BUILD`) |
+| **Windows IoT / LTSC** | `IoTEnterprise`, `IoTEnterpriseS`, `EnterpriseS` | **Unsupported (`unsupported_edition` — NO IoT/LTSC)** |
+| **Older Windows** | `< 26300` (Older Windows 11 / Windows 10) | **Unsupported (`unsupported_build`)** |
+| **Python** | `>= 3.15` (standard `3.15` & free-threaded `3.15t` no-GIL) | **Supported** |
+| **Older Python** | `< 3.15` (3.14 and earlier) | **Unsupported** |
 
 ---
 
@@ -432,14 +409,18 @@ We don't like Windows enough to maintain legacy workarounds or embedded/IoT quir
 
 ---
 
-## Development, Dev Container & Pre-Commit Gate (`uv`)
+## Development, CI & Pre-Commit Gate (`uv`)
 
-We do **not** run `pytest` on native Windows Python or pay Microsoft for `windows-latest` CI runners. All development and test execution (including when developing on a Windows host via WSL2/Docker) runs inside the free, open-source Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or Linux host, and every commit MUST pass the local `.githooks/pre-commit` gate before committing:
+CI runs two complementary test lanes in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+- **Linux (`test` on `ubuntu-latest`):** Full `pytest` suite (including `tests/test_property_invariants.py`) across Python `3.15` and free-threaded `3.15t`, plus `lint` (`ruff` + `mypy`) and `mutation-gate`.
+- **Windows (`windows-contracts` on `windows-latest`, Python `3.15`):** Selected contract, unit, property, and read-only Windows integration subset (`tests/contracts`, `tests/test_windows_integration.py` with `WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`, `tests/test_property_invariants.py`, `tests/audit`, `tests/backends`, `tests/cli`, `tests/engine`, `tests/operations`, `tests/uac`, `tests/wsl`, `tests/test_catalog_lint.py`, `tests/test_architecture_invariants.py`). Free-threaded `3.15t` is currently Linux-only in CI.
+
+Locally, unit tests run in the Linux **Dev Container** ([`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)) or WSL2/Linux, and read-only Windows integration tests (`tests/test_windows_integration.py`) run on Windows 11 (`WINBEARABLE_RUN_WINDOWS_INTEGRATION=1`). Every commit MUST pass the local `.githooks/pre-commit` gate before committing:
 
 ```bash
 make venv          # Create .venv and install dev dependencies via uv
 make hooks         # Install mandatory .githooks/pre-commit hook
-make pre-commit    # Run format check + ruff lint + mypy + pytest (>=80%) + TruffleHog + Trivy
+make pre-commit    # Run format check + ruff lint + mypy + pytest (>=89%) + TruffleHog + Trivy
 make lint          # ruff check + ruff format --check
 make test          # mypy --strict + pytest-cov (enforces >=80% coverage) + badge generation
 make release-check # lint + test + TruffleHog + Trivy
@@ -447,10 +428,18 @@ make release-check # lint + test + TruffleHog + Trivy
 
 ## Documentation
 
+- [Architecture & Public API Policy](docs/architecture.md)
 - [CLI Arguments, Settings & Environment Variables](docs/cli-and-config.md)
 - [Support & Compatibility Policy](docs/support-policy.md)
-- [Project Roadmap & TODO](TODO.md)
+- [Threat Model](docs/threat-model.md)
+- [UAC Security Review](docs/uac-security-review.md)
+- [Schema Versioning & Migration](docs/schema-versioning.md)
+- [Verification Matrix](docs/verify-matrix.md)
+- [Disposable-VM Acceptance Checklist](docs/vm-acceptance-checklist.md)
 - [Per-Tweak Catalog Reference](docs/tweaks-reference.md)
+- [Dependency Management](docs/dependency-management.md)
+- [Winget Releasing Guide](docs/winget-releasing.md)
+- [Project Roadmap & TODO](TODO.md)
 - [Frequently Asked Questions (FAQ)](docs/faq.md)
 - [Ex-Work PC Ownership & Reset Checklist](docs/ex-work-pc-checklist.md)
 - [Linux Person's Windows Cheat Sheet](docs/linux-to-windows-cheatsheet.md)
@@ -463,7 +452,7 @@ make release-check # lint + test + TruffleHog + Trivy
 Release archives (PyPI wheels/sdists and Winget zips) include GitHub build-provenance attestations:
 
 ```bash
-gh attestation verify winbearable-0.27.0-win-x64.zip --owner hellqvio86
+gh attestation verify winbearable-0.32.1-win-x64.zip --owner hellqvio86
 ```
 
 ---

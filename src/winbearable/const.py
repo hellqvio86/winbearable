@@ -2,9 +2,12 @@
 
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 
-__version__ = "0.30.2"
+__version__ = "0.32.1"
 JSON_SCHEMA_VERSION = "2.0"
 STATE_SCHEMA_VERSION = 2
 PROFILE_SCHEMA_VERSION = 2
@@ -64,17 +67,93 @@ ENV_ADMIN_OVERRIDE = "WINBEARABLE_ADMIN_OVERRIDE"
 ENV_LOG_LEVEL = "WINBEARABLE_LOG_LEVEL"
 ENV_LOG_FORMAT = "WINBEARABLE_LOG_FORMAT"
 ENV_LOG_PATH = "WINBEARABLE_LOG_PATH"
+ENV_NO_UPDATE_CHECK = "WINBEARABLE_NO_UPDATE_CHECK"
+PYPI_RELEASE_URL = "https://pypi.org/pypi/winbearable/json"
+UPDATE_CHECK_TTL_SECONDS = 86400
+UPDATE_CHECK_TIMEOUT_SECONDS = 1.5
 
 TEST_ENV_OVERRIDE_VARS: tuple[str, ...] = (ENV_ADMIN_OVERRIDE, ENV_BUILD_OVERRIDE)
-ELEVATED_ENV_STRIP_VARS: tuple[str, ...] = (
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "PYTHONUSERBASE",
-    "PYTHONSTARTUP",
-    ENV_ADMIN_OVERRIDE,
-    ENV_BUILD_OVERRIDE,
-    ENV_DEBUG,
+
+# Centralized elevated-child environment policy:
+# - "forbidden": stripped before/during UAC elevation and never inherited by elevated children.
+# - "win32_trusted": OS/system-root variables treated as security-sensitive (prefer Win32 APIs).
+# - "safe_inherit": non-security display, CI, or WSL context flags.
+ELEVATED_ENV_POLICY: MappingProxyType[str, str] = MappingProxyType(
+    {
+        # Python runtime injection
+        "PYTHONPATH": "forbidden",
+        "PYTHONHOME": "forbidden",
+        "PYTHONUSERBASE": "forbidden",
+        "PYTHONSTARTUP": "forbidden",
+        # Debug & test overrides
+        ENV_ADMIN_OVERRIDE: "forbidden",
+        ENV_BUILD_OVERRIDE: "forbidden",
+        ENV_DEBUG: "forbidden",
+        # Ambient path / profile / behavior redirection (parent resolves & passes explicitly)
+        ENV_STATE_PATH: "forbidden",
+        ENV_SETTINGS_PATH: "forbidden",
+        ENV_PROFILE_DIR: "forbidden",
+        ENV_CONFIG_PATH: "forbidden",
+        ENV_DEFAULT_PROFILE: "forbidden",
+        ENV_DEFAULT_APPLY: "forbidden",
+        ENV_LOG_PATH: "forbidden",
+        ENV_LOG_LEVEL: "forbidden",
+        ENV_LOG_FORMAT: "forbidden",
+        "WB_CMD_TIMEOUT": "forbidden",
+        "WINBEARABLE_UAC_TIMEOUT_MS": "forbidden",
+        "XDG_CONFIG_HOME": "forbidden",
+        "XDG_STATE_HOME": "forbidden",
+        # Security-sensitive OS roots
+        "PATH": "win32_trusted",
+        "SYSTEMROOT": "win32_trusted",
+        "WINDIR": "win32_trusted",
+        "PROGRAMFILES": "win32_trusted",
+        "PROGRAMFILES(X86)": "win32_trusted",
+        "LOCALAPPDATA": "win32_trusted",
+        "USERPROFILE": "win32_trusted",
+        "TEMP": "win32_trusted",
+        "TMP": "win32_trusted",
+        # Safe display / CI / WSL context flags
+        "NO_COLOR": "safe_inherit",
+        "WINBEARABLE_NO_COLOR": "safe_inherit",
+        "FORCE_COLOR": "safe_inherit",
+        "NO_EMOJI": "safe_inherit",
+        "WINBEARABLE_NO_EMOJI": "safe_inherit",
+        "WINBEARABLE_NO_UPDATE_CHECK": "safe_inherit",
+        "CI": "safe_inherit",
+        "PYTEST_CURRENT_TEST": "safe_inherit",
+        "WSL_DISTRO_NAME": "safe_inherit",
+        "WSL_INTEROP": "safe_inherit",
+        "NUMBER_OF_PROCESSORS": "safe_inherit",
+        "OS": "safe_inherit",
+        "NoDefaultCurrentDirectoryInExePath": "safe_inherit",
+    }
 )
+
+ELEVATED_ENV_STRIP_VARS: tuple[str, ...] = tuple(
+    var for var, policy in ELEVATED_ENV_POLICY.items() if policy == "forbidden"
+)
+
+
+def get_elevated_env_policy_summary(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Return a non-secret summary of elevated-child environment policy and active classified variables."""
+    target_env = env if env is not None else os.environ
+    counts: dict[str, int] = {"forbidden": 0, "win32_trusted": 0, "safe_inherit": 0}
+    for policy in ELEVATED_ENV_POLICY.values():
+        counts[policy] = counts.get(policy, 0) + 1
+    active_forbidden = sorted(
+        k
+        for k in target_env
+        if ELEVATED_ENV_POLICY.get(k) == "forbidden"
+        or k.startswith("PYTHON")
+        or (k.startswith("WINBEARABLE_") and k.endswith("_OVERRIDE"))
+    )
+    active_safe = sorted(k for k in target_env if ELEVATED_ENV_POLICY.get(k) == "safe_inherit")
+    return {
+        "policy_counts": counts,
+        "active_forbidden_vars": active_forbidden,
+        "active_safe_inherit_vars": active_safe,
+    }
 
 
 def are_env_overrides_allowed(*, is_elevated: bool = False) -> bool:

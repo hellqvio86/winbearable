@@ -144,17 +144,25 @@ def test_cli_uses_settings_and_env_precedence(
 def test_default_apply_setting_env_and_dry_run_banner(
     cli_runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """default_apply / WINBEARABLE_APPLY enables apply by default; --dry-run forces dry-run banner."""
+    """wb apply applies by default; --plan/--dry-run render dry-run banner; default_apply controls rollback/recover."""
     monkeypatch.delenv(ENV_DEFAULT_APPLY, raising=False)
     monkeypatch.delenv(ENV_SETTINGS_PATH, raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    # Default dry-run renders prominent DRY-RUN MODE banner
-    rc_dry, out_dry, _ = cli_runner(["apply", "--profile", "user-only", "--only", "explorer.show_file_extensions"])
+    # --plan and --dry-run render prominent DRY-RUN MODE banner without mutating
+    rc_plan, out_plan, _ = cli_runner(
+        ["apply", "--profile", "user-only", "--only", "explorer.show_file_extensions", "--plan"]
+    )
+    assert rc_plan == 0
+    assert "DRY-RUN MODE — NO CHANGES WERE WRITTEN TO YOUR SYSTEM" in out_plan
+    assert "default_apply = true" in out_plan
+    assert "WINBEARABLE_APPLY=1" in out_plan
+
+    rc_dry, out_dry, _ = cli_runner(
+        ["apply", "--profile", "user-only", "--only", "explorer.show_file_extensions", "--dry-run", "--json"]
+    )
     assert rc_dry == 0
-    assert "DRY-RUN MODE — NO CHANGES WERE WRITTEN TO YOUR SYSTEM" in out_dry
-    assert "default_apply = true" in out_dry
-    assert "WINBEARABLE_APPLY=1" in out_dry
+    assert json.loads(out_dry)["dry_run"] is True
 
     # Invalid default_apply type in settings.toml fails validation
     bad_apply = tmp_path / "bad_apply.toml"

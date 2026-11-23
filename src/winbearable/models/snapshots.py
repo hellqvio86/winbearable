@@ -12,6 +12,19 @@ from winbearable.models.enums import (
     encode_registry_data,
 )
 
+from .journal import (
+    VALID_JOURNAL_OPERATION_TYPES as VALID_JOURNAL_OPERATION_TYPES,
+)
+from .journal import (
+    VALID_JOURNAL_OUTCOMES as VALID_JOURNAL_OUTCOMES,
+)
+from .journal import (
+    FailureOutcomeDict as FailureOutcomeDict,
+)
+from .journal import (
+    OperationJournalEntry as OperationJournalEntry,
+)
+
 
 @dataclass(frozen=True)
 class RegistryValueSnapshot:
@@ -221,6 +234,7 @@ class AuditpolSnapshot:
     previous_setting: str | None
     backup_csv_path: str | None = None
     post_setting: str | None = None
+    backup_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -228,6 +242,7 @@ class AuditpolSnapshot:
             "previous_setting": self.previous_setting,
             "backup_csv_path": self.backup_csv_path,
             "post_setting": self.post_setting,
+            "backup_sha256": self.backup_sha256,
         }
 
     @classmethod
@@ -235,11 +250,13 @@ class AuditpolSnapshot:
         prev = payload.get("previous_setting")
         bak = payload.get("backup_csv_path")
         post = payload.get("post_setting")
+        sha = payload.get("backup_sha256")
         return cls(
             subcategory_guid=str(payload["subcategory_guid"]),
             previous_setting=str(prev) if prev is not None else None,
             backup_csv_path=str(bak) if bak is not None else None,
             post_setting=str(post) if post is not None else None,
+            backup_sha256=str(sha) if sha is not None else None,
         )
 
 
@@ -285,6 +302,7 @@ class FirewallGroupSnapshot:
     previous_enabled: bool | None
     export_wfw_path: str | None = None
     post_enabled: bool | None = None
+    backup_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -292,6 +310,7 @@ class FirewallGroupSnapshot:
             "previous_enabled": self.previous_enabled,
             "export_wfw_path": self.export_wfw_path,
             "post_enabled": self.post_enabled,
+            "backup_sha256": self.backup_sha256,
         }
 
     @classmethod
@@ -299,11 +318,13 @@ class FirewallGroupSnapshot:
         prev = payload.get("previous_enabled")
         wfw = payload.get("export_wfw_path")
         post = payload.get("post_enabled")
+        sha = payload.get("backup_sha256")
         return cls(
             group_resource_id=str(payload["group_resource_id"]),
             previous_enabled=bool(prev) if prev is not None else None,
             export_wfw_path=str(wfw) if wfw is not None else None,
             post_enabled=bool(post) if post is not None else None,
+            backup_sha256=str(sha) if sha is not None else None,
         )
 
 
@@ -385,19 +406,23 @@ class IcaclsSnapshot:
 
     path_template: str
     backup_acl_path: str | None = None
+    backup_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path_template": self.path_template,
             "backup_acl_path": self.backup_acl_path,
+            "backup_sha256": self.backup_sha256,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> IcaclsSnapshot:
         bak = payload.get("backup_acl_path")
+        sha = payload.get("backup_sha256")
         return cls(
             path_template=str(payload["path_template"]),
             backup_acl_path=str(bak) if bak is not None else None,
+            backup_sha256=str(sha) if sha is not None else None,
         )
 
 
@@ -521,68 +546,4 @@ class WslDistroSnapshot:
             previous_content=str(raw_prev) if raw_prev is not None else "",
             distro_guid=str(raw_guid) if raw_guid is not None else None,
             post_sha256=str(raw_post) if raw_post is not None else None,
-        )
-
-
-@dataclass(frozen=True)
-class OperationJournalEntry:
-    """Structured per-operation journal record for observability, verification, and conflict-aware rollback."""
-
-    target_id: str
-    operation_type: str
-    tweak_id: str
-    action: str
-    outcome: str = "planned"
-    pre_fingerprint: str | None = None
-    post_fingerprint: str | None = None
-    started_at: str | None = None
-    ended_at: str | None = None
-    verification_status: str | None = None
-    error_category: str | None = None
-    error_message: str | None = None
-    rollback_outcome: str | None = None
-    conflict_decision: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize journal entry to a JSON-compatible dictionary."""
-        return {
-            "target_id": self.target_id,
-            "operation_type": self.operation_type,
-            "tweak_id": self.tweak_id,
-            "action": self.action,
-            "outcome": self.outcome,
-            "pre_fingerprint": self.pre_fingerprint,
-            "post_fingerprint": self.post_fingerprint,
-            "started_at": self.started_at,
-            "ended_at": self.ended_at,
-            "verification_status": self.verification_status,
-            "error_category": self.error_category,
-            "error_message": self.error_message,
-            "rollback_outcome": self.rollback_outcome,
-            "conflict_decision": self.conflict_decision,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> OperationJournalEntry:
-        """Deserialize journal entry from dictionary."""
-
-        def _opt_str(key: str) -> str | None:
-            val = payload.get(key)
-            return str(val) if val is not None else None
-
-        return cls(
-            target_id=str(payload["target_id"]),
-            operation_type=str(payload["operation_type"]),
-            tweak_id=str(payload["tweak_id"]),
-            action=str(payload["action"]),
-            outcome=str(payload.get("outcome", "planned")),
-            pre_fingerprint=_opt_str("pre_fingerprint"),
-            post_fingerprint=_opt_str("post_fingerprint"),
-            started_at=_opt_str("started_at"),
-            ended_at=_opt_str("ended_at"),
-            verification_status=_opt_str("verification_status"),
-            error_category=_opt_str("error_category"),
-            error_message=_opt_str("error_message"),
-            rollback_outcome=_opt_str("rollback_outcome"),
-            conflict_decision=_opt_str("conflict_decision"),
         )

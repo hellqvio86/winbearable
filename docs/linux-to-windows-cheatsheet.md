@@ -21,3 +21,5 @@ A quick translation table for Linux engineers forced onto Windows + WSL2, focusi
 | `sudo <cmd>` | `wb ... --elevate` (UAC `ShellExecuteExW` `runas`) | Triggers a native Windows UAC prompt |
 | `chmod 600` / `chown` | `icacls.exe <path> /inheritance:r /grant:r "%USERNAME%:F"` | Restricts ACLs to the current user (used for `~/.ssh`) |
 | `rsync -avP` | `robocopy.exe <src> <dst> /MIR /Z /MT:8` | Built-in multithreaded directory sync (note: exit codes `0-7` indicate success) |
+| `reboot` / `shutdown -r now` | `shutdown.exe /r /t 0` | Reboot immediately (`/fw` reboots into UEFI/BIOS setup; `/f` force-closes apps) |
+| `poweroff` / `shutdown -h now` | `shutdown.exe /s /t 0` | Shut down immediately (`/f` force-closes apps; `shutdown.exe /a` aborts a pending timer) |

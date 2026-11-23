@@ -34,8 +34,8 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
 1. **100% Native Python — Zero PowerShell Wrappers (with sole Hyper-V firewall exception):**
    - Never invoke `powershell.exe` or `pwsh.exe` anywhere in `src/winbearable/` except the sole, narrowly scoped Hyper-V firewall module (`src/winbearable/hyperv_firewall.py`, which uses `ConvertTo-Json -Compress` and `shell=False`).
    - Everywhere else, use `winreg` via `RegistryBackend`, `ctypes` for Win32 checks, and direct native executables (`wsl.exe`, `sc.exe`, `schtasks.exe`, `dism.exe`, `reg.exe`, `taskkill.exe`) with `shell=False` argument lists.
-2. **Dry-Run by Default:**
-   - `wb plan`, `wb apply` (without `--apply`), `wb rollback` (without `--apply`), and `wb wsl apply/install/export/import/baseline` (without `--apply`) must never mutate registry keys, files, processes, or services.
+2. **Dry-Run / Preview Safety:**
+   - `wb plan`, `wb apply --plan` / `wb apply --dry-run`, `wb rollback` (without `--apply`), `wb recover` (without `--apply`), and `wb wsl apply/install/export/import/baseline` (without `--apply`) must never mutate registry keys, files, processes, or services. `wb apply` applies by default unless `--plan` or `--dry-run` is passed.
 3. **High-Risk Guardrail:**
    - Any tweak with `RiskLevel.HIGH` (such as `hardening.enable_vbs_hvci`) must raise `HighRiskConfirmationError` when `dry_run=False` unless `--i-know-what-im-doing` (`allow_high_risk=True`) is passed.
 4. **Policy-Conflict Honesty (`BLOCKED_BY_POLICY`):**
@@ -47,7 +47,7 @@ This document defines the architecture, invariants, and **mandatory pre-commit w
 7. **Locale Independence:**
    - Windows may be Swedish, German, Japanese, etc. Prefer, in order: registry values, Win32 APIs via `ctypes` (`GetExtendedTcpTable`, `NetLocalGroupGetMembers`, `NetShareEnum`, `LookupAccountSid`), exit codes, GUID/SID/resource-ID arguments (`auditpol /subcategory:{GUID}`, firewall rule groups by `@FirewallAPI.dll,-NNNNN`), and machine formats (`/XML`, `/format:csv`, `dism /English`). Never parse localized human text. Any parser of command output gets a test with a non-English fixture.
 8. **No Runtime Network:**
-   - No runtime network except through `winget.exe` and `wsl.exe` for IDs/URLs declared in the catalog (pinned version or hash where possible). No `urllib`/`requests` in `src/winbearable`.
+   - No runtime network except through `winget.exe` and `wsl.exe` for IDs/URLs declared in the catalog (pinned version or hash where possible), and the opt-outable, non-blocking, 24h-cached PyPI release version check in `src/winbearable/update_check.py`. No other `urllib`/`requests` in `src/winbearable`.
 9. **Elevation & Restart Behaviour:**
    - Elevation only through the existing explicit `--elevate`/prompt flow in `cli.py`. No silent elevation, no restarts: reboot/sign-out/Explorer restart are reported (`requires_reboot`, `requires_explorer_restart`) and never performed automatically.
 10. **Never Weaken Core Protections:**
@@ -105,6 +105,7 @@ make release-check # lint + test + TruffleHog + Trivy
 ## Pythonic Style (Write Python as a Pythonista)
 
 - **Imports at the top of the file:** Always place all `import` / `from ... import ...` statements at the top of the module (after the module docstring and `from __future__ import annotations`). Never add inline/local imports inside functions or methods unless strictly required for an optional dependency or to break an unavoidable circular import.
+- **Module-level globals and constants in `UPPER_SNAKE_CASE`:** Follow PEP 8 naming for module-level constants and shared module-level singletons (such as `_LOGGER = get_logger(__name__)`), using `UPPER_SNAKE_CASE` (with a leading underscore for module-private globals).
 - **Idiomatic, readable, "pretty" Python:** Prefer clean dataclasses, comprehensions, context managers, `pathlib.Path`, early returns, shallow nesting, and small single-purpose helpers over verbose boilerplate or deep `if/else` chains.
 - **Reuse fixtures & helpers:** Whenever setup or cleanup repeats (in tests or production code), extract shared helpers or `pytest` fixtures in `tests/conftest.py` instead of duplicating setup inline.
 
@@ -128,4 +129,4 @@ make release-check # lint + test + TruffleHog + Trivy
 - **One item = one PR:** Keep each review/TODO item in its own focused PR.
 - **Regression test first:** Treat each item's acceptance criteria as a regression test — add the failing test first, verify it fails, then implement the fix.
 - **`NEEDS-WINDOWS` items require real-host evidence:** Never mark or merge a `NEEDS-WINDOWS` item on unit tests alone; verify on real Windows 11 and record the command + observed output in `docs/verify-matrix.md`.
-- **Release-time version bumps only:** Do not bump `__version__` in `src/winbearable/const.py` per fix/commit; bump only in dedicated release PRs.
+- **Release-time version bumps & mandatory CHANGELOG:** Do not bump `__version__` in `src/winbearable/const.py` per fix/commit; bump only in dedicated release PRs, and **always** add a corresponding `## [<version>] - YYYY-MM-DD` entry in `CHANGELOG.md` whenever `__version__` is bumped (enforced by `test_security_and_version_docs_consistent`).
