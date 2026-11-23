@@ -115,6 +115,15 @@ pip install --upgrade winbearable
 wb --version
 ```
 
+> **Windows Smart App Control (`os error 4551`):** If Windows Smart App Control blocks `uv`'s unsigned managed Python (`python-build-standalone`) with `An Application Control policy has blocked this file. (os error 4551)`, install the officially signed Python 3.15 release and tell `uv` to use it:
+>
+> ```powershell
+> winget install --exact --id Python.Python.3.15 --scope user --accept-source-agreements --accept-package-agreements
+> uv tool install --force --no-managed-python --python 3.15 winbearable
+> ```
+>
+> Subsequent upgrades then work with `uv tool install --upgrade --no-managed-python --python 3.15 winbearable`.
+
 ---
 
 ## 🎨 CLI in Action

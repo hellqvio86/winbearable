@@ -47,6 +47,11 @@ Instead, the recommended approach on locked-down PCs is **user-directory Python 
 winget install --exact --id Astral-sh.uv --scope user --accept-source-agreements --accept-package-agreements
 uv tool install winbearable
 ```
+If Windows **Smart App Control** blocks `uv`'s unsigned managed Python (`python-build-standalone`) with `os error 4551` (`An Application Control policy has blocked this file`), install the officially signed Python 3.15 release and pass `--no-managed-python`:
+```powershell
+winget install --exact --id Python.Python.3.15 --scope user --accept-source-agreements --accept-package-agreements
+uv tool install --force --no-managed-python --python 3.15 winbearable
+```
 If you own the machine and still want a single-file `.exe`, you can build one with PyInstaller:
 ```cmd
 uv run --with pyinstaller pyinstaller --onefile --name wb src/winbearable/__main__.py

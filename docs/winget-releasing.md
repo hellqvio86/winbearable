@@ -8,7 +8,7 @@
 - **No code signing required**: `microsoft/winget-pkgs` accepts unsigned binaries from GitHub Releases as long as the SHA-256 matches and the automated malware scan passes.
 - **User caveats without a signature**:
   - Personal Windows 11 PCs may show a SmartScreen prompt on first run until reputation builds.
-  - Locked-down corporate PCs with AppLocker/WDAC often block unsigned `.exe` binaries in user-writable directories. For those machines, `uv tool install winbearable` (using PyPI) remains the recommended installation method.
+  - Locked-down corporate PCs with AppLocker/WDAC or personal PCs with **Windows Smart App Control** enabled often block unsigned `.exe` binaries in user-writable directories (`os error 4551`). For those machines, `uv tool install --no-managed-python --python 3.15 winbearable` (using PyPI with an officially signed `Python.Python.3.15` installation) remains the recommended installation method.
 
 ## Build Locally on Windows
 
