@@ -1,6 +1,6 @@
-# winbearable 0.32.1 — Engineering Review Ledger
+# winbearable 0.32.2 — Engineering Review Ledger
 
-> **Target:** `winbearable` **0.32.1** (remediating `0.32.0` re-review)
+> **Target:** `winbearable` **0.32.2** (paranoid WSL convenient default)
 > **Runtime:** CPython `>=3.15` (`3.15` / `3.15t`)
 > **Status:** All re-review items and prior backlog items are **completed and verified** (`[x]`).
 

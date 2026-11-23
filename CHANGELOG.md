@@ -2,6 +2,12 @@
 
 All notable changes to `winbearable` are documented in this file.
 
+## [0.32.2] - 2026-11-23
+
+### Profiles & WSL
+
+- **Paranoid Profile WSL Default (`profiles/paranoid.toml`):** Switched the `paranoid` profile's `[wsl]` `mode` default from `strict` to `convenient` (`[interop] enabled=true`, `[automount] enabled=true`) so VS Code Remote-WSL continues working out of the box, while keeping `strict` mode available as an explicit opt-in.
+
 ## [0.32.1] - 2026-11-22
 
 ### Security, Architecture & Release Hardening

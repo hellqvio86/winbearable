@@ -318,7 +318,7 @@ Built-in profiles form a strict **aggressiveness & privilege ladder**:
 | :--- | :--- | :--- | :--- | :--- |
 | **`user-only`** ([`profiles/user-only.toml`](profiles/user-only.toml)) | **Mild** (safe daily user tweaks) | **No** (`HKCU` / user scope) | None | Installs Windows-side VS Code + `ms-vscode-remote.remote-wsl`, kills OneDrive tray autorun & Explorer pin, disables Bing web search, Search Highlights, taskbar search box, Start menu ads/recommendations, Widgets/Chat/Task View, restores classic Windows 11 right-click menu, shows file extensions/dotfiles, disables user Copilot, Advertising ID, and WSH. |
 | **`owner`** ([`profiles/owner.toml`](profiles/owner.toml)) | **Moderate–Strong** (recommended for personal/unlocked PCs) | **Yes** (`extends = "user-only"`) | None | Everything in `user-only`, plus machine-wide OneDrive sync block (`DisableFileSyncNGSC=1`), disables Windows Recall & Copilot machine-wide, blocks silent consumer bloatware, disables telemetry & CEIP scheduled tasks, disables SMBv1/LLMNR/mDNS/WPAD/AutoRun, enforces Windows Firewall + Defender Cloud/PUA + Guest/Blank-Password lockdown + Browser privacy baseline, and enables PowerShell ScriptBlock & 4688 command-line auditing. |
-| **`paranoid`** ([`profiles/paranoid.toml`](profiles/paranoid.toml)) | **Maximum (most aggressive)** | **Yes** (`extends = "owner"`) | `--i-know-what-im-doing` & `--allow-irreversible` | Everything in `owner`, plus **irreversibly uninstalls** the OneDrive client, disables the `WSearch` indexer service, enables LSA `RunAsPPL` protection (reboot), enforces VBS/HVCI (reboot + compatible drivers), and switches WSL2 to `strict` isolation (`[interop] enabled=false`, `[automount] enabled=false`). |
+| **`paranoid`** ([`profiles/paranoid.toml`](profiles/paranoid.toml)) | **Maximum (most aggressive)** | **Yes** (`extends = "owner"`) | `--i-know-what-im-doing` & `--allow-irreversible` | Everything in `owner`, plus **irreversibly uninstalls** the OneDrive client, disables the `WSearch` indexer service, enables LSA `RunAsPPL` protection (reboot), and enforces VBS/HVCI (reboot + compatible drivers), while keeping WSL2 in `convenient` mode (`[interop] enabled=true`, `[automount] enabled=true`) so VS Code Remote-WSL keeps working. |
 
 To preview and apply the **most aggressive (`paranoid`)** profile (from an elevated Administrator shell, or with `--elevate` to trigger a native UAC prompt):
 
@@ -339,7 +339,7 @@ When running inside **WSL2**, you can audit your live Windows host and see which
    wb plan --profile owner
    ```
 
-   When WSL2→Windows interop is enabled (`[interop] enabled = true`, which `user-only` and `owner` preserve), `wb` automatically queries the Windows host registry read-only via `/mnt/c/Windows/System32/reg.exe` so `wb doctor`, `wb status`, and `wb plan` reflect live Windows posture. Applying or rolling back (`--apply`) is still intentionally blocked from Linux and must be run from Windows.
+   When WSL2→Windows interop is enabled (`[interop] enabled = true`, which `user-only`, `owner`, and `paranoid` preserve), `wb` automatically queries the Windows host registry read-only via `/mnt/c/Windows/System32/reg.exe` so `wb doctor`, `wb status`, and `wb plan` reflect live Windows posture. Applying or rolling back (`--apply`) is still intentionally blocked from Linux and must be run from Windows.
 
    `wb doctor` also audits the **Linux side** directly from Linux (`/etc/wsl.conf`, `systemd` status, `/etc/sysctl.d/99-winbearable-wsl.conf` and live `/proc/sys` kernel parameters, and `git` credential helper isolation) — even when Windows interop is disabled.
 
@@ -350,7 +350,7 @@ When running inside **WSL2**, you can audit your live Windows host and see which
    wb.exe status --profile owner
    ```
 
-> **Note for `paranoid` users:** The `paranoid` profile sets `[interop] enabled = false` in `.wslconfig` to block Linux→Windows binary execution. After applying `paranoid`, `wb doctor` inside WSL2 still audits the Linux side, while Windows-host checks (`wb doctor` and `wb status --profile paranoid`) should be run from **Windows Terminal** (PowerShell / Command Prompt).
+> **Note for `--wsl-mode strict` users:** Opting into `strict` WSL2 mode (`mode = "strict"`) sets `[interop] enabled = false` and `[automount] enabled = false` in `/etc/wsl.conf` to block Linux→Windows binary execution (which also breaks VS Code Remote-WSL). Under `strict` mode, `wb doctor` inside WSL2 still audits the Linux side, while Windows-host checks (`wb doctor` and `wb status`) should be run from **Windows Terminal** (PowerShell / Command Prompt).
 
 ---
 
@@ -452,7 +452,7 @@ make release-check # lint + test + TruffleHog + Trivy
 Release archives (PyPI wheels/sdists and Winget zips) include GitHub build-provenance attestations:
 
 ```bash
-gh attestation verify winbearable-0.32.1-win-x64.zip --owner hellqvio86
+gh attestation verify winbearable-0.32.2-win-x64.zip --owner hellqvio86
 ```
 
 ---

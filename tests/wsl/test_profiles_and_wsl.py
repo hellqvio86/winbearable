@@ -46,7 +46,7 @@ def test_builtin_profile_inheritance_chain() -> None:
     assert paranoid.tweaks["onedrive.disable_policy"]
     assert paranoid.tweaks["onedrive.uninstall"]
     assert paranoid.tweaks["hardening.enable_vbs_hvci"]
-    assert paranoid.wsl.mode == "strict"
+    assert paranoid.wsl.mode == "convenient"
 
 
 def test_invalid_profile_validation_errors(tmp_path: Path) -> None:
