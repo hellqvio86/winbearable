@@ -452,7 +452,7 @@ make release-check # lint + test + TruffleHog + Trivy
 Release archives (PyPI wheels/sdists and Winget zips) include GitHub build-provenance attestations:
 
 ```bash
-gh attestation verify winbearable-0.32.1-win-x64.zip --owner hellqvio86
+gh attestation verify winbearable-0.32.2-win-x64.zip --owner hellqvio86
 ```
 
 ---
