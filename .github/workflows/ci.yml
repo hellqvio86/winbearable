@@ -485,7 +485,20 @@ jobs:
             $pfxBytes,
             $env:WIN_SIGNING_CERT_PASSWORD
           )
+          $publicCert = $null
+          $rootStore = $null
+          $addedToRoot = $false
           try {
+            if ($cert.Subject -eq $cert.Issuer) {
+              # Trust self-signed cert in LocalMachine\Root (no UI prompt when elevated) so WinVerifyTrust returns Valid.
+              $publicCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cert.RawData)
+              $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new("Root", "LocalMachine")
+              $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              if (-not ($rootStore.Certificates | Where-Object { $_.Thumbprint -eq $publicCert.Thumbprint })) {
+                $rootStore.Add($publicCert)
+                $addedToRoot = $true
+              }
+            }
             $signParams = @{
               FilePath      = "dist\wb\wb.exe"
               Certificate   = $cert
@@ -510,6 +523,11 @@ jobs:
             Write-Error "Authenticode signing failed: $($_.Exception.Message)"
             exit 1
           } finally {
+            if ($addedToRoot -and $rootStore -and $publicCert) {
+              $rootStore.Remove($publicCert)
+            }
+            if ($rootStore) { $rootStore.Dispose() }
+            if ($publicCert) { $publicCert.Dispose() }
             $cert.Dispose()
           }
 
