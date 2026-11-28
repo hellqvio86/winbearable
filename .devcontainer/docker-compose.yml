@@ -8,7 +8,7 @@ services:
     command: sleep infinity
 
   trufflehog:
-    image: trufflesecurity/trufflehog:3.99.9
+    image: trufflesecurity/trufflehog:3.100.1
     profiles: ["security"]
     volumes:
       - ..:/src:ro
